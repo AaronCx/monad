@@ -1,0 +1,10 @@
+{
+  "name": "@aaroncx/monadd",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "bun build --compile --outfile dist/monadd src/main.ts"
+  }
+}

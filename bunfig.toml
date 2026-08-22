@@ -1,0 +1,5 @@
+# Bun configuration. Workspaces and scripts are defined in package.json;
+# this file exists so install behavior is explicit and versioned.
+
+[install]
+exact = false
