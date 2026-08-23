@@ -6,5 +6,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "bun build --compile --outfile dist/monadd src/main.ts"
+  },
+  "dependencies": {
+    "@aaroncx/backends": "workspace:*",
+    "@aaroncx/engine": "workspace:*",
+    "@aaroncx/protocol": "workspace:*",
+    "@agentclientprotocol/sdk": "^1.4.0"
   }
 }
