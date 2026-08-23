@@ -17,22 +17,20 @@ export async function checkBuild(config: BuildCheckConfig): Promise<CheckResult>
   const timeoutMs = (config.timeout ?? 120) * 1000;
   const cwd = (config as BuildCheckConfig & { cwd?: string }).cwd ?? process.cwd();
 
-  let command: string;
-  if (config.command) {
-    command = config.command;
-  } else if (existsSync(join(cwd, "package.json"))) {
-    command = "bun run build";
-  } else if (existsSync(join(cwd, "Package.swift"))) {
-    command = "swift build";
-  } else if (existsSync(join(cwd, "pyproject.toml"))) {
-    return {
-      type: "build",
-      status: "pass",
-      title: "Build Verifier",
-      summary: "Build check skipped: Python project with no standard build step",
-      details: { skipped: true, reason: "pyproject.toml has no standard build command" },
-    };
-  } else {
+  // Detection first, custom command second: a directory with nothing buildable
+  // skips even when a command is configured (ported LastGate behavior).
+  const hasPackageJson = existsSync(join(cwd, "package.json"));
+  const hasPackageSwift = existsSync(join(cwd, "Package.swift"));
+  if (!hasPackageJson && !hasPackageSwift) {
+    if (existsSync(join(cwd, "pyproject.toml"))) {
+      return {
+        type: "build",
+        status: "pass",
+        title: "Build Verifier",
+        summary: "Build check skipped: Python project with no standard build step",
+        details: { skipped: true, reason: "pyproject.toml has no standard build command" },
+      };
+    }
     return {
       type: "build",
       status: "pass",
@@ -41,6 +39,8 @@ export async function checkBuild(config: BuildCheckConfig): Promise<CheckResult>
       details: { command: config.command ?? "bun run build", skipped: true, reason: "no package.json" },
     };
   }
+
+  const command = config.command ?? (hasPackageJson ? "bun run build" : "swift build");
 
   const parts = command.split(/\s+/);
   const [cmd, ...args] = parts;
