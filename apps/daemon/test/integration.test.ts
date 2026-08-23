@@ -32,10 +32,14 @@ let port = 0;
 let token = "";
 let daemon: Subprocess<"ignore", "pipe", "pipe"> | undefined;
 
-async function waitFor(condition: () => boolean, label: string, timeoutMs = 15_000): Promise<void> {
+async function waitFor(
+  condition: () => boolean | Promise<boolean>,
+  label: string,
+  timeoutMs = 15_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (condition()) {
+    if (await condition()) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -48,6 +52,8 @@ interface TestClient {
   updates: SessionNotification[];
   errors: Array<Record<string, unknown>>;
   permissionAnswer?: RequestPermissionResponse;
+  /** Never answer: the request stays open until the connection dies. */
+  holdPermissions?: boolean;
   permissionRequests: unknown[];
 }
 
@@ -68,6 +74,9 @@ function makeClient(name: string, permissionAnswer?: RequestPermissionResponse):
     })
     .onRequest(methods.client.session.requestPermission, (ctx) => {
       permissionRequests.push(ctx.params);
+      if (holder.holdPermissions) {
+        return new Promise<RequestPermissionResponse>(() => {});
+      }
       if (!holder.permissionAnswer) {
         throw new Error(`client ${name} has no permission answer`);
       }
@@ -294,6 +303,69 @@ describe("monadd over the HTTP transport", () => {
       expect(list.sessions[0]?.sessionId).toBe(sessionId);
       expect(list.sessions[0]?.cwd).toBe(home);
       expect(list.sessions[0]?._meta?.[SESSION_STATUS_META_KEY]).toBe("idle");
+    },
+    30_000,
+  );
+
+  test(
+    "a client dying mid-permission holds the request for the next attacher",
+    async () => {
+      // The acceptance-run regression: close every answering client while
+      // the agent is asking, then confirm ls shows waiting_for_permission
+      // and a fresh attach is immediately asked and can finish the turn.
+      const dying = makeClient("dying");
+      dying.holdPermissions = true;
+      await initialize(dying);
+      await dying.connection.agent.request(methods.agent.session.load, {
+        sessionId,
+        cwd: home,
+        mcpServers: [],
+      });
+      const inFlight = dying.connection.agent
+        .request(methods.agent.session.prompt, {
+          sessionId,
+          prompt: [{ type: "text", text: "perm again" }],
+        })
+        .catch(() => undefined);
+      await waitFor(() => dying.permissionRequests.length === 1, "permission reaches the dying client");
+      dying.connection.close();
+      await inFlight;
+
+      const headers = { Authorization: `Bearer ${token}` };
+      await waitFor(async () => {
+        const body = (await (
+          await fetch(`http://127.0.0.1:${port}/v1/sessions`, { headers })
+        ).json()) as { sessions: Array<{ status: string }> };
+        return body.sessions[0]?.status === "waiting_for_permission";
+      }, "session to report waiting_for_permission");
+
+      const rescuer = makeClient("rescuer", {
+        outcome: { outcome: "selected", optionId: "allow_once" },
+      });
+      await initialize(rescuer);
+      await rescuer.connection.agent.request(methods.agent.session.load, {
+        sessionId,
+        cwd: home,
+        mcpServers: [],
+      });
+      await waitFor(() => rescuer.permissionRequests.length === 1, "pending request re-delivered on attach");
+      await waitFor(async () => {
+        const body = (await (
+          await fetch(`http://127.0.0.1:${port}/v1/sessions`, { headers })
+        ).json()) as { sessions: Array<{ status: string }> };
+        return body.sessions[0]?.status === "idle";
+      }, "turn to finish after the rescuer answers");
+      await waitFor(
+        () =>
+          rescuer.updates.some(
+            (u) =>
+              u.update.sessionUpdate === "agent_message_chunk" &&
+              u.update.content.type === "text" &&
+              u.update.content.text === "permission outcome: allow",
+          ),
+        "post-permission outcome reaches the rescuer",
+      );
+      rescuer.connection.close();
     },
     30_000,
   );

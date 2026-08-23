@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { daemonInfoPath, monadStateDir } from "@aaroncx/engine";
@@ -131,13 +132,22 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<DaemonHandle> {
 
   const command = resolveDaemonCommand();
   const logFd = openSync(join(stateDir, "monadd.log"), "a");
-  const proc = Bun.spawn([...command, "--port", String(port), "--foreground"], {
-    stdin: "ignore",
-    stdout: logFd,
-    stderr: logFd,
+  // detached puts monadd (and the vendor agents it spawns) in its own
+  // process group, so closing the terminal or tmux window that started it
+  // cannot HUP the daemon tree. monadd ignoring SIGHUP is not enough: the
+  // vendor node child dies on SIGHUP by default, which killed an in-flight
+  // turn during acceptance testing.
+  const [bin, ...args] = command;
+  const proc = spawn(bin as string, [...args, "--port", String(port), "--foreground"], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
     env: process.env,
   });
   proc.unref();
+  let exited: number | null = null;
+  proc.on("exit", (code) => {
+    exited = code ?? -1;
+  });
 
   const deadline = Date.now() + START_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -149,9 +159,9 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<DaemonHandle> {
         return { url, token, info };
       }
     }
-    if (proc.exitCode !== null) {
+    if (exited !== null) {
       throw new Error(
-        `monadd exited with code ${proc.exitCode} during startup; see ${join(stateDir, "monadd.log")}`,
+        `monadd exited with code ${exited} during startup; see ${join(stateDir, "monadd.log")}`,
       );
     }
     await sleep(100);
