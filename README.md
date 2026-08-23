@@ -15,8 +15,9 @@ and everything past M1 on the roadmap does not exist. See `docs/architecture.md`
 ## How it works
 
 - The daemon (`monadd`) speaks the [Agent Client Protocol](https://agentclientprotocol.com) on
-  both sides. Toward vendor agents it is an ACP client, spawning `claude-agent-acp`, `codex-acp`,
-  or Gemini CLI per session. Toward its own clients it is an ACP agent over HTTP.
+  both sides. Toward vendor agents it is an ACP client, spawning one agent process per session
+  (`claude-agent-acp` today; `codex-acp` and Gemini CLI are M4). Toward its own clients it is
+  an ACP agent over HTTP.
 - Sessions are an append-only event log in SQLite. Attaching is a replay plus a live subscription.
 - Vendor auth stays inside the vendor binaries. monad never stores or forwards an API token for
   subscription-backed agents. API keys and self-hosted models go through a native loop (M2).
