@@ -21,8 +21,14 @@ import {
 } from "./policy.ts";
 import type { SessionStore } from "./store.ts";
 
-/** JSON-RPC error code returned when a prompt is already in flight. */
-export const PROMPT_IN_FLIGHT_ERROR_CODE = -32000;
+/**
+ * JSON-RPC error code returned when a prompt is already in flight.
+ *
+ * Deliberately NOT -32000: the SDK's RequestError.authRequired() uses -32000,
+ * and clients must be able to tell "log in to the vendor" apart from "wait
+ * for the current turn" by code alone.
+ */
+export const PROMPT_IN_FLIGHT_ERROR_CODE = -32001;
 
 /**
  * A monad client attached to a session: it receives every appended event
