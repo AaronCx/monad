@@ -4,12 +4,14 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./transport": "./src/transport/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aaroncx/protocol": "workspace:*",
     "@agentclientprotocol/sdk": "^1.4.0",
     "zod": "^4"
   }

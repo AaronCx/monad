@@ -27,6 +27,7 @@
       "name": "@aaroncx/engine",
       "version": "0.0.0",
       "dependencies": {
+        "@aaroncx/protocol": "workspace:*",
         "@agentclientprotocol/sdk": "^1.4.0",
         "zod": "^4",
       },
