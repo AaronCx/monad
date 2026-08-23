@@ -29,6 +29,13 @@ export {
 /** The agent connector shape AcpServer accepts (acp.agent(...) satisfies it). */
 export type AcpAgentConnector = NonNullable<AcpServerOptions["agent"]>;
 
+/**
+ * Builds a fresh agent connector per accepted connection. The daemon uses
+ * this so each client connection gets its own handler closure (subscriber
+ * bookkeeping per connection) instead of one shared app instance.
+ */
+export type AcpAgentFactory = () => AcpAgentConnector;
+
 export interface CreateAcpHttpServerOptions {
   /** Bearer token every request must carry. See packages/engine/src/auth.ts. */
   authToken: string;
@@ -61,11 +68,15 @@ function sendJson(res: ServerResponse, status: number, body: unknown, headers: R
  * front of the handler.
  */
 export function createAcpHttpServer(
-  agent: AcpAgentConnector,
+  agent: AcpAgentConnector | AcpAgentFactory,
   options: CreateAcpHttpServerOptions,
 ): AcpHttpServer {
   const acpPath = options.path ?? "/acp";
-  const acpServer = new AcpServer({ agent });
+  // A plain function is a per-connection factory; an object is one shared
+  // connector (an AgentApp instance is an object with a connect method).
+  const acpServer = new AcpServer(
+    typeof agent === "function" ? { createAgent: agent } : { agent },
+  );
   const handleAcp = createNodeHttpHandler(
     acpServer,
     options.maxRequestBodyBytes === undefined

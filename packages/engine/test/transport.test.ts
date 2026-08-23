@@ -115,6 +115,35 @@ describe("createAcpHttpServer auth middleware", () => {
   });
 });
 
+describe("createAcpHttpServer with a per-connection factory", () => {
+  test("builds a fresh agent per accepted connection", async () => {
+    let built = 0;
+    const server = createAcpHttpServer(
+      () => {
+        built += 1;
+        return makeTestAgent();
+      },
+      { authToken: TOKEN },
+    );
+    servers.push(server);
+    const { port, host } = await server.listen(0);
+    const url = `http://${host}:${port}`;
+
+    for (let i = 0; i < 2; i += 1) {
+      const response = await fetch(`${url}/acp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: initializeBody(),
+      });
+      expect(response.status).toBe(200);
+    }
+    expect(built).toBe(2);
+  });
+});
+
 describe("createHttpStream against the wrapper", () => {
   test("initialize round trips through the SDK's own client transport", async () => {
     const { url } = await startServer();
