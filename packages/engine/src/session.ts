@@ -8,6 +8,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import type {
   ActiveBackend,
+  ErrorPayload,
   EventRecord,
   SessionId,
   SessionRecord,
@@ -52,6 +53,12 @@ export interface BackendHooks {
   requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse>;
   /** Record the vendor adapter's own session id for restore-on-restart. */
   setAgentSessionId(agentSessionId: string): void;
+  /**
+   * Append an error event visible to subscribers and in replays. Backends use
+   * this for degradations that must never be silent, such as a failed vendor
+   * session/load after a daemon restart (context not restored).
+   */
+  onError(payload: ErrorPayload): void;
 }
 
 export type BackendFactory = (
@@ -319,6 +326,9 @@ export class SessionManager {
         },
         setAgentSessionId: (agentSessionId) => {
           this.store.setAgentSessionId(id, agentSessionId);
+        },
+        onError: (payload) => {
+          this.appendAndPublish(id, "error", payload);
         },
       };
       session.backendStarting = Promise.resolve(this.createBackend(record, hooks));
