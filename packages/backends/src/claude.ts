@@ -37,10 +37,18 @@ export interface ClaudeBackendOptions {
 /**
  * Absolute path of the pinned local claude-agent-acp entry (the file the
  * node_modules/.bin shim points at). Resolving the package directly keeps
- * startup fast and offline-safe; no bunx, no network.
+ * startup fast and offline-safe; no bunx, no network. Inside a compiled
+ * monadd binary import.meta.dir points into the bundle, so fall back to
+ * resolving from the process working directory (works when the daemon runs
+ * from a checkout; otherwise set MONAD_BACKEND_CMD).
  */
 export function resolveClaudeAgentBin(): string {
-  return Bun.resolveSync("@agentclientprotocol/claude-agent-acp/dist/index.js", import.meta.dir);
+  const entry = "@agentclientprotocol/claude-agent-acp/dist/index.js";
+  try {
+    return Bun.resolveSync(entry, import.meta.dir);
+  } catch {
+    return Bun.resolveSync(entry, process.cwd());
+  }
 }
 
 /**
