@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { parseAddedLines } from "../diff/parse";
 import type { ChangedFile, CommitInfo } from "../types";
 
-// node child_process (works under both node and bun) — a published CLI may run
+// node child_process (works under both node and bun): a published CLI may run
 // under node, where Bun.spawn does not exist.
 function runGit(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
