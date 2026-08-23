@@ -145,6 +145,10 @@ class DaemonConnection {
 
   bind(connection: AgentConnection): void {
     this.context = connection.client;
+    // Settles on graceful DELETE and, via the transport's SSE liveness
+    // reaper (which invokes the SDK's DELETE teardown), on abrupt client
+    // death too. The same teardown rejects any in-flight requestPermission
+    // delegated to this client, so the policy falls to its held path.
     connection.closed.finally(() => this.dispose()).catch(() => {});
   }
 

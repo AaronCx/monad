@@ -144,6 +144,123 @@ describe("createAcpHttpServer with a per-connection factory", () => {
   });
 });
 
+async function waitFor(
+  condition: () => boolean,
+  label: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+describe("SSE liveness reaper", () => {
+  async function startReapingServer(sseGraceMs: number) {
+    const dead: string[] = [];
+    const server = createAcpHttpServer(makeTestAgent(), {
+      authToken: TOKEN,
+      sseGraceMs,
+      onConnectionDead: (id) => dead.push(id),
+    });
+    servers.push(server);
+    const { port, host } = await server.listen(0);
+    return { url: `http://${host}:${port}`, dead };
+  }
+
+  async function initializeConnection(url: string): Promise<string> {
+    const response = await fetch(`${url}/acp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${TOKEN}`,
+      },
+      body: initializeBody(),
+    });
+    expect(response.status).toBe(200);
+    const connectionId = response.headers.get("acp-connection-id");
+    if (!connectionId) {
+      throw new Error("initialize response had no connection id");
+    }
+    return connectionId;
+  }
+
+  function openSse(url: string, connectionId: string) {
+    const aborter = new AbortController();
+    const response = fetch(`${url}/acp`, {
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        accept: "text/event-stream",
+        "acp-connection-id": connectionId,
+      },
+      signal: aborter.signal,
+    });
+    return { response, aborter };
+  }
+
+  async function postOnConnection(url: string, connectionId: string): Promise<number> {
+    const response = await fetch(`${url}/acp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${TOKEN}`,
+        "acp-connection-id": connectionId,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "session/list", params: {} }),
+    });
+    // Drain so keep-alive sockets are returned cleanly.
+    await response.text();
+    return response.status;
+  }
+
+  test("an SSE receiver dying without DELETE tears the connection down after the grace window", async () => {
+    const { url, dead } = await startReapingServer(100);
+    const connectionId = await initializeConnection(url);
+
+    const { response, aborter } = openSse(url, connectionId);
+    const sse = await response;
+    expect(sse.status).toBe(200);
+    // Abrupt death: kill the socket, never send a DELETE.
+    aborter.abort();
+
+    await waitFor(() => dead.includes(connectionId), "onConnectionDead for the dropped receiver");
+    // The SDK registry no longer knows the connection: POSTs are refused.
+    expect(await postOnConnection(url, connectionId)).toBe(404);
+  });
+
+  test("a receiver returning within the grace window keeps the connection alive", async () => {
+    const { url, dead } = await startReapingServer(400);
+    const connectionId = await initializeConnection(url);
+
+    const first = openSse(url, connectionId);
+    expect((await first.response).status).toBe(200);
+    first.aborter.abort();
+    // Reconnect well inside the window, like a client re-establishing SSE.
+    // The server releases the old lease only once it observes the socket
+    // close, so a too-quick GET can 409; retry like a real client would.
+    let second = openSse(url, connectionId);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const status = (await second.response).status;
+      if (status === 200) {
+        break;
+      }
+      expect(status).toBe(409);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      second = openSse(url, connectionId);
+    }
+    expect((await second.response).status).toBe(200);
+
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(dead).toEqual([]);
+    expect(await postOnConnection(url, connectionId)).toBe(202);
+    second.aborter.abort();
+  });
+});
+
 describe("createHttpStream against the wrapper", () => {
   test("initialize round trips through the SDK's own client transport", async () => {
     const { url } = await startServer();

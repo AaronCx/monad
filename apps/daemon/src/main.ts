@@ -101,9 +101,19 @@ const manager = new SessionManager({
 });
 
 const startedAt = new Date();
+// A client that dies without an HTTP DELETE (SIGKILL, network drop) is
+// detected by the transport's SSE liveness reaper and torn down through the
+// SDK's DELETE path, so held permission requests fall through to the policy
+// waiting path exactly like a graceful disconnect. MONAD_SSE_GRACE_MS
+// shortens the reconnect grace window in tests.
+const sseGraceEnv = Number(process.env.MONAD_SSE_GRACE_MS ?? "");
 const server = createAcpHttpServer(createDaemonAgentFactory({ manager, version: VERSION }), {
   authToken: token,
   fallback: createControlHandler({ manager, version: VERSION, startedAt }),
+  ...(Number.isFinite(sseGraceEnv) && sseGraceEnv > 0 ? { sseGraceMs: sseGraceEnv } : {}),
+  onConnectionDead: (connectionId) => {
+    console.log(`monadd: client connection ${connectionId} vanished without DELETE; reaped`);
+  },
 });
 
 // Loopback only in M1; exposing the daemon beyond 127.0.0.1 is a later,

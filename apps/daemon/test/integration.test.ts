@@ -104,6 +104,9 @@ beforeAll(async () => {
       ...process.env,
       MONAD_HOME: home,
       MONAD_BACKEND_CMD: `${process.execPath} ${FAKE_AGENT}`,
+      // Short SSE liveness grace window so the SIGKILL test below detects
+      // abrupt client death fast; irrelevant to gracefully closing clients.
+      MONAD_SSE_GRACE_MS: "250",
     },
     stdin: "ignore",
     stdout: "pipe",
@@ -364,6 +367,93 @@ describe("monadd over the HTTP transport", () => {
               u.update.content.text === "permission outcome: allow",
           ),
         "post-permission outcome reaches the rescuer",
+      );
+      rescuer.connection.close();
+    },
+    30_000,
+  );
+
+  test(
+    "a SIGKILLed client (socket death, no DELETE) frees the held permission",
+    async () => {
+      // The graceful-death test above rides the client's HTTP DELETE. A
+      // SIGKILL sends no DELETE: only the SSE/TCP sockets die, which the
+      // SDK's AcpServer never treats as connection death. The transport's
+      // liveness reaper must notice and run the DELETE teardown itself.
+      const fixture = new URL("./fixtures/doomed-client.ts", import.meta.url).pathname;
+      const doomed = Bun.spawn([process.execPath, fixture], {
+        env: {
+          ...process.env,
+          MONAD_PORT: String(port),
+          MONAD_TOKEN: token,
+          MONAD_SESSION: sessionId,
+          MONAD_CWD: home,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      let out = "";
+      const pump = (async () => {
+        const decoder = new TextDecoder();
+        for await (const chunk of doomed.stdout) {
+          out += decoder.decode(chunk, { stream: true });
+        }
+      })().catch(() => {});
+      await waitFor(() => out.includes("PERMISSION_DELIVERED"), "permission to reach the doomed client");
+
+      // Real abrupt death: no connection.close(), no DELETE, just SIGKILL.
+      doomed.kill("SIGKILL");
+      await doomed.exited;
+      await pump;
+
+      const headers = { Authorization: `Bearer ${token}` };
+      await waitFor(
+        async () => {
+          const body = (await (
+            await fetch(`http://127.0.0.1:${port}/v1/sessions`, { headers })
+          ).json()) as { sessions: Array<{ status: string }> };
+          return body.sessions[0]?.status === "waiting_for_permission";
+        },
+        "session to report waiting_for_permission after SIGKILL",
+        10_000,
+      );
+
+      const rescuer = makeClient("rescuer-after-sigkill", {
+        outcome: { outcome: "selected", optionId: "allow_once" },
+      });
+      await initialize(rescuer);
+      const loaded = await rescuer.connection.agent.request(methods.agent.session.load, {
+        sessionId,
+        cwd: home,
+        mcpServers: [],
+      });
+      const replayCount = (loaded._meta as Record<string, unknown>)[
+        REPLAY_COUNT_META_KEY
+      ] as number;
+      await waitFor(
+        () => rescuer.permissionRequests.length === 1,
+        "held request re-delivered to the rescuer after SIGKILL",
+      );
+      await waitFor(async () => {
+        const body = (await (
+          await fetch(`http://127.0.0.1:${port}/v1/sessions`, { headers })
+        ).json()) as { sessions: Array<{ status: string }> };
+        return body.sessions[0]?.status === "idle";
+      }, "turn to finish after the rescuer answers");
+      // The live outcome must land after the replayed history (an earlier
+      // test also logged an allow_once outcome, so slice past the replay).
+      await waitFor(
+        () =>
+          rescuer.updates
+            .slice(replayCount)
+            .some(
+              (u) =>
+                u.update.sessionUpdate === "agent_message_chunk" &&
+                u.update.content.type === "text" &&
+                u.update.content.text === "permission outcome: allow_once",
+            ),
+        "post-permission outcome fan-out reaches the rescuer",
       );
       rescuer.connection.close();
     },
