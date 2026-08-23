@@ -47,7 +47,13 @@ export {
   getStagedDiff,
   splitPatchByFile,
   commitsBetween,
+  detectDefaultBranch,
 } from "./git/diff";
+
+// Session-bound MCP surface and shared rendering
+export { createChecksMcpServer } from "./mcp";
+export type { ChecksMcpBinding, ChecksMcpServer } from "./mcp";
+export { formatChecksTable, formatChecksMarkdown } from "./render";
 
 // Checks
 export { statusFromFindings } from "./checks/status";

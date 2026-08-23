@@ -165,3 +165,24 @@ export async function commitsBetween(
       return { sha: sha ?? "", message: message ?? "", author: author ?? "", timestamp: timestamp ?? "" };
     });
 }
+
+/**
+ * Best-effort default branch for "diff against the repo's default branch"
+ * flows (interactive run_checks with no explicit base/head). Prefers the
+ * origin HEAD symref, then local main, then master. Returns undefined when
+ * none resolves (fresh repo with no commits, detached oddities); callers
+ * treat that as an empty diff.
+ */
+export async function detectDefaultBranch(cwd: string): Promise<string | undefined> {
+  const originHead = await tryRunGit(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd);
+  if (originHead !== undefined && originHead.trim().length > 0) {
+    return originHead.trim();
+  }
+  for (const candidate of ["main", "master"]) {
+    const sha = await tryRunGit(["rev-parse", "--verify", "--quiet", candidate], cwd);
+    if (sha !== undefined && sha.trim().length > 0) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
