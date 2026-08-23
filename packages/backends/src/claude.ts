@@ -65,10 +65,7 @@ export function resolveClaudeAgentBin(
     return Bun.resolveSync(entry, vendorRoot);
   } catch {
     throw new Error(
-      "claude-agent-acp is not installed anywhere monadd can see. " +
-        `Provision it once with: mkdir -p ${vendorRoot} && cd ${vendorRoot} && ` +
-        "bun add @agentclientprotocol/claude-agent-acp@0.70.0 " +
-        `(or set ${BACKEND_CMD_ENV} to a full backend command line)`,
+      `claude-agent-acp is not installed anywhere monadd can see. Provision it once with: mkdir -p ${vendorRoot} && cd ${vendorRoot} && bun add @agentclientprotocol/claude-agent-acp@0.70.0 (or set ${BACKEND_CMD_ENV} to a full backend command line)`,
     );
   }
 }
