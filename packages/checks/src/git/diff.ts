@@ -100,7 +100,7 @@ export async function getStagedDiff(cwd: string): Promise<ChangedFile[]> {
   const patches = splitPatchByFile(diffOutput);
   return buildChangedFiles(entries, patches, async (path) => {
     // For staged content, prefer the staged blob (`git show :path`). Falls back to the
-    // working-tree file if the blob isn't readable (rare — e.g., partial stage on a new file).
+    // working-tree file if the blob isn't readable (rare; e.g., partial stage on a new file).
     const staged = await tryRunGit(["show", `:${path}`], cwd);
     if (staged !== undefined) return staged;
     try {
