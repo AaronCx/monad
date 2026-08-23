@@ -13,7 +13,7 @@
     },
     "apps/cli": {
       "name": "@aaroncx/monad",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "dependencies": {
         "@aaroncx/engine": "workspace:*",
         "@aaroncx/protocol": "workspace:*",
@@ -22,7 +22,7 @@
     },
     "apps/daemon": {
       "name": "@aaroncx/monadd",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "dependencies": {
         "@aaroncx/backends": "workspace:*",
         "@aaroncx/engine": "workspace:*",
@@ -39,6 +39,14 @@
         "@agentclientprotocol/claude-agent-acp": "^0.70.0",
         "@agentclientprotocol/sdk": "^1.4.0",
         "zod": "^4",
+      },
+    },
+    "packages/checks": {
+      "name": "@aaroncx/checks",
+      "version": "0.1.0",
+      "dependencies": {
+        "yaml": "^2.7.0",
+        "zod": "^3.24.0",
       },
     },
     "packages/engine": {
@@ -60,6 +68,8 @@
   },
   "packages": {
     "@aaroncx/backends": ["@aaroncx/backends@workspace:packages/backends"],
+
+    "@aaroncx/checks": ["@aaroncx/checks@workspace:packages/checks"],
 
     "@aaroncx/engine": ["@aaroncx/engine@workspace:packages/engine"],
 
@@ -323,9 +333,13 @@
 
     "wrappy": ["wrappy@1.0.2", "", {}, "sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ=="],
 
+    "yaml": ["yaml@2.9.0", "", { "bin": { "yaml": "bin.mjs" } }, "sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA=="],
+
     "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
 
     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
+
+    "@aaroncx/checks/zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
 
     "@agentclientprotocol/claude-agent-acp/@agentclientprotocol/sdk": ["@agentclientprotocol/sdk@1.3.0", "", { "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" } }, "sha512-i3h/efaeuMUFAO1HSfo97QZQnnvMd7wWBYtBsdL6UMZg3a78sk3Ffya5Xu7C7tYsXomXoDXJBAzQF2PcFKAhIQ=="],
 
