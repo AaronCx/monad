@@ -29,3 +29,9 @@ jobs:
         run: bun run typecheck
       - name: Test
         run: bun test
+      - name: Build single binaries
+        run: bun run build
+      - name: Smoke test the binaries
+        run: |
+          ./apps/daemon/dist/monadd --version
+          ./apps/cli/dist/monad --version

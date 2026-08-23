@@ -7,14 +7,17 @@ from the CLI, an editor, or (later) a phone; attach to it from anywhere else. Re
 open from GitHub pull requests, run diff-scoped checks, and are the same sessions you talk to
 when something fails.
 
-**Status: pre-alpha. Milestone 1 (daemon + CLI, Claude via ACP) is in progress.**
-Nothing here is usable yet. Watch the repo or check `docs/architecture.md`.
+**Status: pre-alpha. Milestone 1 landed: `monadd` + `monad` (run, attach, ls, acp-stdio),
+Claude via `claude-agent-acp`, sessions persisted in SQLite.** Interfaces and storage are
+still unstable, there are no packaged releases yet (build from source with `bun run build`),
+and everything past M1 on the roadmap does not exist. See `docs/architecture.md`.
 
 ## How it works
 
 - The daemon (`monadd`) speaks the [Agent Client Protocol](https://agentclientprotocol.com) on
-  both sides. Toward vendor agents it is an ACP client, spawning `claude-agent-acp`, `codex-acp`,
-  or Gemini CLI per session. Toward its own clients it is an ACP agent over HTTP.
+  both sides. Toward vendor agents it is an ACP client, spawning one agent process per session
+  (`claude-agent-acp` today; `codex-acp` and Gemini CLI are M4). Toward its own clients it is
+  an ACP agent over HTTP.
 - Sessions are an append-only event log in SQLite. Attaching is a replay plus a live subscription.
 - Vendor auth stays inside the vendor binaries. monad never stores or forwards an API token for
   subscription-backed agents. API keys and self-hosted models go through a native loop (M2).
@@ -22,7 +25,7 @@ Nothing here is usable yet. Watch the repo or check `docs/architecture.md`.
 
 ## Roadmap
 
-1. M1: daemon, CLI (`run`, `attach`, `ls`), Claude via `claude-agent-acp`, stdio bridge for Zed
+1. M1 (landed): daemon, CLI (`run`, `attach`, `ls`), Claude via `claude-agent-acp`, stdio bridge for Zed
 2. M2: checks as tools (typecheck, lint, test, secrets, build), `review <pr>` run locally
 3. M3: GitHub App trigger, Check Runs and review comments
 4. M4: Codex and Gemini backends, native loop for API-key and self-hosted models

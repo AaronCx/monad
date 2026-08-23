@@ -3,6 +3,17 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "scripts": { "typecheck": "tsc --noEmit" }
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aaroncx/engine": "workspace:*",
+    "@aaroncx/protocol": "workspace:*",
+    "@agentclientprotocol/claude-agent-acp": "^0.70.0",
+    "@agentclientprotocol/sdk": "^1.4.0",
+    "zod": "^4"
+  }
 }

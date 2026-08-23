@@ -1,10 +1,15 @@
 {
   "name": "@aaroncx/monad",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "bun build --compile --outfile dist/monad src/main.ts"
+  },
+  "dependencies": {
+    "@aaroncx/engine": "workspace:*",
+    "@aaroncx/protocol": "workspace:*",
+    "@agentclientprotocol/sdk": "^1.4.0"
   }
 }

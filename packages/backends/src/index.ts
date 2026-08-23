@@ -1,2 +1,4 @@
-// @aaroncx/backends: ACP client adapter (M1); native AI SDK loop (M2+). Filled in by Milestone 1.
-export const BACKENDS_PACKAGE = "@aaroncx/backends";
+// @aaroncx/backends: ACP client adapter around spawned vendor agents (M1).
+// The native AI SDK loop lands here in M2+.
+export * from "./acp-client.ts";
+export * from "./claude.ts";
