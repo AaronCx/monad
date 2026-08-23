@@ -1,6 +1,5 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   type EventKind,
@@ -11,6 +10,7 @@ import {
   SessionRecordSchema,
   type SessionStatus,
 } from "@aaroncx/protocol";
+import { monadStateDir } from "./paths.ts";
 
 export interface SessionStoreOptions {
   /** Database file path. Defaults to ~/.monad/monad.db. Injectable for tests. */
@@ -18,7 +18,7 @@ export interface SessionStoreOptions {
 }
 
 export function defaultDbPath(): string {
-  return join(homedir(), ".monad", "monad.db");
+  return join(monadStateDir(), "monad.db");
 }
 
 interface SessionRow {

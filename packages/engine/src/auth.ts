@@ -1,10 +1,10 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { monadStateDir } from "./paths.ts";
 
 export function defaultTokenPath(): string {
-  return join(homedir(), ".monad", "token");
+  return join(monadStateDir(), "token");
 }
 
 /**
