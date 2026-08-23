@@ -29,3 +29,14 @@ export const DaemonStatusSchema = z.object({
   activeBackends: z.array(ActiveBackendSchema),
 });
 export type DaemonStatus = z.infer<typeof DaemonStatusSchema>;
+
+/**
+ * Contents of ~/.monad/monadd.json, written by the daemon on startup and
+ * read by the CLI to discover a running daemon.
+ */
+export const DaemonInfoSchema = z.object({
+  port: z.number().int().positive(),
+  pid: z.number().int().positive(),
+  startedAt: z.iso.datetime(),
+});
+export type DaemonInfo = z.infer<typeof DaemonInfoSchema>;

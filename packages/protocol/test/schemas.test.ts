@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DaemonInfoSchema,
   DaemonStatusSchema,
+  ERROR_NOTIFICATION_METHOD,
   EventKindSchema,
   EventRecordSchema,
   ListSessionsResponseSchema,
+  MonadErrorNotificationSchema,
   REPLAY_COUNT_META_KEY,
   SessionIdSchema,
   SessionRecordSchema,
@@ -102,4 +105,22 @@ describe("control API schemas", () => {
 
 test("replay count meta key is the documented one", () => {
   expect(REPLAY_COUNT_META_KEY).toBe("monad.sh/replayCount");
+});
+
+describe("daemon discovery and extension notification schemas", () => {
+  test("DaemonInfo round trip", () => {
+    const info = { port: 7331, pid: 4242, startedAt: now };
+    expect(DaemonInfoSchema.safeParse(info).success).toBe(true);
+    expect(DaemonInfoSchema.safeParse({ ...info, port: 0 }).success).toBe(false);
+  });
+
+  test("error notification keeps extra context fields", () => {
+    expect(ERROR_NOTIFICATION_METHOD).toBe("_monad.sh/error");
+    const parsed = MonadErrorNotificationSchema.parse({
+      sessionId: Bun.randomUUIDv7(),
+      message: "context was not restored",
+      agentSessionId: "vendor-123",
+    });
+    expect(parsed.agentSessionId).toBe("vendor-123");
+  });
 });
