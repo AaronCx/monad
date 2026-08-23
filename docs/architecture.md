@@ -43,4 +43,32 @@ disconnected client missed, so the daemon does.
 - `packages/github` (`@aaroncx/github`): placeholder in M1. The LastGate GitHub App port lands
   here in M3.
 
+## Wire surface (M1)
+
+One HTTP server on 127.0.0.1 (default port 7331), bearer token from `~/.monad/token` on
+every request:
+
+- `/acp`: the ACP agent side over the SDK's Streamable HTTP transport. Methods served:
+  `initialize` (advertises `loadSession` and `sessionCapabilities.list`), `session/new`,
+  `session/load`, `session/list`, `session/prompt`, `session/cancel`.
+- `/v1/sessions`, `/v1/status`: the control API, plain JSON.
+
+Attach semantics: `session/load` replays the log to the calling connection in seq order
+(`update` events verbatim, `prompt` events as `user_message_chunk` updates), then the
+connection is live-subscribed. The transport gives no cross-stream ordering between the load
+response and the replayed notifications, so the response carries the replayed update count in
+`_meta["monad.sh/replayCount"]` and clients count updates to find the replay/live boundary
+(decision record 0004). A pending permission request is re-delivered to the attaching
+connection; the first answer wins.
+
+monad extensions on top of ACP, all under the `monad.sh` prefix: the `_meta` keys
+`monad.sh/replayCount` (session/load response) and `monad.sh/status` (session/list entries),
+plus the `_monad.sh/error` notification carrying appended error events (for example a failed
+vendor context restore) to live clients. Unknown notifications are dropped by SDK-based
+clients, so non-monad editors are unaffected.
+
+Environment overrides: `MONAD_HOME` moves the state directory, `MONAD_BACKEND_CMD` swaps the
+vendor agent command (integration tests run a fake ACP agent), `MONAD_DAEMON_BIN` tells the
+CLI what to spawn for `monad daemon start`.
+
 This document grows as code lands. Decision records live in `docs/decisions/`.

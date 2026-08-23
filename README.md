@@ -7,8 +7,10 @@ from the CLI, an editor, or (later) a phone; attach to it from anywhere else. Re
 open from GitHub pull requests, run diff-scoped checks, and are the same sessions you talk to
 when something fails.
 
-**Status: pre-alpha. Milestone 1 (daemon + CLI, Claude via ACP) is in progress.**
-Nothing here is usable yet. Watch the repo or check `docs/architecture.md`.
+**Status: pre-alpha. Milestone 1 landed: `monadd` + `monad` (run, attach, ls, acp-stdio),
+Claude via `claude-agent-acp`, sessions persisted in SQLite.** Interfaces and storage are
+still unstable, there are no packaged releases yet (build from source with `bun run build`),
+and everything past M1 on the roadmap does not exist. See `docs/architecture.md`.
 
 ## How it works
 
@@ -22,7 +24,7 @@ Nothing here is usable yet. Watch the repo or check `docs/architecture.md`.
 
 ## Roadmap
 
-1. M1: daemon, CLI (`run`, `attach`, `ls`), Claude via `claude-agent-acp`, stdio bridge for Zed
+1. M1 (landed): daemon, CLI (`run`, `attach`, `ls`), Claude via `claude-agent-acp`, stdio bridge for Zed
 2. M2: checks as tools (typecheck, lint, test, secrets, build), `review <pr>` run locally
 3. M3: GitHub App trigger, Check Runs and review comments
 4. M4: Codex and Gemini backends, native loop for API-key and self-hosted models
