@@ -5,7 +5,7 @@ import {
   REPLAY_COUNT_META_KEY,
   type SessionRecord,
 } from "@aaroncx/protocol";
-import { connectAcp, InteractiveSession } from "./client.ts";
+import { connectAcp, describeSessionStartError, InteractiveSession } from "./client.ts";
 import {
   authHeaders,
   ensureDaemon,
@@ -74,10 +74,17 @@ async function cmdRun(argv: string[]): Promise<void> {
   const renderer = new Renderer({ thoughts: flags.thoughts, divider: false });
   const interactive = new InteractiveSession(renderer);
   const session = await connectAcp(handle, renderer, interactive);
-  const created = await session.connection.agent.request(methods.agent.session.new, {
-    cwd: process.cwd(),
-    mcpServers: [],
-  });
+  let created: { sessionId: string };
+  try {
+    created = await session.connection.agent.request(methods.agent.session.new, {
+      cwd: process.cwd(),
+      mcpServers: [],
+    });
+  } catch (error) {
+    console.error(describeSessionStartError(error));
+    session.connection.close();
+    process.exit(1);
+  }
   console.log(`session: ${created.sessionId}`);
   renderer.beginLive(0);
   interactive.bind(session, created.sessionId);

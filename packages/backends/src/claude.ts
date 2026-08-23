@@ -1,4 +1,6 @@
+import { join } from "node:path";
 import type { BackendFactory, BackendHooks } from "@aaroncx/engine";
+import { monadStateDir } from "@aaroncx/engine";
 import { AcpClientBackend } from "./acp-client.ts";
 
 /**
@@ -37,17 +39,37 @@ export interface ClaudeBackendOptions {
 /**
  * Absolute path of the pinned local claude-agent-acp entry (the file the
  * node_modules/.bin shim points at). Resolving the package directly keeps
- * startup fast and offline-safe; no bunx, no network. Inside a compiled
- * monadd binary import.meta.dir points into the bundle, so fall back to
- * resolving from the process working directory (works when the daemon runs
- * from a checkout; otherwise set MONAD_BACKEND_CMD).
+ * startup fast and offline-safe; no bunx, no network. Resolution order:
+ * a checkout (import.meta.dir works there), the process working directory,
+ * then the provisioned vendor tree under the monad state dir. A compiled
+ * monadd running in an arbitrary repo hits the last one; provision it once
+ * with: mkdir -p ~/.monad/vendor && cd ~/.monad/vendor &&
+ * bun add @agentclientprotocol/claude-agent-acp@0.70.0
  */
-export function resolveClaudeAgentBin(): string {
+export function resolveClaudeAgentBin(
+  env: Record<string, string | undefined> = process.env,
+): string {
   const entry = "@agentclientprotocol/claude-agent-acp/dist/index.js";
   try {
     return Bun.resolveSync(entry, import.meta.dir);
   } catch {
+    // fall through to the next root
+  }
+  try {
     return Bun.resolveSync(entry, process.cwd());
+  } catch {
+    // fall through to the provisioned vendor tree
+  }
+  const vendorRoot = join(monadStateDir(env), "vendor");
+  try {
+    return Bun.resolveSync(entry, vendorRoot);
+  } catch {
+    throw new Error(
+      "claude-agent-acp is not installed anywhere monadd can see. " +
+        `Provision it once with: mkdir -p ${vendorRoot} && cd ${vendorRoot} && ` +
+        "bun add @agentclientprotocol/claude-agent-acp@0.70.0 " +
+        `(or set ${BACKEND_CMD_ENV} to a full backend command line)`,
+    );
   }
 }
 
@@ -72,7 +94,7 @@ export function resolveBackendCommand(
         `install node or set ${BACKEND_CMD_ENV}`,
     );
   }
-  return [node, resolveClaudeAgentBin()];
+  return [node, resolveClaudeAgentBin(env)];
 }
 
 /**

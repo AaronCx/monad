@@ -99,6 +99,21 @@ export function describePromptError(error: unknown): string {
   return `error: ${error instanceof Error ? error.message : String(error)}`;
 }
 
+/**
+ * Maps a failed session/new to a user-facing message instead of a stack
+ * trace. The daemon wraps backend-start failures as internal errors whose
+ * data.details carries the real cause (for example the vendor adapter not
+ * being installed anywhere the daemon can see).
+ */
+export function describeSessionStartError(error: unknown): string {
+  if (isRequestError(error)) {
+    const details = (error.data as { details?: unknown } | undefined)?.details;
+    const cause = typeof details === "string" && details.length > 0 ? details : error.message;
+    return `could not start the session: ${cause}`;
+  }
+  return `could not start the session: ${error instanceof Error ? error.message : String(error)}`;
+}
+
 type InputState = "idle" | "turn" | "permission";
 
 /**

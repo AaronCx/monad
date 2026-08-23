@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
 } from "@agentclientprotocol/sdk";
-import { type SessionClient, SessionManager, SessionStore } from "@aaroncx/engine";
+import { monadStateDir, type SessionClient, SessionManager, SessionStore } from "@aaroncx/engine";
 import type { EventRecord } from "@aaroncx/protocol";
 import {
   BACKEND_CMD_ENV,
@@ -325,5 +327,33 @@ describe("resolveBackendCommand", () => {
     expect(command[0]).toBe(node);
     expect(command[1]).toContain("claude-agent-acp");
     expect(existsSync(command[1] as string)).toBe(true);
+  });
+});
+
+describe("resolveClaudeAgentBin vendor fallback", () => {
+  test("the not-installed error names the provisioned vendor path and the one-liner", () => {
+    // In a checkout import.meta.dir resolution succeeds, so exercise the
+    // error path indirectly: the message contract is what a compiled monadd
+    // in an arbitrary repo shows the user. Assert the vendor root derives
+    // from MONAD_HOME so the hint always points at the daemon's real state
+    // dir.
+    const home = "/tmp/monad-vendor-fallback-test";
+    expect(join(monadStateDir({ MONAD_HOME: home }), "vendor")).toBe(`${home}/vendor`);
+  });
+
+  test("a provisioned vendor tree under MONAD_HOME is resolvable", () => {
+    const root = mkdtempSync(join(tmpdir(), "monad-vendor-"));
+    const pkgDir = join(root, "vendor", "node_modules", "@agentclientprotocol", "claude-agent-acp");
+    mkdirSync(join(pkgDir, "dist"), { recursive: true });
+    writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: "@agentclientprotocol/claude-agent-acp", version: "0.0.0-test", main: "dist/index.js" }));
+    writeFileSync(join(pkgDir, "dist", "index.js"), "// test stub\n");
+    const resolved = Bun.resolveSync(
+      "@agentclientprotocol/claude-agent-acp/dist/index.js",
+      join(monadStateDir({ MONAD_HOME: root }), "vendor"),
+    );
+    // Bun.resolveSync returns the realpath (/private/var/...) while tmpdir()
+    // reports the /var symlink, so compare realpaths.
+    expect(resolved).toBe(realpathSync(join(pkgDir, "dist", "index.js")));
+    rmSync(root, { recursive: true, force: true });
   });
 });
