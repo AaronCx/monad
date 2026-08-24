@@ -650,6 +650,66 @@ describe("ModeAwarePermissionPolicy", () => {
     expect(response.outcome).toEqual({ outcome: "selected", optionId: "allow" });
   });
 
+  /**
+   * The real-world trigger for finding 5: fix mode forwards every
+   * non-allowlisted execute, and the agent issues them in parallel.
+   */
+  test("fix: two forwarded executes are both held, then both answered", async () => {
+    const worktree = mkdtempSync(join(tmpdir(), "monad-fix-parallel-"));
+    const { policy, statuses, requested, resolved } = makeModePolicy({
+      mode: "fix",
+      cwd: worktree,
+      execAllowlist: ["git status"],
+      execAllowlistInputsEdited: false,
+    });
+    function execRequest(id: string, command: string): RequestPermissionRequest {
+      return {
+        sessionId: SESSION_ID,
+        toolCall: { toolCallId: id, kind: "execute", rawInput: { command } },
+        options: ONCE_OPTIONS,
+      };
+    }
+
+    const settled: string[] = [];
+    const heldPush = policy
+      .request(SESSION_ID, execRequest("call-push", "git push"), undefined)
+      .then((response) => {
+        settled.push("push");
+        return response;
+      });
+    const heldCurl = policy
+      .request(SESSION_ID, execRequest("call-curl", "curl example.com"), undefined)
+      .then((response) => {
+        settled.push("curl");
+        return response;
+      });
+    await Bun.sleep(10);
+    expect(settled).toEqual([]); // The second forward did not throw.
+    expect(requested).toHaveLength(2); // Each logged exactly once.
+    expect(statuses).toEqual(["waiting_for_permission"]);
+    expect(policy.pendingRequests(SESSION_ID).map((p) => p.toolCall?.toolCallId)).toEqual([
+      "call-push",
+      "call-curl",
+    ]);
+
+    const asked: string[] = [];
+    const delivered = policy.deliverPending(SESSION_ID, {
+      requestPermission: (params) => {
+        asked.push(params.toolCall?.toolCallId ?? "");
+        return Promise.resolve({
+          outcome: { outcome: "selected", optionId: "reject" },
+        } as RequestPermissionResponse);
+      },
+    });
+    expect(delivered.map((p) => p.toolCall?.toolCallId)).toEqual(["call-push", "call-curl"]);
+    expect(asked).toEqual(["call-push", "call-curl"]);
+    expect((await heldPush).outcome).toEqual({ outcome: "selected", optionId: "reject" });
+    expect((await heldCurl).outcome).toEqual({ outcome: "selected", optionId: "reject" });
+    expect(resolved.map((entry) => entry.meta.toolCallId)).toEqual(["call-push", "call-curl"]);
+    expect(resolved.every((entry) => entry.meta.by === "human")).toBe(true);
+    expect(statuses).toEqual(["waiting_for_permission", "running"]);
+  });
+
   test("interactive sessions keep M1 forwarding", async () => {
     const { policy, resolved } = makeModePolicy({ mode: "interactive", cwd: "/tmp" });
     const human: PermissionClient = {

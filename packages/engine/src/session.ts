@@ -148,8 +148,18 @@ export interface AttachResult {
   record: SessionRecord;
   /** The full event log in seq order; the caller replays it to the client. */
   events: EventRecord[];
-  /** A held permission request, re-delivered to the attaching client. */
+  /**
+   * The OLDEST held permission request, re-delivered to the attaching client.
+   * Kept for callers that only ever showed one; pendingPermissions is the
+   * whole set, and a session can hold several at once because the agent
+   * issues tool calls in parallel.
+   */
   pendingPermission?: RequestPermissionRequest;
+  /**
+   * Every held permission request, oldest first, all of them re-delivered to
+   * the attaching client. The client answers them in sequence.
+   */
+  pendingPermissions: RequestPermissionRequest[];
 }
 
 /**
@@ -323,8 +333,9 @@ export class SessionManager {
   }
 
   /**
-   * Subscribes a client: returns the record, the full replay, and any held
-   * permission request (which is also re-delivered to this client).
+   * Subscribes a client: returns the record, the full replay, and every held
+   * permission request (all of which are re-delivered to this client, oldest
+   * first, for it to answer in sequence).
    */
   attach(id: SessionId, client: SessionClient): AttachResult {
     const record = this.mustGet(id);
@@ -332,8 +343,8 @@ export class SessionManager {
     session.subscribers.add(client);
     session.lastActive = client;
     const events = this.store.replay(id);
-    const pendingPermission = this.policy.deliverPending(id, client);
-    return { record, events, pendingPermission };
+    const pendingPermissions = this.policy.deliverPending(id, client);
+    return { record, events, pendingPermission: pendingPermissions[0], pendingPermissions };
   }
 
   detach(id: SessionId, client: SessionClient): void {

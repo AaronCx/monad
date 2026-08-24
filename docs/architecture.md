@@ -94,8 +94,13 @@ Attach semantics: `session/load` replays the log to the calling connection in se
 connection is live-subscribed. The transport gives no cross-stream ordering between the load
 response and the replayed notifications, so the response carries the replayed update count in
 `_meta["monad.sh/replayCount"]` and clients count updates to find the replay/live boundary
-(decision record 0004). A pending permission request is re-delivered to the attaching
-connection; the first answer wins.
+(decision record 0004). Every pending permission request is re-delivered to the attaching
+connection, oldest first, and the CLI asks them one at a time; the first answer wins per
+request. A session holds many at once, keyed by tool call id, because the agent issues tool
+calls in parallel: two forwarded permissions inside one turn is normal, and the session stays
+`waiting_for_permission` until the last of them is answered. A request that arrives without a
+tool call id is held under a synthetic one rather than dropped, and that id is what its
+resolution carries in the log.
 
 monad extensions on top of ACP, all under the `monad.sh` prefix: the `_meta` keys
 `monad.sh/replayCount` (session/load response) and `monad.sh/status` (session/list entries),

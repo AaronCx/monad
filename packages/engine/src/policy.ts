@@ -41,23 +41,34 @@ export interface PermissionPolicy {
   ): Promise<RequestPermissionResponse>;
 
   /**
-   * Offers a held request to a newly attached client. Returns the pending
-   * params if there was one to deliver, undefined otherwise. First answer
-   * wins if several clients see the same request.
+   * Offers every held request for the session to a newly attached client,
+   * oldest first, and returns them in that order (empty when there was
+   * nothing to deliver). The client answers them one at a time; first answer
+   * wins per request if several clients see the same one.
    */
   deliverPending(
     sessionId: SessionId,
     client: PermissionClient,
-  ): RequestPermissionRequest | undefined;
+  ): RequestPermissionRequest[];
 
-  /** The held request for a session, if any. */
+  /** The OLDEST held request for a session, if any. */
   pendingRequest(sessionId: SessionId): RequestPermissionRequest | undefined;
 
-  /** Resolves a held request with a cancelled outcome (session/cancel path). */
+  /** Every held request for a session, oldest first. */
+  pendingRequests(sessionId: SessionId): RequestPermissionRequest[];
+
+  /** Resolves every held request with a cancelled outcome (session/cancel). */
   cancel(sessionId: SessionId): void;
 }
 
 interface PendingPermission {
+  /**
+   * The key this request is held under inside its session's map: the ACP
+   * toolCallId when the request has one, otherwise a synthetic id minted
+   * here. Also what lands in the resolution's meta.toolCallId, so a request
+   * with no id of its own still has SOMETHING to join a transcript on.
+   */
+  key: string;
   params: RequestPermissionRequest;
   settled: boolean;
   resolve: (response: RequestPermissionResponse) => void;
@@ -65,17 +76,26 @@ interface PendingPermission {
 
 const CANCELLED: RequestPermissionResponse = { outcome: { outcome: "cancelled" } };
 
+/**
+ * Builds the resolution metadata. `fallbackToolCallId` is used only when the
+ * request carries no toolCallId of its own: the pending map's synthetic key
+ * goes in instead, so a resolution is never left with nothing to join on.
+ * The request's REAL id always wins, because dropping it would break the
+ * permission_requested to permission_resolved join that
+ * editedExecAllowlistInputs relies on.
+ */
 function metaFor(
   by: PermissionResolutionMeta["by"],
   params: RequestPermissionRequest,
   response: RequestPermissionResponse,
   message?: string,
+  fallbackToolCallId?: string,
 ): PermissionResolutionMeta {
   const meta: PermissionResolutionMeta = { by };
   if (response.outcome.outcome === "selected") {
     meta.optionId = response.outcome.optionId;
   }
-  const toolCallId = params.toolCall?.toolCallId;
+  const toolCallId = params.toolCall?.toolCallId || fallbackToolCallId;
   if (toolCallId) {
     meta.toolCallId = toolCallId;
   }
@@ -92,10 +112,21 @@ function metaFor(
  * request open until a client attaches and answers or the session is
  * cancelled. This is the seed of answering from a phone later: the waiting
  * path is real, not a timeout.
+ *
+ * A session holds MANY requests at once, keyed by toolCallId. Claude issues
+ * tool calls in parallel, so two forwards can be in flight inside one turn
+ * (two non-allowlisted executes in fix mode, two edits with no locations);
+ * M2 kept a single slot per session and threw a JSON-RPC error back at the
+ * vendor mid-turn for the second one. Nothing is ever dropped to make room:
+ * a request with no toolCallId, or one whose id collides with a request
+ * already held, gets a synthetic key and is held like any other, because
+ * dropping a permission request means the vendor never hears an answer.
  */
 export class InteractivePermissionPolicy implements PermissionPolicy {
   private readonly hooks: PermissionPolicyHooks;
-  private readonly pending = new Map<SessionId, PendingPermission>();
+  /** sessionId to (pending key to request), each map in arrival order. */
+  private readonly pending = new Map<SessionId, Map<string, PendingPermission>>();
+  private syntheticKeys = 0;
   /**
    * When true, request() does not persist permission_requested itself (the
    * caller already did). Used by the mode-aware policy so a forwarded fix
@@ -113,9 +144,6 @@ export class InteractivePermissionPolicy implements PermissionPolicy {
     params: RequestPermissionRequest,
     client: PermissionClient | undefined,
   ): Promise<RequestPermissionResponse> {
-    if (this.pending.has(sessionId)) {
-      throw new Error(`a permission request is already pending for session ${sessionId}`);
-    }
     if (!this.skipPersistRequested) {
       this.hooks.persistRequested(sessionId, params);
     }
@@ -128,50 +156,105 @@ export class InteractivePermissionPolicy implements PermissionPolicy {
         // The client vanished mid-question. Fall through to the waiting path.
       }
     }
-    this.hooks.setStatus(sessionId, "waiting_for_permission");
+    const held = this.holdFor(sessionId);
+    // Only the FIRST hold moves the session; a second concurrent request
+    // finds it already waiting_for_permission and leaves it there.
+    if (held.size === 0) {
+      this.hooks.setStatus(sessionId, "waiting_for_permission");
+    }
+    const key = this.keyFor(params, held);
     return new Promise<RequestPermissionResponse>((resolve) => {
-      this.pending.set(sessionId, { params, settled: false, resolve });
+      held.set(key, { key, params, settled: false, resolve });
     });
   }
 
   deliverPending(
     sessionId: SessionId,
     client: PermissionClient,
-  ): RequestPermissionRequest | undefined {
-    const entry = this.pending.get(sessionId);
-    if (!entry || entry.settled) {
-      return undefined;
+  ): RequestPermissionRequest[] {
+    const held = this.pending.get(sessionId);
+    if (!held) {
+      return [];
     }
-    client
-      .requestPermission(entry.params)
-      .then((response) => {
-        this.settle(sessionId, entry, response, "running");
-      })
-      .catch(() => {
-        // This client vanished too; the request stays held for the next one.
-      });
-    return entry.params;
+    // Snapshot first: settling mutates the map while this iterates, and an
+    // answer can land synchronously.
+    const entries = [...held.values()].filter((entry) => !entry.settled);
+    for (const entry of entries) {
+      client
+        .requestPermission(entry.params)
+        .then((response) => {
+          this.settle(sessionId, entry, response, "running");
+        })
+        .catch(() => {
+          // This client vanished too; the request stays held for the next one.
+        });
+    }
+    return entries.map((entry) => entry.params);
   }
 
   pendingRequest(sessionId: SessionId): RequestPermissionRequest | undefined {
-    return this.pending.get(sessionId)?.params;
+    return this.pendingRequests(sessionId)[0];
+  }
+
+  pendingRequests(sessionId: SessionId): RequestPermissionRequest[] {
+    const held = this.pending.get(sessionId);
+    if (!held) {
+      return [];
+    }
+    return [...held.values()].filter((entry) => !entry.settled).map((entry) => entry.params);
   }
 
   cancel(sessionId: SessionId): void {
-    const entry = this.pending.get(sessionId);
-    if (!entry || entry.settled) {
+    const held = this.pending.get(sessionId);
+    if (!held) {
       return;
     }
     // Status is left to the caller: session/cancel ends the turn and the
     // manager sets the session idle.
-    entry.settled = true;
     this.pending.delete(sessionId);
-    this.hooks.persistResolved(
-      sessionId,
-      CANCELLED,
-      metaFor("human", entry.params, CANCELLED, "cancelled"),
-    );
-    entry.resolve(CANCELLED);
+    for (const entry of held.values()) {
+      if (entry.settled) {
+        continue;
+      }
+      entry.settled = true;
+      this.hooks.persistResolved(
+        sessionId,
+        CANCELLED,
+        metaFor("human", entry.params, CANCELLED, "cancelled", entry.key),
+      );
+      entry.resolve(CANCELLED);
+    }
+  }
+
+  /** The session's pending map, created on first use. */
+  private holdFor(sessionId: SessionId): Map<string, PendingPermission> {
+    const existing = this.pending.get(sessionId);
+    if (existing) {
+      return existing;
+    }
+    const created = new Map<string, PendingPermission>();
+    this.pending.set(sessionId, created);
+    return created;
+  }
+
+  /**
+   * The key one request is held under. The ACP toolCallId when there is one
+   * and it is free; otherwise a synthetic id, which keeps a request with no
+   * id (or a duplicate one) held rather than evicting the request it would
+   * have collided with. The synthetic id is unique within this daemon run and
+   * is written into the resolution meta, so the transcript can still tell two
+   * anonymous requests apart.
+   */
+  private keyFor(
+    params: RequestPermissionRequest,
+    held: Map<string, PendingPermission>,
+  ): string {
+    const toolCallId = params.toolCall?.toolCallId;
+    if (typeof toolCallId === "string" && toolCallId.length > 0 && !held.has(toolCallId)) {
+      return toolCallId;
+    }
+    this.syntheticKeys += 1;
+    return `monad-pending-${this.syntheticKeys}`;
   }
 
   private settle(
@@ -180,13 +263,25 @@ export class InteractivePermissionPolicy implements PermissionPolicy {
     response: RequestPermissionResponse,
     status: "running",
   ): void {
-    if (entry.settled || this.pending.get(sessionId) !== entry) {
-      return; // Another client answered first.
+    const held = this.pending.get(sessionId);
+    if (entry.settled || held?.get(entry.key) !== entry) {
+      return; // Another client answered first, or the session was cancelled.
     }
     entry.settled = true;
-    this.pending.delete(sessionId);
-    this.hooks.persistResolved(sessionId, response, metaFor("human", entry.params, response));
-    this.hooks.setStatus(sessionId, status);
+    held.delete(entry.key);
+    if (held.size === 0) {
+      this.pending.delete(sessionId);
+    }
+    this.hooks.persistResolved(
+      sessionId,
+      response,
+      metaFor("human", entry.params, response, undefined, entry.key),
+    );
+    // Back to running only once the LAST held request has been answered;
+    // with others still held the session stays waiting_for_permission.
+    if (held.size === 0) {
+      this.hooks.setStatus(sessionId, status);
+    }
     entry.resolve(response);
   }
 }
@@ -997,12 +1092,16 @@ export class ModeAwarePermissionPolicy implements PermissionPolicy {
   deliverPending(
     sessionId: SessionId,
     client: PermissionClient,
-  ): RequestPermissionRequest | undefined {
+  ): RequestPermissionRequest[] {
     return this.interactive.deliverPending(sessionId, client);
   }
 
   pendingRequest(sessionId: SessionId): RequestPermissionRequest | undefined {
     return this.interactive.pendingRequest(sessionId);
+  }
+
+  pendingRequests(sessionId: SessionId): RequestPermissionRequest[] {
+    return this.interactive.pendingRequests(sessionId);
   }
 
   cancel(sessionId: SessionId): void {
