@@ -17,7 +17,7 @@ import { createHookHandler } from "../../src/server.ts";
 import { HookWorker } from "../../src/worker.ts";
 import { FakeDaemon, reviewResult } from "./fake-daemon.ts";
 
-export const SECRET = "a shared webhook secret";
+export const SECRET = "hmac-me";
 export const REPO_FULL_NAME = "AaronCx/monad-review-demo";
 export const INSTALLATION_ID = 4242;
 

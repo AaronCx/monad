@@ -1,5 +1,6 @@
 import type { ReviewResultLine } from "@aaroncx/engine";
 import type { EventRecord, SessionMode, SessionRecord } from "@aaroncx/protocol";
+import { HEAD_SHA } from "../../../../packages/github/test/fixtures/payloads.ts";
 import type { DaemonAccess } from "../../src/daemon.ts";
 
 /**
@@ -58,7 +59,7 @@ export function reviewResult(overrides: Partial<ReviewResultLine> = {}): ReviewR
     failed: false,
     checksTable: "| check | status | findings |",
     baseSha: "b".repeat(40),
-    headSha: "0123456789abcdef0123456789abcdef01234567",
+    headSha: HEAD_SHA,
     trust: "untrusted",
     ...overrides,
   } as ReviewResultLine;

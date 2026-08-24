@@ -3,6 +3,6 @@
   "privateKeyPath": "~/.monad/monad-app.private-key.pem",
   "webhookSecret": "SET ME",
   "installations": {
-    "AaronCx/monad-review-demo": { "repoRoot": "~/Developer/github/monad-review-demo" }
+    "AaronCx/monad-review-demo": { "repoRoot": "~/code/monad-review-demo" }
   }
 }
