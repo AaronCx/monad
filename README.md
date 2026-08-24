@@ -33,11 +33,11 @@ monad review <pr> [--full] [--post] [--fix] [--no-install]
 
 `monad review` fetches the PR head into the namespaced ref `refs/monad/pr/<n>`, checks it out
 as a detached `git worktree` under `~/.monad/worktrees`, installs the worktree's dependencies
-when the PR is trusted, and runs the checks scoped to the `base..head` diff. It then opens a review session in that
-worktree with the `monad-checks` tools injected, and parses the agent's final report into a
-structured `ReviewReport` (summary, verdict, findings with `path:line` and severity). The exit
-code follows the verdict: 0 when the verdict is `looks_good` or `comment` and no check failed,
-1 otherwise.
+when the PR is trusted, and runs the checks scoped to the `base..head` diff. It then opens a
+review session in that worktree with the `monad-checks` tools injected, and parses the agent's
+final report into a structured `ReviewReport` (summary, verdict, findings with `path:line` and
+severity). The exit code follows the verdict: 0 when the verdict is `looks_good` or `comment`
+and no check failed, 1 otherwise.
 
 ### Trusted and untrusted PRs
 
@@ -54,6 +54,8 @@ by hand. Everything else, including any doubt, is untrusted, and an untrusted re
   `run_checks` calls to the fast profile;
 - still runs `secrets`, `file_patterns`, `dependencies`, `agent_patterns`, and the detected
   `lint` and `typecheck`, which report honestly when there were no dependencies to work with.
+  Detection is bounded the same way: an untrusted run will not use a checker the PR could point
+  at its own code, so no `bun run typecheck`, no `mypy`, and no `eslint`.
 
 A trusted review behaves exactly as it did before: the head's config, a real install, and the
 head's toolchain.

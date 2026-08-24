@@ -34,6 +34,13 @@ installing dependencies runs the PR's lifecycle scripts, and running lint, typec
 test runs the PR's toolchain. Both are opt-in per trust level, never the default for a PR from
 outside the repo.
 
+"What monad executes" includes how it DECIDES what to execute. Stripping the config's `command`
+fields is not sufficient on its own, because `lint` and `typecheck` also detect their tool by
+reading the worktree, and a detected `bun run typecheck` runs whatever the PR put in
+`scripts.typecheck`. An untrusted run therefore uses only detections where monad wrote the
+command line and the tool's configuration format cannot carry code. Decision record 0009 has
+the table.
+
 Every session therefore carries a trust level, `trusted` or `untrusted`, resolved by the caller
 and stored on the session record. An absent or unrecognized value is `untrusted`. Decision
 record 0009 has the resolution rules and what each level allows.
