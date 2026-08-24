@@ -8,4 +8,10 @@
  * what a session may execute; that lives in @aaroncx/engine and
  * @aaroncx/checks. It must not import from apps/.
  */
-export {};
+
+export {
+  verifyWebhookSignature,
+  SIGNATURE_HEADER,
+  DELIVERY_HEADER,
+  EVENT_HEADER,
+} from "./signature.ts";
