@@ -2,7 +2,16 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { daemonInfoPath, monadStateDir } from "@aaroncx/engine";
-import { DaemonInfoSchema, DaemonStatusSchema, type DaemonInfo, type DaemonStatus } from "@aaroncx/protocol";
+import {
+  DaemonInfoSchema,
+  DaemonStatusSchema,
+  ListSessionsResponseSchema,
+  SetModeResponseSchema,
+  type DaemonInfo,
+  type DaemonStatus,
+  type SessionMode,
+  type SessionRecord,
+} from "@aaroncx/protocol";
 
 /**
  * Daemon discovery and lifecycle for the CLI. The daemon writes
@@ -71,6 +80,39 @@ export async function fetchStatus(
   } catch {
     return undefined;
   }
+}
+
+/** GET /v1/sessions: every session the daemon knows, across repos. */
+export async function fetchSessions(handle: DaemonHandle): Promise<SessionRecord[]> {
+  const response = await fetch(`${handle.url}/v1/sessions`, {
+    headers: authHeaders(handle.token),
+  });
+  if (!response.ok) {
+    throw new Error(`GET /v1/sessions failed with ${response.status}`);
+  }
+  return ListSessionsResponseSchema.parse(await response.json()).sessions;
+}
+
+/**
+ * POST /v1/sessions/<id>/mode: switches the stored mode, swaps the policy,
+ * and re-layers the vendor mode on a live backend. The mode-switch user
+ * prompt is the caller's job (it goes over ACP, so it lands as a prompt
+ * event on the session's log).
+ */
+export async function setSessionMode(
+  handle: DaemonHandle,
+  sessionId: string,
+  mode: SessionMode,
+): Promise<SessionRecord> {
+  const response = await fetch(`${handle.url}/v1/sessions/${sessionId}/mode`, {
+    method: "POST",
+    headers: { ...authHeaders(handle.token), "content-type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  if (!response.ok) {
+    throw new Error(`POST /v1/sessions/${sessionId}/mode failed with ${response.status}`);
+  }
+  return SetModeResponseSchema.parse(await response.json()).session;
 }
 
 function daemonUrl(info: DaemonInfo): string {
