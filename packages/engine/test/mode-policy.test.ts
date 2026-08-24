@@ -253,6 +253,40 @@ describe("decideFixPermission", () => {
     }
   });
 
+  test("safe git global flags do not force a forward, unsafe ones still do", () => {
+    // Observed live in M2 acceptance: the agent runs `git --no-pager diff`
+    // constantly, and matching on the second token forwarded every one of
+    // those reads to a human for no security gain.
+    const { worktree } = makeWorktree();
+    const context = fixContext(worktree);
+    for (const command of [
+      "git --no-pager diff",
+      "git --no-pager diff -- src/config.ts",
+      "git -P log --oneline -3",
+      "git --no-pager --literal-pathspecs status",
+    ]) {
+      expect(
+        decideFixPermission(request({ kind: "execute", rawInput: { command } }), context),
+      ).toEqual({ kind: "allow" });
+    }
+    // -c can hand git a command to run, and -C / --git-dir / --work-tree
+    // point it outside the worktree, so these must still reach a human even
+    // though the subcommand after them is allowlisted.
+    for (const command of [
+      "git -c core.sshCommand=/tmp/evil fetch",
+      "git -c alias.st=!/tmp/evil st",
+      "git -c core.pager=/tmp/evil log",
+      "git -C /etc status",
+      "git --git-dir=/tmp/other/.git log",
+      "git --work-tree=/ status",
+      "git --exec-path=/tmp/evil diff",
+    ]) {
+      expect(
+        decideFixPermission(request({ kind: "execute", rawInput: { command } }), context),
+      ).toEqual({ kind: "forward" });
+    }
+  });
+
   test("git shorthand prefixes do not leak: gitk and git pushx are not allowlisted", () => {
     const { worktree } = makeWorktree();
     for (const command of ["gitk", "git statusx", "git diff-index"]) {

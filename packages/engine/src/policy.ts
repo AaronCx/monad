@@ -439,13 +439,47 @@ export function hasShellControlSyntax(command: string): boolean {
  * keeps `git push` behind a permission prompt however it is spelled,
  * including `git commit -m x && git push`.
  */
+/**
+ * Git global options that carry no capability of their own, so skipping them
+ * cannot turn a safe subcommand into an unsafe one. Deliberately excluded:
+ * -c (sets arbitrary config, and core.sshCommand or an alias turns into
+ * command execution), -C, --git-dir, --work-tree and --exec-path (all
+ * redirect git outside the worktree). A command using any of those does not
+ * match the allowlist and forwards to the human, which is the safe default.
+ */
+const SAFE_GIT_GLOBAL_FLAGS = new Set([
+  "--no-pager",
+  "-P",
+  "--paginate",
+  "--no-replace-objects",
+  "--literal-pathspecs",
+]);
+
+/**
+ * Drops the safe global flags so `git --no-pager diff` matches the `git diff`
+ * allowlist entry. Agents reach for --no-pager constantly; without this every
+ * one of those reads forwards to a human for no security gain.
+ */
+function stripSafeGitGlobals(normalized: string): string {
+  const parts = normalized.split(" ");
+  if (parts[0] !== "git") {
+    return normalized;
+  }
+  let index = 1;
+  while (index < parts.length && SAFE_GIT_GLOBAL_FLAGS.has(parts[index] as string)) {
+    index += 1;
+  }
+  return index === 1 ? normalized : ["git", ...parts.slice(index)].join(" ");
+}
+
 function matchesAllowlist(command: string, allowlist: string[]): boolean {
   const normalized = command.trim().replace(/[ \t]+/g, " ");
   if (hasShellControlSyntax(normalized)) {
     return false;
   }
+  const candidate = stripSafeGitGlobals(normalized);
   return allowlist.some(
-    (prefix) => normalized === prefix || normalized.startsWith(`${prefix} `),
+    (prefix) => candidate === prefix || candidate.startsWith(`${prefix} `),
   );
 }
 
