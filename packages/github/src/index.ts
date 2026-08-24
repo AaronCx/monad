@@ -27,6 +27,7 @@ export type { GitHubApp, GitHubAppConfig, InstallationToken } from "./app.ts";
 export type { OctokitLike, OctokitResponseLike } from "./octokit.ts";
 
 export {
+  parsePullRequest,
   resolveWebhookIntent,
   reviewPrInputFromPayload,
   parseMonadCommand,

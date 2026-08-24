@@ -93,6 +93,24 @@ const PullRequestSchema = z.object({
 /** The PR as monad reads it: the fields trust and the review session need. */
 export type NarrowedPullRequest = z.infer<typeof PullRequestSchema>;
 
+/**
+ * Narrows a pull request read back through the API (GET
+ * /repos/{owner}/{repo}/pulls/{pull_number}) into the same shape a signed
+ * payload carries.
+ *
+ * Two deliveries in the trigger set carry no pull request at all: a
+ * check_run rerequest and an @monad review comment. Trust for those cannot
+ * come from the delivery, so the caller fetches the PR through the
+ * installation token and resolves again, explicitly. This function is the
+ * one narrowing that fetch goes through, so the API answer is held to
+ * exactly the schema the webhook payload is, and an answer that does not
+ * match is undefined rather than a half-read object.
+ */
+export function parsePullRequest(payload: unknown): NarrowedPullRequest | undefined {
+  const parsed = PullRequestSchema.safeParse(payload);
+  return parsed.success ? parsed.data : undefined;
+}
+
 const CommentSchema = z.object({
   id: z.number().int().positive(),
   body: z.string().default(""),

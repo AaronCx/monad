@@ -3,6 +3,7 @@ import {
   COMMAND_PREFIX,
   describeDelivery,
   parseMonadCommand,
+  parsePullRequest,
   resolveWebhookIntent,
   reviewPrInputFromPayload,
   REVIEW_PR_ACTIONS,
@@ -299,5 +300,19 @@ describe("reviewPrInputFromPayload", () => {
   test("the fixture's own shape survives a round trip", () => {
     const raw = pullRequest();
     expect(raw.number).toBe(7);
+  });
+});
+
+describe("parsePullRequest", () => {
+  test("narrows a pull request fetched through the API", () => {
+    const parsed = parsePullRequest(pullRequest());
+    expect(parsed?.number).toBe(7);
+    expect(parsed?.head.sha).toBe(HEAD_SHA);
+    expect(parsed?.author_association).toBe("MEMBER");
+  });
+
+  test("an answer that is not a pull request is undefined, never half read", () => {
+    expect(parsePullRequest({ message: "Not Found" })).toBeUndefined();
+    expect(parsePullRequest(undefined)).toBeUndefined();
   });
 });
