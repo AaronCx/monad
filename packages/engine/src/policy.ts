@@ -203,12 +203,55 @@ export type PolicyVerdict =
   | { kind: "forward" };
 
 /**
- * The tool name as monad identifies it: the adapter sets both title and
- * _meta.claudeCode.toolName to mcp__<server>__<tool> for MCP tools (spike
- * 0a); _meta wins when present because title is also a human label for
- * built-in tools.
+ * The tool name for DISPLAY: what monad shows a human and puts in a rejection
+ * message. UNTRUSTED, because when no vendor-set name is available it falls
+ * back to `title`, which the vendor derives from the call itself and which
+ * for shell tools is the command the model wrote
+ * (verified: a `git push ...` permission request arrives with that whole
+ * command line as its title). A model can therefore put any string here, so
+ * this value may never decide anything. Use permissionToolNameTrusted for
+ * decisions (decision record 0009: the worktree is untrusted, and so is
+ * everything the model writes).
  */
 export function permissionToolName(params: RequestPermissionRequest): string | undefined {
+  const trusted = permissionToolNameTrusted(params);
+  if (trusted !== undefined) {
+    return trusted;
+  }
+  const title = params.toolCall?.title;
+  return typeof title === "string" && title.length > 0 ? title : undefined;
+}
+
+/**
+ * The tool name monad is willing to DECIDE on. Only sources the vendor fills
+ * in are consulted; nothing the model can write reaches this function.
+ *
+ * Two sources, both vendor-set, measured against adapter claude-agent-acp
+ * 0.70.0 on 2026-08-24 (see decision record 0006):
+ *
+ * 1. `toolCall._meta.claudeCode.toolName`. Documented, and what tool_call
+ *    session updates always carry. On a `session/request_permission` the
+ *    adapter attaches it ONLY when the call came from a sub-agent
+ *    (`...(parentToolUseId ? { _meta: { claudeCode: { toolName,
+ *    parentToolUseId } } } : {})` in acp-agent.js), so a top-level call has
+ *    no `_meta` at all. Every permission request in this machine's event log
+ *    confirms it: none of them carries one.
+ * 2. The permission rule the vendor offers to persist, on its own
+ *    `allow_always` option: `option._meta.permission.changes[].targets[]`
+ *    with `type: "tool"` carries the real tool name
+ *    (`permissionMetadataForAlwaysAllow(suggestions, toolName)`). It is built
+ *    from the vendor's tool name, not from the model's input: the live
+ *    `git push` request above offers `toolName: "Bash"` while its title is
+ *    the command, and the live `run_checks` request offers
+ *    `mcp__monad-checks__run_checks`.
+ *
+ * Default deny: no source, a malformed target, or two targets naming
+ * different tools all return undefined, and an undefined name is not a monad
+ * tool.
+ */
+export function permissionToolNameTrusted(
+  params: RequestPermissionRequest,
+): string | undefined {
   const meta = params.toolCall?._meta as
     | { claudeCode?: { toolName?: unknown } }
     | null
@@ -217,12 +260,76 @@ export function permissionToolName(params: RequestPermissionRequest): string | u
   if (typeof metaName === "string" && metaName.length > 0) {
     return metaName;
   }
-  const title = params.toolCall?.title;
-  return typeof title === "string" && title.length > 0 ? title : undefined;
+  return toolNameFromPermissionRules(params);
+}
+
+/** One `targets[]` entry of a vendor permission-rule change. */
+interface PermissionRuleTarget {
+  type?: unknown;
+  toolName?: unknown;
+}
+
+/**
+ * The tool name the vendor's own "always allow" rule would name, when every
+ * rule target in the request agrees on one. Disagreement or a malformed
+ * target yields undefined rather than a guess.
+ */
+function toolNameFromPermissionRules(
+  params: RequestPermissionRequest,
+): string | undefined {
+  let found: string | undefined;
+  for (const option of params.options ?? []) {
+    const meta = option._meta as
+      | { permission?: { changes?: { targets?: PermissionRuleTarget[] }[] } }
+      | null
+      | undefined;
+    const changes = meta?.permission?.changes;
+    if (!Array.isArray(changes)) {
+      continue;
+    }
+    for (const change of changes) {
+      const targets = change?.targets;
+      if (!Array.isArray(targets)) {
+        continue;
+      }
+      for (const target of targets) {
+        if (target?.type !== "tool") {
+          continue;
+        }
+        const name = target.toolName;
+        if (typeof name !== "string" || name.length === 0) {
+          return undefined; // Malformed: monad does not know what this is.
+        }
+        if (found !== undefined && found !== name) {
+          return undefined; // Two tools named: ambiguous, so deny.
+        }
+        found = name;
+      }
+    }
+  }
+  return found;
 }
 
 const MONAD_CHECKS_TOOL_PREFIX = "mcp__monad-checks__";
 
+/**
+ * The complete set of tools the monad-checks MCP server serves. The suffix
+ * after the prefix must be one of these: a name monad does not serve is not
+ * monad's tool, whoever is claiming it.
+ */
+const MONAD_CHECKS_TOOL_NAMES = new Set(["run_checks", "list_checks", "check_config"]);
+
+/**
+ * Tool call kinds an MCP call can arrive as. The adapter maps every tool it
+ * does not know by name (which is every `mcp__server__tool`) through
+ * `toolInfoFromToolUse`'s default branch to `kind: "other"`, and all three
+ * live monad-checks permission requests in this machine's event log are
+ * `other`, as was the `ping_check` capture in decision record 0006. `fetch`
+ * is tolerated so a future adapter that classifies fetch-shaped MCP tools
+ * does not break the checks plane; `execute` and `edit` are not, which is
+ * what stops a shell call from being mistaken for a checks call.
+ */
+const MCP_TOOL_CALL_KINDS = new Set(["other", "fetch"]);
 /** The by-stamp for a decision a policy made in the given mode. */
 function byForMode(
   mode: SessionMode,
@@ -236,8 +343,35 @@ function byForMode(
   return "policy:interactive";
 }
 
-function isMonadChecksTool(params: RequestPermissionRequest): boolean {
-  return permissionToolName(params)?.startsWith(MONAD_CHECKS_TOOL_PREFIX) ?? false;
+/**
+ * True only for a call monad can prove is one of its own checks tools. Every
+ * mode allows these unconditionally, ahead of mode dispatch, so identity here
+ * has to be trustworthy: three conditions, all of them from the vendor.
+ *
+ * 1. The kind is one an MCP call actually arrives as. A shell call is
+ *    `execute` and can never pass, however it is titled.
+ * 2. The name comes from permissionToolNameTrusted, never from `title`.
+ * 3. The suffix after `mcp__monad-checks__` is a tool monad actually serves.
+ *
+ * Any of the three failing means this is not a monad tool, and the request
+ * falls through to the mode's own policy, which is the denying direction.
+ *
+ * Note the server NAME is not proof of origin on its own: a session inherits
+ * the user's global `~/.claude` configuration (decision record 0006 fact 8),
+ * so a user MCP server also called monad-checks would produce the same
+ * prefix. The suffix set narrows that to three read-only tools of monad's
+ * own design, and the checks mount itself is authenticated separately.
+ */
+export function isMonadChecksTool(params: RequestPermissionRequest): boolean {
+  const kind = params.toolCall?.kind;
+  if (typeof kind !== "string" || !MCP_TOOL_CALL_KINDS.has(kind)) {
+    return false;
+  }
+  const name = permissionToolNameTrusted(params);
+  if (name === undefined || !name.startsWith(MONAD_CHECKS_TOOL_PREFIX)) {
+    return false;
+  }
+  return MONAD_CHECKS_TOOL_NAMES.has(name.slice(MONAD_CHECKS_TOOL_PREFIX.length));
 }
 
 /**

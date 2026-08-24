@@ -181,6 +181,43 @@ which destroys the property that the transcript is what happened. The agent may 
 `--no-verify` itself; it still matches the `git commit` prefix, so the safer spelling is available
 without monad forging it.
 
+## Tool identity is what the vendor says, never what the call is labelled
+
+Every mode allows monad's own checks tools unconditionally, ahead of mode dispatch, because
+without that a plain "run the checks" needs a human keypress and a detached session cancels the
+call outright. That makes the identity check load-bearing: whatever monad accepts as "this is my
+tool" is a hole straight through review mode's read-only policy.
+
+In M2 that identity fell back to `toolCall.title`. The vendor derives the title from the call, and
+for shell tools it is the model's own command string, so a `Bash` call could be titled
+`mcp__monad-checks__run_checks` and be auto-allowed in every mode. The model writes that string,
+so under this record's principle it may not decide anything.
+
+Identity now needs three things to agree, and all three come from the vendor:
+
+- the `kind` is one an MCP call actually arrives as (`other`, or `fetch` as headroom). A shell call
+  is `execute` and can never pass, however it is titled;
+- the name comes from `permissionToolNameTrusted`, which reads only vendor-set fields;
+- the suffix after `mcp__monad-checks__` is a tool monad actually serves: `run_checks`,
+  `list_checks`, `check_config`.
+
+Measuring what the vendor actually sends changed the answer here. On a `session/request_permission`
+the adapter attaches `toolCall._meta.claudeCode.toolName` only for sub-agent calls, so a top-level
+`run_checks` has no `_meta` at all: reading that field alone would have made monad reject every
+real checks call. The name that IS on every request is the permission rule the vendor offers to
+persist on its `allow_always` option
+(`_meta.permission.changes[].targets[] = { type: "tool", toolName }`), which the adapter builds
+from its own tool name rather than from the model's input. The live proof is the same message
+twice over: a shell call titled with the whole `git push ...` command line names `Bash` there,
+and the checks call names `mcp__monad-checks__run_checks`. Record 0006 pins the measurement.
+
+`permissionToolName` keeps the title fallback and is now display only: a human-facing label and a
+rejection message may say whatever the call called itself, because neither decides anything.
+
+Default deny throughout: no vendor name, a malformed rule target, two targets naming different
+tools, a missing `kind`, or an unrecognized suffix all mean "not a monad tool", and the request
+falls through to the mode's own policy, which rejects it in review mode.
+
 ## Prompt injection is not solved
 
 The PR's diff, title, and body still reach the model. That is the product. The template fences
