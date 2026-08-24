@@ -20,6 +20,24 @@ The daemon speaks the Agent Client Protocol (ACP) on both sides.
 - What ACP does not cover (cross-repo session listing, webhook-triggered sessions, check
   results) goes in a small control API beside it, not in a new protocol.
 
+## Trust boundaries
+
+The worktree is untrusted. Everything in it (source, `.monad.yml`, `package.json`, lockfiles,
+prompt templates) is attacker-controlled content in exactly the case monad exists to serve:
+reviewing a pull request written by someone else, or by an agent. Content from the worktree may
+be read, diffed, scanned, and shown to a model. It may never decide what monad executes, what
+monad's own prompt says, or what a policy permits. Anything that decides comes from a trusted
+source: the base commit, `~/.monad`, or the human running the command.
+
+Two things violate this by nature and are handled explicitly rather than pretended away:
+installing dependencies runs the PR's lifecycle scripts, and running lint, typecheck, build, or
+test runs the PR's toolchain. Both are opt-in per trust level, never the default for a PR from
+outside the repo.
+
+Every session therefore carries a trust level, `trusted` or `untrusted`, resolved by the caller
+and stored on the session record. An absent or unrecognized value is `untrusted`. Decision
+record 0009 has the resolution rules and what each level allows.
+
 ## Persistence
 
 Sessions persist as an append-only event log in SQLite (one file under `~/.monad`, WAL mode).
