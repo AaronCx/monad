@@ -46,6 +46,14 @@ export const SessionRecordSchema = z.object({
   agentSessionId: z.string().optional(),
   mode: SessionModeSchema,
   status: SessionStatusSchema,
+  /**
+   * Diff bounds for the session's checks binding. Review sessions (M2 stage
+   * 3) pin them to the PR's base and head shas; interactive sessions leave
+   * them unset, so run_checks diffs against the default-branch merge-base
+   * at call time.
+   */
+  base: z.string().optional(),
+  head: z.string().optional(),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
 });

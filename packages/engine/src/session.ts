@@ -148,7 +148,7 @@ export class SessionManager {
     this.policy = createPolicy(hooks);
   }
 
-  async create(params: { cwd: string }): Promise<SessionRecord> {
+  async create(params: { cwd: string; base?: string; head?: string }): Promise<SessionRecord> {
     const now = new Date().toISOString();
     const record: SessionRecord = {
       id: Bun.randomUUIDv7(),
@@ -156,6 +156,10 @@ export class SessionManager {
       backend: "claude-acp",
       mode: "interactive",
       status: "idle",
+      // Review sessions (stage 3) pin the checks diff to the PR's shas;
+      // interactive sessions leave both unset.
+      base: params.base,
+      head: params.head,
       createdAt: now,
       updatedAt: now,
     };

@@ -28,6 +28,8 @@ interface SessionRow {
   agent_session_id: string | null;
   mode: string;
   status: string;
+  base: string | null;
+  head: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +50,8 @@ function rowToSession(row: SessionRow): SessionRecord {
     agentSessionId: row.agent_session_id ?? undefined,
     mode: row.mode,
     status: row.status,
+    base: row.base ?? undefined,
+    head: row.head ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -92,6 +96,8 @@ export class SessionStore {
         agent_session_id TEXT,
         mode TEXT NOT NULL,
         status TEXT NOT NULL,
+        base TEXT,
+        head TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -104,6 +110,16 @@ export class SessionStore {
       );
       CREATE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, seq);
     `);
+    // M1 databases predate the base/head columns; add them in place. SQLite
+    // has no ADD COLUMN IF NOT EXISTS, so a duplicate-column error means the
+    // migration already ran.
+    for (const column of ["base", "head"]) {
+      try {
+        this.db.exec(`ALTER TABLE sessions ADD COLUMN ${column} TEXT;`);
+      } catch {
+        // Column already present.
+      }
+    }
   }
 
   /** Inserts a new session record. Throws if the id already exists. */
@@ -111,8 +127,8 @@ export class SessionStore {
     const parsed = SessionRecordSchema.parse(record);
     this.db
       .query(
-        `INSERT INTO sessions (id, cwd, backend, agent_session_id, mode, status, created_at, updated_at)
-         VALUES ($id, $cwd, $backend, $agentSessionId, $mode, $status, $createdAt, $updatedAt)`,
+        `INSERT INTO sessions (id, cwd, backend, agent_session_id, mode, status, base, head, created_at, updated_at)
+         VALUES ($id, $cwd, $backend, $agentSessionId, $mode, $status, $base, $head, $createdAt, $updatedAt)`,
       )
       .run({
         id: parsed.id,
@@ -121,6 +137,8 @@ export class SessionStore {
         agentSessionId: parsed.agentSessionId ?? null,
         mode: parsed.mode,
         status: parsed.status,
+        base: parsed.base ?? null,
+        head: parsed.head ?? null,
         createdAt: parsed.createdAt,
         updatedAt: parsed.updatedAt,
       });
