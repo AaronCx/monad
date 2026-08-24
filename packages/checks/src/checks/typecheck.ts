@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import type { CheckResult, Finding, TypecheckCheckConfig } from "../types";
+import type { TrustLevel } from "../config/loader";
 import { statusFromFindings } from "./status";
 
 const DEFAULT_TIMEOUT_SECONDS = 300;
@@ -58,12 +59,28 @@ function readScripts(cwd: string): Record<string, string> | undefined {
  *  2. a tsconfig.json (`bunx tsc --noEmit -p tsconfig.json`)
  *  3. a pyproject.toml with pyright or mypy on PATH
  *  4. nothing: skip with a note
+ *
+ * Detection reads the worktree, so under decision record 0009 it is itself a
+ * place the reviewed PR could decide what monad executes. Dropping
+ * `checks.typecheck.command` from an untrusted config is not enough on its
+ * own: `bun run typecheck` runs whatever `scripts.typecheck` says, and
+ * `mypy` loads the `plugins` named in the PR's own `pyproject.toml`. Both are
+ * PR-authored code, so an untrusted run refuses them and says so. What is
+ * left is a fixed command line reading a configuration format that cannot
+ * carry code: `tsc` against `tsconfig.json`, and `pyright`.
  */
-function detectTypechecker(cwd: string): { command: string; kind: string } | { skip: string } {
+function detectTypechecker(
+  cwd: string,
+  trust: TrustLevel,
+): { command: string; kind: string } | { skip: string } {
+  const untrusted = trust === "untrusted";
   const scripts = readScripts(cwd);
   if (scripts) {
     for (const name of ["typecheck", "type-check"]) {
       if (typeof scripts[name] === "string") {
+        if (untrusted) {
+          break; // The script body is written by the PR. Fall through to tsc.
+        }
         return { command: `bun run ${name}`, kind: `package.json ${name} script` };
       }
     }
@@ -73,8 +90,20 @@ function detectTypechecker(cwd: string): { command: string; kind: string } | { s
   }
   if (existsSync(join(cwd, "pyproject.toml"))) {
     if (isOnPath("pyright")) return { command: "pyright", kind: "pyright" };
-    if (isOnPath("mypy")) return { command: "mypy .", kind: "mypy" };
+    if (isOnPath("mypy")) {
+      if (untrusted) {
+        return {
+          skip: "untrusted PR: mypy is not run because it loads plugins from the PR's pyproject.toml",
+        };
+      }
+      return { command: "mypy .", kind: "mypy" };
+    }
     return { skip: "pyproject.toml found but neither pyright nor mypy is on PATH" };
+  }
+  if (untrusted && scripts) {
+    return {
+      skip: "untrusted PR: the package.json typecheck script is not run, and no tsconfig.json was found",
+    };
   }
   return { skip: "no typecheck script, tsconfig.json, or pyproject.toml found" };
 }
@@ -108,7 +137,11 @@ export function parseTscOutput(output: string): Finding[] {
  * can break a file the diff never touched.
  */
 export async function checkTypecheck(config: TypecheckCheckConfig): Promise<CheckResult> {
-  const cwd = (config as TypecheckCheckConfig & { cwd?: string }).cwd ?? process.cwd();
+  const context = config as TypecheckCheckConfig & { cwd?: string; trust?: TrustLevel };
+  const cwd = context.cwd ?? process.cwd();
+  // Default deny: an unset trust level is the untrusted one here, because the
+  // only caller that omits it is one that did not think about it.
+  const trust: TrustLevel = context.trust === "trusted" ? "trusted" : "untrusted";
   const timeoutSeconds = config.timeout ?? DEFAULT_TIMEOUT_SECONDS;
 
   let command: string;
@@ -117,7 +150,7 @@ export async function checkTypecheck(config: TypecheckCheckConfig): Promise<Chec
     command = config.command;
     kind = "custom";
   } else {
-    const detected = detectTypechecker(cwd);
+    const detected = detectTypechecker(cwd, trust);
     if ("skip" in detected) {
       return {
         type: "typecheck",

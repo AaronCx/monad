@@ -174,9 +174,9 @@ function countPatchLines(patch: string): { added: number; removed: number } {
 /**
  * The honest half of decision record 0009's install trade: an untrusted PR
  * gets no `bun install`, so `lint` and `typecheck` ran against a tree with no
- * node_modules. They still run, because a detected linter or a package script
- * can still say something useful, but whatever they said has to carry the
- * caveat rather than read like a verdict on the PR's code.
+ * node_modules. They still run, because a detected linter whose command line
+ * monad chose can still say something useful, but whatever they said has to
+ * carry the caveat rather than read like a verdict on the PR's code.
  */
 export const NO_DEPS_NOTE =
   "dependencies were not installed for this untrusted PR, so this result may reflect the " +

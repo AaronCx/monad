@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import type { ChangedFile, CheckResult, LintCheckConfig } from "../types";
+import type { TrustLevel } from "../config/loader";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -36,7 +37,10 @@ async function runCommand(command: string, cwd?: string): Promise<{ stdout: stri
 
 type LinterKind = "biome" | "eslint" | "ruff" | "swiftlint";
 
-export function detectLinter(cwd: string): { kind: LinterKind; commandPrefix: string } | null {
+export function detectLinter(
+  cwd: string,
+  trust: TrustLevel = "trusted",
+): { kind: LinterKind; commandPrefix: string } | null {
   if (existsSync(join(cwd, "biome.json")) || existsSync(join(cwd, "biome.jsonc"))) {
     return { kind: "biome", commandPrefix: "bunx biome check" };
   }
@@ -47,6 +51,14 @@ export function detectLinter(cwd: string): { kind: LinterKind; commandPrefix: st
   ];
   for (const config of eslintConfigs) {
     if (existsSync(join(cwd, config))) {
+      // Decision record 0009: every eslint config format loads its parser,
+      // plugins, and (for the flat and .js formats) the config file itself as
+      // code from the worktree, so running eslint on an untrusted PR executes
+      // the PR. The other linters here take a fixed command line and a
+      // configuration format that cannot carry code.
+      if (trust === "untrusted") {
+        return null;
+      }
       return { kind: "eslint", commandPrefix: "bunx eslint" };
     }
   }
@@ -114,7 +126,11 @@ export async function checkLint(
   files: ChangedFile[],
   config: LintCheckConfig,
 ): Promise<CheckResult> {
-  const cwd = (config as LintCheckConfig & { cwd?: string }).cwd ?? process.cwd();
+  const context = config as LintCheckConfig & { cwd?: string; trust?: TrustLevel };
+  const cwd = context.cwd ?? process.cwd();
+  // Default deny: the pipeline always injects a resolved level, so an absent
+  // one means a caller that did not think about trust.
+  const trust: TrustLevel = context.trust === "trusted" ? "trusted" : "untrusted";
 
   // Scope the linter to changed lintable files only; do not run against the whole repo.
   const lintableFiles = files
@@ -138,7 +154,7 @@ export async function checkLint(
   if (config.command) {
     command = config.command;
   } else {
-    const detected = detectLinter(cwd);
+    const detected = detectLinter(cwd, trust);
     if (!detected) {
       return {
         type: "lint",

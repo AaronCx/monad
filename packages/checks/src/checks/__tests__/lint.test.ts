@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { checkLint } from "../lint";
+import { checkLint, detectLinter } from "../lint";
 import type { ChangedFile, LintCheckConfig } from "../../types";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -70,15 +70,46 @@ describe("Lint & Type Checker", () => {
     }
   });
 
-  test("auto-detects .eslintrc.json", async () => {
+  // Trust is explicit here because checkLint now defaults to "untrusted"
+  // (decision record 0009), and eslint is the one detected linter that loads
+  // code from the tree it is linting.
+  test("auto-detects .eslintrc.json when trusted", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "lint-test-"));
     try {
       writeFileSync(join(tmpDir, ".eslintrc.json"), '{}');
-      const config = { ...defaultConfig, cwd: tmpDir } as any;
+      const config = { ...defaultConfig, cwd: tmpDir, trust: "trusted" } as any;
       const files = [file("src/index.ts", "const x = 1;")];
       const result = await checkLint(files, config);
       expect(result.type).toBe("lint");
       expect((result.details as any).skipped).toBeUndefined();
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not run eslint on an untrusted tree", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "lint-test-"));
+    try {
+      // A flat config IS executable JavaScript, and every eslint config
+      // format resolves its parser and plugins out of the linted tree.
+      writeFileSync(join(tmpDir, "eslint.config.js"), "export default [];\n");
+      const config = { ...defaultConfig, cwd: tmpDir, trust: "untrusted" } as any;
+      const files = [file("src/index.ts", "const x = 1;")];
+      const result = await checkLint(files, config);
+      expect(result.status).toBe("pass");
+      expect((result.details as any).skipped).toBe(true);
+      expect(detectLinter(tmpDir, "untrusted")).toBeNull();
+      expect(detectLinter(tmpDir, "trusted")?.kind).toBe("eslint");
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("untrusted still detects the linters whose config cannot carry code", () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "lint-test-"));
+    try {
+      writeFileSync(join(tmpDir, "biome.json"), "{}");
+      expect(detectLinter(tmpDir, "untrusted")?.kind).toBe("biome");
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }

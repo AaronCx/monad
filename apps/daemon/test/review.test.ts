@@ -442,7 +442,7 @@ let trustedReview: StreamedReview;
  * trusted review runs in the same beforeAll and writes both canaries on
  * purpose, so the untrusted assertions read this snapshot, not the disk.
  */
-let canariesAfterUntrusted: { lint: boolean; install: boolean };
+let canariesAfterUntrusted: { lint: boolean; install: boolean; typecheck: boolean };
 let untrustedRunChecks: { text: string; structured: Record<string, unknown> };
 
 function checksEventOf(review: StreamedReview): {
@@ -525,17 +525,33 @@ describe("review of a hostile PR", () => {
     canariesAfterUntrusted = {
       lint: existsSync(malicious.lintCanary),
       install: existsSync(malicious.installCanary),
+      typecheck: existsSync(malicious.typecheckCanary),
     };
     // Then the same PR as a trusted one, which is what --trust sends. This
     // one is EXPECTED to write both canaries.
     trustedReview = await postReviewRequest(daemon, { ...body, trust: "trusted" });
   }, 90_000);
 
-  test("an untrusted review leaves both canaries absent", () => {
+  test("an untrusted review leaves every canary absent", () => {
     expect(untrustedReview.errorLine).toBeUndefined();
     expect(untrustedReview.result?.trust).toBe("untrusted");
     expect(canariesAfterUntrusted.lint).toBe(false);
     expect(canariesAfterUntrusted.install).toBe(false);
+    // Dropping checks.typecheck.command is not enough on its own: the
+    // typechecker is DETECTED by reading the PR's package.json, and
+    // `bun run typecheck` runs whatever the PR put in scripts.typecheck.
+    expect(canariesAfterUntrusted.typecheck).toBe(false);
+  });
+
+  test("an untrusted review refuses the PR's own package.json typecheck script", () => {
+    const payload = checksEventOf(untrustedReview);
+    const typecheck = payload.checks.find((check) => check.type === "typecheck");
+    expect(typecheck?.status).toBe("pass");
+    expect(typecheck?.details.skipped).toBe(true);
+    expect(String(typecheck?.details.reason)).toContain(
+      "untrusted PR: the package.json typecheck script is not run",
+    );
+    expect(JSON.stringify(typecheck ?? {})).not.toContain("bun run typecheck");
   });
 
   test("an untrusted review installs nothing and says why", () => {
@@ -619,6 +635,8 @@ describe("review of a hostile PR", () => {
     expect(worktreeReady.trust).toBe("trusted");
     expect(existsSync(malicious.installCanary)).toBe(true);
     expect(existsSync(malicious.lintCanary)).toBe(true);
+    // Including the detected typecheck script, which is the PR's own.
+    expect(existsSync(malicious.typecheckCanary)).toBe(true);
   });
 
   test("the two sessions carry their trust level on the record", async () => {

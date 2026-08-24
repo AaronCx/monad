@@ -76,6 +76,40 @@ says which happened rather than implying a clean pass. The alternative, installi
 `--ignore-scripts`, buys a real type check at the cost of a partial install that can fail on
 its own; it is worth revisiting with real numbers once M3 reviews outside PRs daily.
 
+### Detection is a decision, so detection is bounded too
+
+Dropping `checks.typecheck.command` is only half of it, and the first draft of this change
+shipped the other half open. `detectTypechecker` reads `<worktree>/package.json` and returns
+`bun run typecheck`, which runs whatever the PR wrote in `scripts.typecheck`. Measured against
+this branch on 2026-08-24: a temp repo whose only content was a `package.json` with
+`scripts.typecheck` writing a canary, reviewed with `trust: "untrusted"` and `profile: "fast"`,
+wrote the canary. `typecheck` is enabled by default and is a fast-profile check, so that was
+arbitrary code execution on `monad review <pr>` with no flags, which is finding 1 again by a
+second route. Detection reads the untrusted bytes, so under this record it decides nothing
+either.
+
+An untrusted run therefore uses only detections where monad wrote the command line AND the
+configuration format the tool reads cannot carry code:
+
+| detection | untrusted | why |
+|---|---|---|
+| `package.json` `typecheck` / `type-check` script | refused | the script body is the PR's |
+| `tsc` from `tsconfig.json` | allowed | fixed command line, and `tsconfig.json` is data |
+| `pyright` | allowed | fixed command line, config is data |
+| `mypy` | refused | loads the `plugins` named in the PR's `pyproject.toml` |
+| `biome`, `ruff`, `swiftlint` | allowed | fixed command line, config is data |
+| `eslint` | refused | every config format resolves its parser and plugins out of the linted tree, and a flat config is itself JavaScript |
+
+When nothing qualifies, the check reports `skipped` with a reason naming the refused lever, so
+the transcript says a check was declined rather than that the repo had no checker. The leaf
+checks default to untrusted when handed no level at all, which is the opposite of `runChecks`'s
+library default and deliberate: the pipeline always injects a resolved level, so an absent one
+means a caller that did not think about it.
+
+Not covered, and worth saying: `bunx` fetches the allowed tools from the npm registry when they
+are not installed, so an untrusted run still executes third-party code monad named. That is the
+same supply chain the machine already runs, not the PR's.
+
 ## The agent does not hold the daemon token
 
 The same boundary applied to credentials. M2 handed `{ port, token }` to the Claude backend and

@@ -1,6 +1,15 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, setDefaultTimeout } from "bun:test";
 import { checkDependencies, isMetadataOnlyPackageJsonChange } from "../dependencies";
 import type { ChangedFile, DependencyCheckConfig } from "../../types";
+
+// Every case that changes package.json reaches the auditor, which shells out
+// to `bun audit` and falls back to `npm audit`. Both talk to a registry, so
+// the wall time is somebody else's network, not this code: under load the
+// first one blew the 5s default and turned the suite red for no reason. The
+// audit is not what these cases assert (they assert lockfile-drift reading),
+// so the bound is raised rather than the call being mocked away, which would
+// stop exercising the real command path.
+setDefaultTimeout(60_000);
 
 const defaultConfig: DependencyCheckConfig = {
   enabled: true,

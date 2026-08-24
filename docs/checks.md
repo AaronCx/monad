@@ -113,6 +113,14 @@ its non-zero exit is the check's failure. It is honored only for a TRUSTED sessi
 of an untrusted PR the config comes from the PR base and every `command` is stripped, so `lint`
 and `typecheck` fall back to detection and `build` and `test` do not run at all.
 
+Detection reads the worktree too, so it is bounded the same way. An untrusted run uses only
+detections whose command line monad chose and whose configuration format cannot carry code: it
+will not run `bun run typecheck` (the PR writes `scripts.typecheck`), it will not run `mypy`
+(the PR writes its `plugins`), and it will not run `eslint` (every eslint config format loads
+its parser and plugins out of the tree being linted, and a flat config IS JavaScript). What is
+left for an untrusted PR is `tsc`, `pyright`, `biome`, `ruff`, and `swiftlint`. When nothing
+qualifies the check reports a skip whose reason says which lever was refused.
+
 ## Untrusted reviews
 
 | | trusted | untrusted |
@@ -121,7 +129,7 @@ and `typecheck` fall back to detection and `build` and `test` do not run at all.
 | `command`, `custom_patterns`, `review.prompt`, `extends` | honored | dropped, each named in a warning |
 | dependency install | as configured | skipped unless `--install` |
 | `secrets`, `file_patterns`, `dependencies`, `agent_patterns` | run | run |
-| `lint`, `typecheck` | run, detected or configured | run, detected only, honest about a missing install |
+| `lint`, `typecheck` | run, detected or configured | run, detected only, and only detections that cannot execute PR-authored code; honest about a missing install |
 | `build`, `test` | run in the full profile | never; reported as a pass whose reason names the trust level |
 | agent `run_checks` profile | as asked | forced to fast, with the reason in the result |
 

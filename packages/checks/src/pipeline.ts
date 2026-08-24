@@ -145,7 +145,17 @@ async function buildCheckEntries(
 
   // Command-running checks read their cwd off the config object; inject the
   // pipeline's cwd so they run in the worktree, never the daemon's cwd.
-  const withCwd = <T extends object>(c: T): T & { cwd: string } => ({ ...c, cwd });
+  // Every check that shells out gets the resolved trust level alongside the
+  // cwd, so a leaf never has to guess. Dropping `command` from an untrusted
+  // config is not the whole job: `lint` and `typecheck` also DETECT what to
+  // run by reading the worktree, which is the same untrusted bytes.
+  const untrusted = (opts.trust ?? "trusted") === "untrusted";
+  const trustLevel: TrustLevel = untrusted ? "untrusted" : "trusted";
+  const withContext = <T extends object>(c: T): T & { cwd: string; trust: TrustLevel } => ({
+    ...c,
+    cwd,
+    trust: trustLevel,
+  });
 
   const all: CheckEntry[] = [
     { key: "secrets", fn: () => checkSecrets(input.files, config.checks.secrets!, sharedContext) },
@@ -160,14 +170,13 @@ async function buildCheckEntries(
           config.checks.agent_patterns!,
         ),
     },
-    { key: "lint", fn: () => checkLint(input.files, withCwd(config.checks.lint!)) },
-    { key: "typecheck", fn: () => checkTypecheck(withCwd(config.checks.typecheck!)) },
-    { key: "dependencies", fn: () => checkDependencies(input.files, withCwd(config.checks.dependencies!)) },
-    { key: "build", fn: () => checkBuild(withCwd(config.checks.build!)) },
-    { key: "test", fn: () => checkTest(withCwd(config.checks.test!)) },
+    { key: "lint", fn: () => checkLint(input.files, withContext(config.checks.lint!)) },
+    { key: "typecheck", fn: () => checkTypecheck(withContext(config.checks.typecheck!)) },
+    { key: "dependencies", fn: () => checkDependencies(input.files, withContext(config.checks.dependencies!)) },
+    { key: "build", fn: () => checkBuild(withContext(config.checks.build!)) },
+    { key: "test", fn: () => checkTest(withContext(config.checks.test!)) },
   ];
 
-  const untrusted = (opts.trust ?? "trusted") === "untrusted";
   const entries = all.filter((entry) => {
     if (opts.only && !opts.only.includes(entry.key)) return false;
     if (untrusted && UNTRUSTED_BLOCKED.includes(entry.key)) {
