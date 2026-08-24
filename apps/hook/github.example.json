@@ -1,0 +1,8 @@
+{
+  "appId": "123456",
+  "privateKeyPath": "~/.monad/monad-app.private-key.pem",
+  "webhookSecret": "SET ME",
+  "installations": {
+    "AaronCx/monad-review-demo": { "repoRoot": "~/Developer/github/monad-review-demo" }
+  }
+}
