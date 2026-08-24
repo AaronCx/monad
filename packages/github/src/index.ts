@@ -15,3 +15,13 @@ export {
   DELIVERY_HEADER,
   EVENT_HEADER,
 } from "./signature.ts";
+
+export {
+  createGitHubApp,
+  normalizePrivateKey,
+  readPrivateKey,
+  DEFAULT_CACHE_ENTRIES,
+  INSTALLATION_TOKEN_TTL_MS,
+} from "./app.ts";
+export type { GitHubApp, GitHubAppConfig, InstallationToken } from "./app.ts";
+export type { OctokitLike, OctokitResponseLike } from "./octokit.ts";
