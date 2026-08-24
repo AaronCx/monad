@@ -7,9 +7,21 @@ import { monadStateDir } from "./paths.ts";
 
 /**
  * Review worktrees: detached git checkouts under ~/.monad/worktrees, one per
- * session, so a review never touches the user's main checkout. The only
- * thing monad writes into the main repo is the namespaced refs/monad/pr/*
- * refs used to materialize PR heads.
+ * session, so a review never touches the user's main checkout.
+ *
+ * What monad writes into the main repo, and nothing else:
+ * 1. refs/monad/pr/<n>, the namespaced ref a PR head is materialized as.
+ * 2. .git/worktrees/<name>, git's own bookkeeping for a registered
+ *    worktree; `git worktree add` cannot exist without it, and
+ *    removeWorktree unregisters it again.
+ * 3. refs/remotes/origin/<baseRef> plus the fetched objects, from the
+ *    `git fetch origin <baseRef>` that resolveBaseSha needs before it can
+ *    compute a merge base. Fetching a remote-tracking ref is the ordinary
+ *    meaning of a fetch and is the same write `git fetch` would make on its
+ *    own.
+ * None of the three touch the working tree, the index, HEAD, a local
+ * branch, a stash, or a config value. A dirty main checkout stays exactly
+ * as dirty as it was.
  *
  * Install strategy per decision record 0008: symlinking node_modules from
  * the main checkout is structurally broken under bun's isolated linker and
@@ -133,7 +145,10 @@ export async function fetchPullRequestHead(input: {
 
 /**
  * The merge base of a PR against its base branch: fetch the base ref from
- * origin, then merge-base origin/<baseRef> with the head sha.
+ * origin, then merge-base origin/<baseRef> with the head sha. The fetch
+ * updates refs/remotes/origin/<baseRef> in the main repo (item 3 of the
+ * write list at the top of this file); no local branch and no working tree
+ * is touched.
  */
 export async function resolveBaseSha(input: {
   repoRoot: string;
