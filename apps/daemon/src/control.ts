@@ -99,6 +99,8 @@ async function handleReview(
       pr: parsed.data.pr,
       full: parsed.data.full,
       noInstall: parsed.data.noInstall,
+      trust: parsed.data.trust,
+      install: parsed.data.install,
       onEvent: (event) => {
         writeLine({ type: "event", event });
       },
@@ -114,6 +116,7 @@ async function handleReview(
       checksTable: result.checksTable,
       baseSha: result.baseSha,
       headSha: result.headSha,
+      trust: result.trust,
     });
   } catch (error) {
     writeLine({ type: "error", message: errorMessage(error) });

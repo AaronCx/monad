@@ -32,12 +32,33 @@ monad review <pr> [--full] [--post] [--fix] [--no-install]
 ```
 
 `monad review` fetches the PR head into the namespaced ref `refs/monad/pr/<n>`, checks it out
-as a detached `git worktree` under `~/.monad/worktrees`, installs the worktree's dependencies,
-and runs the checks scoped to the `base..head` diff. It then opens a review session in that
-worktree with the `monad-checks` tools injected, and parses the agent's final report into a
-structured `ReviewReport` (summary, verdict, findings with `path:line` and severity). The exit
-code follows the verdict: 0 when the verdict is `looks_good` or `comment` and no check failed,
-1 otherwise.
+as a detached `git worktree` under `~/.monad/worktrees`, installs the worktree's dependencies
+when the PR is trusted, and runs the checks scoped to the `base..head` diff. It then opens a
+review session in that worktree with the `monad-checks` tools injected, and parses the agent's
+final report into a structured `ReviewReport` (summary, verdict, findings with `path:line` and
+severity). The exit code follows the verdict: 0 when the verdict is `looks_good` or `comment`
+and no check failed, 1 otherwise.
+
+### Trusted and untrusted PRs
+
+The worktree is untrusted (decision record 0009). A PR is trusted only when its head is a
+branch on the repo itself and its author has write access; `--trust` and `--no-trust` decide it
+by hand. Everything else, including any doubt, is untrusted, and an untrusted review:
+
+- reads `.monad.yml` from the PR base, not the PR head, so the PR cannot change the rules that
+  judge it, and drops the config fields that decide what runs (`command` on every check,
+  `checks.secrets.custom_patterns`, `review.prompt`, `extends`);
+- installs nothing, because installing runs the PR's own lifecycle scripts. `--install` does it
+  anyway, knowingly, and says so;
+- never runs `build` or `test`, whatever the profile or the agent asks for, and pins the agent's
+  `run_checks` calls to the fast profile;
+- still runs `secrets`, `file_patterns`, `dependencies`, `agent_patterns`, and the detected
+  `lint` and `typecheck`, which report honestly when there were no dependencies to work with.
+  Detection is bounded the same way: an untrusted run will not use a checker the PR could point
+  at its own code, so no `bun run typecheck`, no `mypy`, and no `eslint`.
+
+A trusted review behaves exactly as it did before: the head's config, a real install, and the
+head's toolchain.
 
 Your own checkout is never modified. Everything the review does happens in the worktree; the
 only writes to the main repo are the `refs/monad/pr/*` refs, git's own worktree bookkeeping,
@@ -78,12 +99,23 @@ session (interactive ones too), so "run the checks" is a tool call rather than a
 
 ## Honest limitations
 
+- monad's review reads attacker-controlled text: the diff, the PR title, and the PR body all
+  reach the model, because that is the product. A sufficiently clever PR can therefore influence
+  what the review SAYS. The prompt fences those regions and tells the model they are data under
+  review rather than instructions, but that is a speed bump, not a defense. What stops a PR from
+  making monad DO anything is the policy layer plus the trust boundary above: an untrusted PR
+  cannot supply a command, a prompt, or an install.
 - Review quality is the agent's. monad scopes the diff, runs the deterministic checks, shapes
   the prompt, and enforces policy; the judgment in the report is the model's, and the report is
   only structured when the agent ends its message with the contracted json block. Parse failures
   are printed, not hidden, and are not retried.
 - `lint`, `typecheck`, `build`, and `test` need the repo's dependencies installed. Without them
   the underlying command fails, and a failing command is a failing check, not a skipped one.
+  An untrusted PR is reviewed without an install on purpose, so its `lint` and `typecheck` are
+  worth less than a trusted PR's. That is the deliberate trade: no type check is cheaper than
+  executing a stranger's code to get one.
+- A trusted review still executes the head's toolchain, which is correct for your own repo and
+  your collaborators, and means a compromised collaborator account is a code-execution path.
 - Every review worktree gets its own real `bun install --frozen-lockfile` (about 0.1 s with a
   warm cache, and clonefile-backed on APFS). Sharing the main checkout's `node_modules` by
   symlink is never done: it breaks bun's isolated linker and can make the worktree resolve the

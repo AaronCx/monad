@@ -88,8 +88,42 @@ stdio fallback (`monad checks-mcp --session <id>`) is not needed and is not buil
    placement as the ACP transport's token check from decision 0004 (in front of the handler in
    the `node:http` request callback).
 
+## Verified 2026-08-24: tool identity on a session/request_permission
+
+The spike above captured identity on a `tool_call` UPDATE. A `session/request_permission` is a
+different message, and a permission policy decides on that one, so it was measured separately
+against adapter `claude-agent-acp` 0.70.0 (the installed `~/.monad/vendor` copy) plus every
+`permission_requested` event in `~/.monad/monad.db`: 30 requests across seven sessions, three of
+them monad-checks calls.
+
+- `kind` for an MCP call is **`other`**. All three live monad-checks permission requests
+  (`run_checks` twice, `check_config` once) carry `kind: "other"`, matching the `ping_check`
+  capture above. The adapter's `toolInfoFromToolUse` switches on the tool NAME and every
+  `mcp__server__tool` falls into the default branch, which returns
+  `{ title: name, kind: "other" }`, so this holds for any MCP tool, not just monad's.
+  monad's policy accepts `other` or `fetch` for a checks call and nothing else, `fetch` being
+  headroom for a future adapter that classifies fetch-shaped MCP tools.
+- `toolCall._meta.claudeCode.toolName` is **absent** on a top-level permission request. The
+  adapter spreads it in only when the call has a `parentToolUseId` (a sub-agent call):
+  `...(parentToolUseId ? { _meta: { claudeCode: { toolName, parentToolUseId } } } : {})`, at both
+  `requestPermissionFromClient` call sites in `acp-agent.js`. None of the 30 captured requests has
+  a `_meta` on its `toolCall`. A policy that decided on `_meta` alone would therefore treat every
+  real `run_checks` call as an unknown tool and reject it in review mode.
+- The vendor-set tool name that IS on every request is the permission rule it offers to persist:
+  the `allow_always` option carries
+  `_meta.permission.changes[].targets[] = { type: "tool", toolName }`, built by
+  `permissionMetadataForAlwaysAllow(suggestions, toolName)` from the adapter's own tool name.
+  Live samples: `mcp__monad-checks__run_checks` for the checks call, and `Bash` for a shell call
+  whose `title` was the whole `git push origin HEAD 2>&1 | tail -20` command line.
+- `title` is NOT identity. For an unknown tool it equals the tool name, but for `Bash` it is the
+  model's own command string, so a shell call can be titled `mcp__monad-checks__run_checks`.
+  monad uses `title` for display only (finding 4 of the M2 review, decision record 0009).
+
 ## Revisit when
 
 The adapter's `mcpServers` mapping changes on a vendor bump (watch the stdio type-absence
-quirk), or when checks tools need streaming progress (the SSE server type or stateful
+quirk and the permission-request identity fields above: if a bump stops putting the rule
+metadata on the allow_always option and still omits `_meta.claudeCode.toolName`, monad loses
+its trusted name for checks calls and fails closed, which shows up as run_checks being rejected
+in review mode), or when checks tools need streaming progress (the SSE server type or stateful
 Streamable HTTP sessions would then be worth probing).

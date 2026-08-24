@@ -24,6 +24,7 @@ import { checkDependencies } from "./checks/dependencies";
 import { checkFilePatterns } from "./checks/file-patterns";
 import { checkAgentPatterns } from "./checks/agent-patterns";
 import { getDefaultConfig } from "./config/defaults";
+import type { TrustLevel } from "./config/loader";
 import { deepMerge } from "./config/merge";
 import { DEFAULT_BASELINE_PATH, loadBaseline } from "./config/allowlist";
 
@@ -46,6 +47,28 @@ export interface PipelineOptions {
   profile?: CheckProfile;
   /** Restrict the run to these check keys (still subject to enabled + profile). */
   only?: Array<keyof PipelineConfig["checks"]>;
+  /**
+   * Whose code this is (decision record 0009). Defaults to "trusted", which
+   * is the pre-existing behavior and the only sensible default for a direct
+   * library call in a repo the caller already chose. "untrusted" means
+   * `build` and `test` never execute, whatever the profile or `only` says.
+   */
+  trust?: TrustLevel;
+}
+
+/** The checks that execute the repo's own toolchain wholesale. */
+const UNTRUSTED_BLOCKED: ReadonlyArray<keyof PipelineConfig["checks"]> = ["build", "test"];
+
+export const UNTRUSTED_SKIP_REASON = "untrusted PR: build and test do not run";
+
+function untrustedSkipResult(key: keyof PipelineConfig["checks"]): CheckResult {
+  return {
+    type: key as CheckResult["type"],
+    status: "pass",
+    title: key === "build" ? "Build Verifier" : "Test Runner",
+    summary: UNTRUSTED_SKIP_REASON,
+    details: { skipped: true, reason: UNTRUSTED_SKIP_REASON },
+  };
 }
 
 /** Default profile per check key. `build` and `test` are `full` only; everything else runs in `fast`. */
@@ -122,7 +145,17 @@ async function buildCheckEntries(
 
   // Command-running checks read their cwd off the config object; inject the
   // pipeline's cwd so they run in the worktree, never the daemon's cwd.
-  const withCwd = <T extends object>(c: T): T & { cwd: string } => ({ ...c, cwd });
+  // Every check that shells out gets the resolved trust level alongside the
+  // cwd, so a leaf never has to guess. Dropping `command` from an untrusted
+  // config is not the whole job: `lint` and `typecheck` also DETECT what to
+  // run by reading the worktree, which is the same untrusted bytes.
+  const untrusted = (opts.trust ?? "trusted") === "untrusted";
+  const trustLevel: TrustLevel = untrusted ? "untrusted" : "trusted";
+  const withContext = <T extends object>(c: T): T & { cwd: string; trust: TrustLevel } => ({
+    ...c,
+    cwd,
+    trust: trustLevel,
+  });
 
   const all: CheckEntry[] = [
     { key: "secrets", fn: () => checkSecrets(input.files, config.checks.secrets!, sharedContext) },
@@ -137,15 +170,21 @@ async function buildCheckEntries(
           config.checks.agent_patterns!,
         ),
     },
-    { key: "lint", fn: () => checkLint(input.files, withCwd(config.checks.lint!)) },
-    { key: "typecheck", fn: () => checkTypecheck(withCwd(config.checks.typecheck!)) },
-    { key: "dependencies", fn: () => checkDependencies(input.files, withCwd(config.checks.dependencies!)) },
-    { key: "build", fn: () => checkBuild(withCwd(config.checks.build!)) },
-    { key: "test", fn: () => checkTest(withCwd(config.checks.test!)) },
+    { key: "lint", fn: () => checkLint(input.files, withContext(config.checks.lint!)) },
+    { key: "typecheck", fn: () => checkTypecheck(withContext(config.checks.typecheck!)) },
+    { key: "dependencies", fn: () => checkDependencies(input.files, withContext(config.checks.dependencies!)) },
+    { key: "build", fn: () => checkBuild(withContext(config.checks.build!)) },
+    { key: "test", fn: () => checkTest(withContext(config.checks.test!)) },
   ];
 
   const entries = all.filter((entry) => {
     if (opts.only && !opts.only.includes(entry.key)) return false;
+    if (untrusted && UNTRUSTED_BLOCKED.includes(entry.key)) {
+      // Never executed. Reported anyway when the caller asked for it, so the
+      // answer to "why is there no build result" is in the results rather
+      // than in a doc: an explicit pass whose reason names the trust level.
+      return (opts.only?.includes(entry.key) ?? false) || runProfile === "full";
+    }
     const checkConfig = config.checks[entry.key];
     if (!checkConfig || !checkConfig.enabled) return false;
     return checkRunsInProfile(entry.key, checkConfig.profile, runProfile);
@@ -153,6 +192,11 @@ async function buildCheckEntries(
 
   const runEntry = async (entry: CheckEntry, priorResults: CheckResult[] = []): Promise<CheckResult> => {
     const start = performance.now();
+    if (untrusted && UNTRUSTED_BLOCKED.includes(entry.key)) {
+      // The entry function is never called, so no configured or detected
+      // command from the PR's own tree can execute.
+      return { ...untrustedSkipResult(entry.key), duration_ms: 0 };
+    }
     try {
       const result = await entry.fn(priorResults);
       result.duration_ms = Math.round(performance.now() - start);

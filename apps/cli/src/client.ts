@@ -129,6 +129,16 @@ export class InteractiveSession implements PermissionPrompter {
   private session?: AcpSession;
   private sessionId?: string;
   private closing = false;
+  /**
+   * Serializes permission questions. The daemon can ask several at once (an
+   * agent issues tool calls in parallel, and attaching to a session with
+   * requests held re-delivers all of them), but one terminal can only ask a
+   * human one thing at a time: without this the second question would print
+   * over the first and steal the keypress meant for it. Questions are asked
+   * in arrival order, which for a re-delivery is oldest first.
+   */
+  private permissionQueue: Promise<unknown> = Promise.resolve();
+  private permissionsWaiting = 0;
 
   constructor(renderer: Renderer) {
     this.renderer = renderer;
@@ -204,7 +214,8 @@ export class InteractiveSession implements PermissionPrompter {
       rl.on("close", () => {
         this.closing = true;
         // stdin ended while a permission question was open: cancel it so the
-        // turn can finish instead of hanging.
+        // turn can finish instead of hanging. closing also short-circuits any
+        // question still queued behind it.
         this.permissionResolve?.("q");
         // Drain the in-flight turn (piped stdin hits EOF right after the
         // last line) before tearing the connection down.
@@ -213,11 +224,40 @@ export class InteractiveSession implements PermissionPrompter {
     });
   }
 
-  /** ACP session/request_permission handler: options plus one choice. */
-  async ask(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
+  /**
+   * ACP session/request_permission handler. Queues behind any question
+   * already on screen and answers them one at a time, in the order they
+   * arrived, so a parallel pair of tool calls (or a whole backlog delivered
+   * on attach) is all shown to the human rather than clobbering each other.
+   */
+  ask(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
+    this.permissionsWaiting += 1;
+    const answer = this.permissionQueue.then(
+      () => this.askOne(params),
+      () => this.askOne(params),
+    );
+    // Keep the chain alive whatever one question does, and never leave a
+    // rejected promise unhandled on it.
+    this.permissionQueue = answer.then(
+      () => undefined,
+      () => undefined,
+    );
+    return answer.finally(() => {
+      this.permissionsWaiting -= 1;
+    });
+  }
+
+  /** Asks one permission question: options plus one choice. */
+  private async askOne(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
+    if (this.closing) {
+      // stdin is gone; nobody can answer, so do not hang the vendor's turn.
+      return { outcome: { outcome: "cancelled" } };
+    }
     this.renderer.ensureLine();
     const title = params.toolCall?.title ?? "the agent requests permission";
-    this.renderer.line(`permission requested: ${title}`);
+    const queued = this.permissionsWaiting - 1;
+    const also = queued > 0 ? ` (${queued} more waiting)` : "";
+    this.renderer.line(`permission requested: ${title}${also}`);
     const options = params.options;
     options.forEach((option, index) => {
       this.renderer.line(`  [${index + 1}] ${option.name} (${option.kind})`);

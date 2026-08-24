@@ -9,6 +9,7 @@ import {
   methods,
   PROTOCOL_VERSION,
 } from "@agentclientprotocol/sdk";
+import { deriveMountToken } from "@aaroncx/engine";
 import { createHttpStream } from "@aaroncx/engine/transport";
 
 /**
@@ -18,7 +19,9 @@ import { createHttpStream } from "@aaroncx/engine/transport";
  * - session/new injects the monad-checks http entry (name, per-session URL,
  *   bearer header) into the mcpServers forwarded to the vendor; the fake
  *   agent records what it received in <cwd>/fake-agent-mcp.jsonl.
- * - /mcp/<sessionId> answers tools/list behind the same bearer as /acp.
+ * - /mcp/<sessionId> answers tools/list for that session's derived mount
+ *   token ONLY: the daemon token and another session's mount token are both
+ *   401 there (decision record 0009).
  * - After a daemon restart, the vendor session/load path passes a
  *   monad-checks entry too (the fingerprint-preserving restore wiring).
  * - A vendor that does not advertise mcpCapabilities.http gets NO injection.
@@ -160,6 +163,7 @@ async function mcpPost(
 
 let home: string;
 let sessionCwd: string;
+let otherCwd: string;
 let daemon: RunningDaemon;
 let connection: ClientConnection | undefined;
 let sessionId = "";
@@ -167,6 +171,7 @@ let sessionId = "";
 beforeAll(async () => {
   home = mkdtempSync(join(tmpdir(), "monad-mcp-it-"));
   sessionCwd = mkdtempSync(join(tmpdir(), "monad-mcp-cwd-"));
+  otherCwd = mkdtempSync(join(tmpdir(), "monad-mcp-other-"));
   daemon = await bootDaemon(home);
   connection = makeAcpClient(daemon);
   sessionId = await newSession(connection, sessionCwd);
@@ -176,6 +181,7 @@ afterAll(async () => {
   await stopDaemon(daemon).catch(() => {});
   rmSync(home, { recursive: true, force: true });
   rmSync(sessionCwd, { recursive: true, force: true });
+  rmSync(otherCwd, { recursive: true, force: true });
 });
 
 describe("monad-checks injection on session/new", () => {
@@ -190,18 +196,25 @@ describe("monad-checks injection on session/new", () => {
       type: "http",
       name: "monad-checks",
       url: `http://127.0.0.1:${daemon.port}/mcp/${sessionId}`,
-      headers: [{ name: "Authorization", value: `Bearer ${daemon.token}` }],
+      headers: [
+        { name: "Authorization", value: `Bearer ${deriveMountToken(daemon.token, sessionId)}` },
+      ],
     });
+  });
+
+  test("the entry handed to the vendor does not carry the daemon token", () => {
+    const serialized = JSON.stringify(recordedMcp(sessionCwd));
+    expect(serialized).not.toContain(daemon.token);
   });
 });
 
-describe("/mcp/<sessionId> behind the bearer", () => {
+describe("/mcp/<sessionId> behind the session's mount token", () => {
   test("tools/list answers with the three checks tools", async () => {
     const { status, json } = await mcpPost(
       daemon,
       sessionId,
       { jsonrpc: "2.0", id: 1, method: "tools/list" },
-      daemon.token,
+      deriveMountToken(daemon.token, sessionId),
     );
     expect(status).toBe(200);
     const result = (json as { result: { tools: Array<{ name: string }> } }).result;
@@ -218,14 +231,56 @@ describe("/mcp/<sessionId> behind the bearer", () => {
     expect(status).toBe(401);
   });
 
-  test("an unknown session id gets 404", async () => {
+  test("the daemon token gets 401 on the mount", async () => {
     const { status } = await mcpPost(
       daemon,
-      "00000000-0000-7000-8000-000000000000",
-      { jsonrpc: "2.0", id: 3, method: "tools/list" },
+      sessionId,
+      { jsonrpc: "2.0", id: 4, method: "tools/list" },
       daemon.token,
     );
+    expect(status).toBe(401);
+  });
+
+  test("another session's mount token gets 401", async () => {
+    const other = await newSession(makeAcpClient(daemon), otherCwd);
+    expect(other).not.toBe(sessionId);
+    const { status } = await mcpPost(
+      daemon,
+      sessionId,
+      { jsonrpc: "2.0", id: 5, method: "tools/list" },
+      deriveMountToken(daemon.token, other),
+    );
+    expect(status).toBe(401);
+    // ...and that session's own mount still opens, so the refusal above is
+    // the token binding, not a broken mount.
+    const own = await mcpPost(
+      daemon,
+      other,
+      { jsonrpc: "2.0", id: 6, method: "tools/list" },
+      deriveMountToken(daemon.token, other),
+    );
+    expect(own.status).toBe(200);
+  }, 20_000);
+
+  test("an unknown session id gets 404 once its mount token is right", async () => {
+    const unknown = "00000000-0000-7000-8000-000000000000";
+    const { status } = await mcpPost(
+      daemon,
+      unknown,
+      { jsonrpc: "2.0", id: 3, method: "tools/list" },
+      deriveMountToken(daemon.token, unknown),
+    );
     expect(status).toBe(404);
+  });
+
+  test("an unknown session id with the daemon token is 401, not 404", async () => {
+    const { status } = await mcpPost(
+      daemon,
+      "00000000-0000-7000-8000-000000000001",
+      { jsonrpc: "2.0", id: 7, method: "tools/list" },
+      daemon.token,
+    );
+    expect(status).toBe(401);
   });
 });
 
@@ -257,7 +312,7 @@ describe("restore after a daemon restart", () => {
     // subprocess. A fixed-port daemon (the default 7331) keeps it stable.
     expect(entry?.url).toBe(`http://127.0.0.1:${daemon.port}/mcp/${sessionId}`);
     expect(entry?.headers).toEqual([
-      { name: "Authorization", value: `Bearer ${daemon.token}` },
+      { name: "Authorization", value: `Bearer ${deriveMountToken(daemon.token, sessionId)}` },
     ]);
   }, 20_000);
 });

@@ -22,6 +22,10 @@ monad checks [--staged | --base <ref>] [--only a,b] [--full] [--json]
 - `--full` runs the `full` profile (adds `build` and `test` when they are enabled); the default
   `fast` profile keeps a run under a minute on most repos.
 - `--json` prints the whole `CheckRunResults` object instead of the table.
+- `--untrusted` treats the checkout as somebody else's code, the way a review of an outside PR
+  is treated (decision record 0009): the config's `command` fields, its custom secret patterns,
+  and `review.prompt` are dropped with a warning naming them, and `build` and `test` never run.
+  Use it on a branch someone else pushed.
 - Exit code is 1 when any check fails, 0 otherwise. Warnings do not fail the run.
 
 Configuration comes from `.monad.yml` in the current directory, else `.lastgate.yml` with a
@@ -105,4 +109,34 @@ checks:
 ```
 
 A configured command wins over detection, runs in the repo root (or the review worktree), and
-its non-zero exit is the check's failure.
+its non-zero exit is the check's failure. It is honored only for a TRUSTED session. In a review
+of an untrusted PR the config comes from the PR base and every `command` is stripped, so `lint`
+and `typecheck` fall back to detection and `build` and `test` do not run at all.
+
+Detection reads the worktree too, so it is bounded the same way. An untrusted run uses only
+detections whose command line monad chose and whose configuration format cannot carry code: it
+will not run `bun run typecheck` (the PR writes `scripts.typecheck`), it will not run `mypy`
+(the PR writes its `plugins`), and it will not run `eslint` (every eslint config format loads
+its parser and plugins out of the tree being linted, and a flat config IS JavaScript). What is
+left for an untrusted PR is `tsc`, `pyright`, `biome`, `ruff`, and `swiftlint`. When nothing
+qualifies the check reports a skip whose reason says which lever was refused.
+
+## Untrusted reviews
+
+| | trusted | untrusted |
+|---|---|---|
+| config read from | the worktree | the PR base commit |
+| `command`, `custom_patterns`, `review.prompt`, `extends` | honored | dropped, each named in a warning |
+| dependency install | as configured | skipped unless `--install` |
+| `secrets`, `file_patterns`, `dependencies`, `agent_patterns` | run | run |
+| `lint`, `typecheck` | run, detected or configured | run, detected only, and only detections that cannot execute PR-authored code; honest about a missing install |
+| `build`, `test` | run in the full profile | never; reported as a pass whose reason names the trust level |
+| agent `run_checks` profile | as asked | forced to fast, with the reason in the result |
+
+## Limitations
+
+monad's review reads attacker-controlled text: the diff, the PR title, and the PR body all reach
+the model. A sufficiently clever PR can influence what the review SAYS. The prompt template
+fences those regions and tells the model they are data under review, never instructions, but
+that is a speed bump rather than a defense. The policy layer, plus the trust boundary above, is
+what stops a PR from making monad DO anything.

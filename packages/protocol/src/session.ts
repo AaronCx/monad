@@ -38,6 +38,17 @@ export const SessionPrSchema = z.object({
 });
 export type SessionPr = z.infer<typeof SessionPrSchema>;
 
+/**
+ * How much of a session's own worktree monad is willing to obey. `trusted`
+ * means the content came from someone who can already run code here (your own
+ * repo, a collaborator with write access, or you saying so on the command
+ * line); `untrusted` means the worktree is attacker-controlled content that may
+ * be read but may never decide what monad executes (decision record 0009).
+ * Anything unrecognized reads back as untrusted: default deny.
+ */
+export const TrustLevelSchema = z.enum(["trusted", "untrusted"]);
+export type TrustLevel = z.infer<typeof TrustLevelSchema>;
+
 export const SessionStatusSchema = z.enum([
   "idle",
   "running",
@@ -64,6 +75,12 @@ export const SessionRecordSchema = z.object({
   mode: SessionModeSchema,
   status: SessionStatusSchema,
   /**
+   * Decision record 0009. Absent (an M2 row read back, or any value the enum
+   * does not know) means untrusted, so a pre-trust session never gains the
+   * trusted path by accident.
+   */
+  trust: TrustLevelSchema.catch("untrusted").default("untrusted"),
+  /**
    * Diff bounds for the session's checks binding. Review sessions (M2 stage
    * 3) pin them to the PR's base and head shas; interactive sessions leave
    * them unset, so run_checks diffs against the default-branch merge-base
@@ -73,6 +90,15 @@ export const SessionRecordSchema = z.object({
   head: z.string().optional(),
   /** Present on review/fix sessions: the PR under review. */
   pr: SessionPrSchema.optional(),
+  /**
+   * The fix policy's execute allowlist, frozen once when the session first
+   * enters fix mode and never recomputed (decision record 0009). It is
+   * derived from the PR BASE commit's package.json for a review-derived
+   * session, so a fix session cannot widen its own allowlist by editing the
+   * worktree's package.json. Absent means nothing was frozen, which the fix
+   * policy reads as an empty allowlist: default deny.
+   */
+  execAllowlist: z.array(z.string()).optional(),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
 });

@@ -36,8 +36,9 @@ function usage(): string {
     "  attach <id> [--mode review|fix]  replay a session, then follow it live",
     "  review <pr> [--full] [--post]    review a PR in its own worktree",
     "             [--fix] [--no-install] [--backend claude]",
+    "             [--trust | --no-trust] [--install]",
     "  checks [--staged | --base <ref>] run the checks here, no session",
-    "         [--only a,b] [--full] [--json]",
+    "         [--only a,b] [--full] [--json] [--untrusted]",
     "  gc [--older-than 7d]             remove closed sessions' worktrees",
     "  ls                               list sessions",
     "  daemon start|stop|status         manage monadd",
@@ -48,7 +49,10 @@ function usage(): string {
     "(ctrl+D exits, ctrl+C cancels the in-flight turn). attach prints the",
     "history with a [replay] prefix, one --- live --- divider, then follows.",
     "review exits 0 when the verdict is looks_good or comment and no check",
-    "failed; checks exits 1 on any failing check.",
+    "failed; checks exits 1 on any failing check. A PR from a fork, or from",
+    "someone without write access, is reviewed as untrusted: no dependency",
+    "install, no build, no test, and its .monad.yml cannot decide what runs",
+    "(--trust overrides, --no-trust forces it, decision record 0009).",
   ].join("\n");
 }
 

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { monadStateDir } from "./paths.ts";
@@ -25,6 +25,25 @@ export function ensureAuthToken(tokenPath = defaultTokenPath()): string {
   // writeFileSync's mode only applies on creation; enforce it regardless.
   chmodSync(tokenPath, 0o600);
   return token;
+}
+
+/**
+ * Derives the bearer token for one session's /mcp/<sessionId> mount.
+ *
+ * Decision record 0009: the daemon token is monad's only credential, and it
+ * opens /acp, /v1/*, and every session's mount. Handing it to the vendor
+ * agent inside the mcpServers headers gave anything running under that agent
+ * the run of the daemon. The vendor now gets this instead: an HMAC of the
+ * session id under the daemon token, accepted at that one mount and nowhere
+ * else.
+ *
+ * Nothing is stored. The value is recomputable from the daemon token plus
+ * the session id, so it survives a daemon restart for free and stays stable
+ * for the session's lifetime, which the vendor's session fingerprint
+ * requires (decision record 0006 fact 3).
+ */
+export function deriveMountToken(daemonToken: string, sessionId: string): string {
+  return createHmac("sha256", daemonToken).update(`mcp-mount:${sessionId}`).digest("hex");
 }
 
 /**

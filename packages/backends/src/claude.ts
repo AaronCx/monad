@@ -39,8 +39,12 @@ export interface ClaudeBackendOptions {
    * Late-bound daemon HTTP endpoint for the per-session monad-checks MCP
    * mount. Returns undefined until the daemon's listener is bound (backends
    * only start after that, but the factory is constructed earlier).
+   *
+   * The caller derives the session's mount token (decision record 0009); the
+   * daemon's own token must never reach this backend, because everything it
+   * returns is handed to the vendor agent.
    */
-  checksMcp?: () => { port: number; token: string } | undefined;
+  checksMcp?: (sessionId: string) => { port: number; mountToken: string } | undefined;
 }
 
 /**
@@ -50,14 +54,19 @@ export interface ClaudeBackendOptions {
  */
 export function checksMcpServerEntry(input: {
   port: number;
-  token: string;
+  /**
+   * The session's mount token, NOT the daemon token. It opens
+   * /mcp/<sessionId> and nothing else, which is the whole point: this value
+   * is handed to a vendor process monad does not control.
+   */
+  mountToken: string;
   sessionId: string;
 }): McpServer {
   return {
     type: "http",
     name: "monad-checks",
     url: `http://127.0.0.1:${input.port}/mcp/${input.sessionId}`,
-    headers: [{ name: "Authorization", value: `Bearer ${input.token}` }],
+    headers: [{ name: "Authorization", value: `Bearer ${input.mountToken}` }],
   };
 }
 
@@ -166,7 +175,7 @@ export function createClaudeBackend(options: ClaudeBackendOptions = {}): Backend
       // monad-checks injection is gated on the vendor advertising HTTP MCP
       // support in its initialize response (decision record 0006 fact 7).
       let mcpServers: McpServer[] = [];
-      const endpoint = options.checksMcp?.();
+      const endpoint = options.checksMcp?.(record.id);
       if (endpoint) {
         const mcpCapabilities = backend.initializeResponse.agentCapabilities?.mcpCapabilities;
         if (mcpCapabilities?.http === true) {
@@ -188,13 +197,14 @@ export function createClaudeBackend(options: ClaudeBackendOptions = {}): Backend
       if (record.agentSessionId) {
         if (backend.supportsLoadSession()) {
           try {
-            // The mcpServers array (URL and token included) is part of the
+            // The mcpServers array (URL and mount token included) is part of the
             // vendor's session fingerprint (decision record 0006 fact 3), so
             // the restore MUST pass the same entry the original session/new
             // did. Sharing checksMcpServerEntry with the fresh path keeps
             // them identical while the daemon's port and token are stable.
             // Honest limitation: if the daemon restarts on a DIFFERENT port
-            // (or with a rotated token), the entry's URL changes, the
+            // (or with a rotated daemon token, which changes every derived
+            // mount token), the entry changes, the
             // fingerprint no longer matches, and the vendor recreates its
             // Claude Code subprocess instead of resuming it, so restored
             // context may be rebuilt rather than resumed. The default fixed

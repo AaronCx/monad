@@ -41,6 +41,12 @@ describe("Engine public exports", () => {
       "runChecks",
       "listChecks",
       "loadConfig",
+      // Trust boundary, decision record 0009.
+      "loadConfigAtRef",
+      "sanitizeUntrustedConfig",
+      "describeDroppedConfigFields",
+      "UNTRUSTED_CONFIG_FIELDS",
+      "UNTRUSTED_SKIP_REASON",
       "LASTGATE_RENAME_NOTICE",
       "runCheckPipeline",
       "runChecksIterable",

@@ -20,6 +20,45 @@ The daemon speaks the Agent Client Protocol (ACP) on both sides.
 - What ACP does not cover (cross-repo session listing, webhook-triggered sessions, check
   results) goes in a small control API beside it, not in a new protocol.
 
+## Trust boundaries
+
+The worktree is untrusted. Everything in it (source, `.monad.yml`, `package.json`, lockfiles,
+prompt templates) is attacker-controlled content in exactly the case monad exists to serve:
+reviewing a pull request written by someone else, or by an agent. Content from the worktree may
+be read, diffed, scanned, and shown to a model. It may never decide what monad executes, what
+monad's own prompt says, or what a policy permits. Anything that decides comes from a trusted
+source: the base commit, `~/.monad`, or the human running the command.
+
+Two things violate this by nature and are handled explicitly rather than pretended away:
+installing dependencies runs the PR's lifecycle scripts, and running lint, typecheck, build, or
+test runs the PR's toolchain. Both are opt-in per trust level, never the default for a PR from
+outside the repo.
+
+"What monad executes" includes how it DECIDES what to execute. Stripping the config's `command`
+fields is not sufficient on its own, because `lint` and `typecheck` also detect their tool by
+reading the worktree, and a detected `bun run typecheck` runs whatever the PR put in
+`scripts.typecheck`. An untrusted run therefore uses only detections where monad wrote the
+command line and the tool's configuration format cannot carry code. Decision record 0009 has
+the table.
+
+Every session therefore carries a trust level, `trusted` or `untrusted`, resolved by the caller
+and stored on the session record. An absent or unrecognized value is `untrusted`. Decision
+record 0009 has the resolution rules and what each level allows.
+
+The same rule governs the fix policy's execute allowlist. It is derived from `package.json`,
+which lives in the worktree the fix session is editing, so it is computed once when the session
+enters fix mode, read from the PR base commit, and frozen on the session record. Nothing
+recomputes it from the worktree afterwards, and once the session has been granted an edit to
+`package.json` or a lockfile every execute forwards to a human whatever the frozen list says.
+Decision record 0009 has the reasoning.
+
+The vendor agent is a second boundary. It runs monad's prompt but it is a process monad does not
+control, and whatever monad puts in its `mcpServers` config is exposed by construction: the
+Agent SDK passes that config to the `claude` binary as a command line argument, so it sits in
+the process table. The vendor therefore never holds the daemon token. Each session's checks
+mount takes a token derived for that session alone, so reading it buys running that session's
+own checks and nothing else. Decision record 0009 has the derivation and the measurements.
+
 ## Persistence
 
 Sessions persist as an append-only event log in SQLite (one file under `~/.monad`, WAL mode).
@@ -52,14 +91,23 @@ every request:
   `initialize` (advertises `loadSession` and `sessionCapabilities.list`), `session/new`,
   `session/load`, `session/list`, `session/prompt`, `session/cancel`.
 - `/v1/sessions`, `/v1/status`: the control API, plain JSON.
+- `/mcp/<sessionId>` (M2): that session's monad-checks tools over Streamable HTTP. This is the
+  one route the daemon token does NOT open. It takes only that session's derived mount token,
+  `HMAC-SHA256(daemonToken, "mcp-mount:" + sessionId)`, because the credential is handed to the
+  vendor agent and must not be monad's master one (decision record 0009).
 
 Attach semantics: `session/load` replays the log to the calling connection in seq order
 (`update` events verbatim, `prompt` events as `user_message_chunk` updates), then the
 connection is live-subscribed. The transport gives no cross-stream ordering between the load
 response and the replayed notifications, so the response carries the replayed update count in
 `_meta["monad.sh/replayCount"]` and clients count updates to find the replay/live boundary
-(decision record 0004). A pending permission request is re-delivered to the attaching
-connection; the first answer wins.
+(decision record 0004). Every pending permission request is re-delivered to the attaching
+connection, oldest first, and the CLI asks them one at a time; the first answer wins per
+request. A session holds many at once, keyed by tool call id, because the agent issues tool
+calls in parallel: two forwarded permissions inside one turn is normal, and the session stays
+`waiting_for_permission` until the last of them is answered. A request that arrives without a
+tool call id is held under a synthetic one rather than dropped, and that id is what its
+resolution carries in the log.
 
 monad extensions on top of ACP, all under the `monad.sh` prefix: the `_meta` keys
 `monad.sh/replayCount` (session/load response) and `monad.sh/status` (session/list entries),

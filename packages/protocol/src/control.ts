@@ -5,6 +5,7 @@ import {
   SessionIdSchema,
   SessionModeSchema,
   SessionRecordSchema,
+  TrustLevelSchema,
 } from "./session.ts";
 
 /**
@@ -62,6 +63,13 @@ export const ReviewPrInputSchema = z.object({
   headSha: z.string(),
   baseRef: z.string(),
   isDraft: z.boolean().optional(),
+  /**
+   * Trust inputs the CLI reads from gh (decision record 0009). The daemon
+   * does not act on them: it takes the resolved level on the request itself,
+   * because resolving needs gh auth the daemon deliberately does not have.
+   */
+  isCrossRepository: z.boolean().optional(),
+  authorLogin: z.string().optional(),
 });
 export type ReviewPrInput = z.infer<typeof ReviewPrInputSchema>;
 
@@ -74,6 +82,15 @@ export const ReviewRequestSchema = z.object({
   full: z.boolean().optional(),
   /** Skip dependency install (--no-install). */
   noInstall: z.boolean().optional(),
+  /**
+   * Resolved by the CLI from the PR's origin and the author's permission, or
+   * forced with --trust / --no-trust (decision record 0009). Absent means
+   * untrusted; the daemon never resolves it itself, because the daemon has
+   * no gh auth and no human in front of it.
+   */
+  trust: TrustLevelSchema.optional(),
+  /** --install: install an untrusted PR's dependencies anyway. */
+  install: z.boolean().optional(),
   /** The only value in M2; the field exists so M4 does not change the API. */
   backend: z.literal("claude-acp").optional(),
 });
@@ -130,6 +147,8 @@ export const ReviewStreamLineSchema = z.discriminatedUnion("type", [
     /** Diff bounds, for --post anchoring. */
     baseSha: z.string(),
     headSha: z.string(),
+    /** The level the review actually ran at (decision record 0009). */
+    trust: TrustLevelSchema.default("untrusted"),
   }),
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);

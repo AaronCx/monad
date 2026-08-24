@@ -1,14 +1,18 @@
 /// <reference path="./md.d.ts" />
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import {
   type ChangedFile,
   type CheckRunResults,
+  describeDroppedConfigFields,
   describeFinding,
   diffBetween,
   formatChecksTable,
   loadConfig,
+  loadConfigAtRef,
   runChecks,
+  sanitizeUntrustedConfig,
 } from "@aaroncx/checks";
 import type {
   EventRecord,
@@ -16,6 +20,7 @@ import type {
   ReviewPrInput,
   ReviewReport,
   SessionId,
+  TrustLevel,
   UnstructuredReport,
 } from "@aaroncx/protocol";
 import { ReviewReportSchema } from "@aaroncx/protocol";
@@ -35,9 +40,12 @@ import defaultPromptTemplate from "./review-prompt.md" with { type: "text" };
  * metadata through the caller's gh. Steps, each an appended event:
  *
  * 1. worktree_ready: fetch the PR head, compute the merge base, create the
- *    detached worktree, apply the install strategy.
+ *    detached worktree, apply the install strategy. An untrusted PR
+ *    (decision record 0009) installs nothing unless --install says so.
  * 2. checks: diff base..head, run the configured checks with the review
- *    profile, store the full CheckRunResults.
+ *    profile, store the full CheckRunResults. An untrusted PR's config is
+ *    read from the base sha and stripped of every executing field, and its
+ *    build and test never run; the checks event records which it was.
  * 3. session_created: vendor session in the worktree, mode review (vendor
  *    plan mode layered by the backend per decision 0007), monad-checks
  *    injected by the daemon's backend factory.
@@ -61,6 +69,14 @@ export interface ReviewPlaybookInput {
   full?: boolean;
   /** Skip dependency install (--no-install). */
   noInstall?: boolean;
+  /**
+   * Whose code this PR is (decision record 0009), resolved by the caller
+   * from the PR's origin and the author's repo permission, or forced with
+   * --trust / --no-trust. Absent means untrusted: default deny.
+   */
+  trust?: TrustLevel;
+  /** --install: install an untrusted PR's dependencies anyway, knowingly. */
+  install?: boolean;
   env?: Record<string, string | undefined>;
   /** Streams every appended event in log order (the ndjson response). */
   onEvent?: (event: EventRecord) => void;
@@ -79,6 +95,16 @@ export interface ReviewPlaybookResult {
   checksTable: string;
   baseSha: string;
   headSha: string;
+  /** The level this review actually ran at. */
+  trust: TrustLevel;
+}
+
+/** Where a review's check rules came from, recorded on the checks event. */
+export interface ConfigSourceRecord {
+  /** ".monad.yml", ".lastgate.yml", or "defaults". */
+  file: string;
+  /** The base sha the config was read at, or "worktree" for a trusted read. */
+  ref: string;
 }
 
 const SEVERITY_RANK: Record<ReviewFinding["severity"], number> = {
@@ -145,6 +171,32 @@ function countPatchLines(patch: string): { added: number; removed: number } {
   return { added, removed };
 }
 
+/**
+ * The honest half of decision record 0009's install trade: an untrusted PR
+ * gets no `bun install`, so `lint` and `typecheck` ran against a tree with no
+ * node_modules. They still run, because a detected linter whose command line
+ * monad chose can still say something useful, but whatever they said has to
+ * carry the caveat rather than read like a verdict on the PR's code.
+ */
+export const NO_DEPS_NOTE =
+  "dependencies were not installed for this untrusted PR, so this result may reflect the " +
+  "missing toolchain rather than the code";
+
+function noteUninstalledToolchain(results: CheckRunResults): void {
+  for (const check of results.checks) {
+    if (check.type !== "lint" && check.type !== "typecheck") {
+      continue;
+    }
+    check.summary = check.summary ? `${check.summary} (${NO_DEPS_NOTE})` : NO_DEPS_NOTE;
+    check.details = { ...check.details, dependenciesInstalled: false };
+  }
+}
+
+/** Caps one untrusted string, naming the truncation so the model sees it. */
+function cap(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}\n(truncated)` : text;
+}
+
 function formatChangedFiles(files: ChangedFile[]): string {
   if (files.length === 0) {
     return "(the diff is empty)";
@@ -152,7 +204,9 @@ function formatChangedFiles(files: ChangedFile[]): string {
   return files
     .map((file) => {
       const { added, removed } = countPatchLines(file.patch ?? "");
-      return `- ${file.path} (${file.status}, +${added} -${removed})`;
+      // A path is attacker-controlled text too: capped per entry, the same
+      // way the PR body is capped, so no single entry can flood the prompt.
+      return cap(`- ${file.path} (${file.status}, +${added} -${removed})`, MAX_PR_BODY_CHARS);
     })
     .join("\n");
 }
@@ -178,6 +232,7 @@ function formatFailFindings(results: CheckRunResults): string {
   return ["Failing findings:", ...lines].join("\n");
 }
 
+// Kept where it was for the PR body; also applied per changed-file entry.
 const MAX_PR_BODY_CHARS = 4000;
 
 export function buildReviewPrompt(
@@ -227,6 +282,9 @@ export async function runReviewPlaybook(
   input: ReviewPlaybookInput,
 ): Promise<ReviewPlaybookResult> {
   const { repoRoot, pr } = input;
+  // Default deny: a caller that did not resolve a trust level gets the
+  // strict one (decision record 0009).
+  const trust: TrustLevel = input.trust ?? "untrusted";
   const { headSha } = await fetchPullRequestHead({ repoRoot, number: pr.number });
   const { baseSha } = await resolveBaseSha({ repoRoot, baseRef: pr.baseRef, headSha });
 
@@ -244,22 +302,44 @@ export async function runReviewPlaybook(
   let client: PlaybookClient;
   let maxFindings: number;
   try {
-    const loaded = await loadConfig(worktree);
+    // Decision record 0009. A trusted review reads the worktree, as M2 did.
+    // An untrusted review reads the PR BASE, which is the last state a repo
+    // maintainer approved, and then drops every field that decides what runs
+    // so lint and typecheck fall back to the detected toolchain.
+    const loaded =
+      trust === "trusted"
+        ? await loadConfig(worktree)
+        : await loadConfigAtRef(worktree, baseSha);
+    const sanitized =
+      trust === "trusted"
+        ? { config: loaded.config, dropped: [] as string[] }
+        : sanitizeUntrustedConfig(loaded.config);
+    const config = sanitized.config;
+    const configSource: ConfigSourceRecord = {
+      file: loaded.source,
+      ref: trust === "trusted" ? "worktree" : baseSha,
+    };
     const installResult = await installWorktreeDeps({
       path: worktree,
-      strategy: input.noInstall ? "none" : (loaded.config.review?.install ?? "auto"),
+      strategy: input.noInstall ? "none" : (config.review?.install ?? "auto"),
       env: input.env,
+      trust,
+      force: input.install,
     });
+    const droppedNote = describeDroppedConfigFields(sanitized.dropped);
     install = {
       path: worktree,
       installStrategy: installResult.installStrategy,
       installMs: installResult.installMs,
+      trust,
+      warnings: droppedNote ? [...installResult.warnings, droppedNote] : installResult.warnings,
     };
 
     manager.createRecord({
       id: sessionId,
       cwd: worktree,
       mode: "review",
+      trust,
       base: baseSha,
       head: headSha,
       pr: {
@@ -277,35 +357,56 @@ export async function runReviewPlaybook(
     manager.appendEvent(sessionId, "worktree_ready", install);
 
     const files = await diffBetween(baseSha, headSha, worktree);
-    const profile = input.full ? "full" : (loaded.config.review?.profile ?? "fast");
+    const profile = input.full ? "full" : (config.review?.profile ?? "fast");
     results = await runChecks({
       cwd: worktree,
       files,
       base: baseSha,
       head: headSha,
-      config: loaded.config,
+      config,
       profile,
+      trust,
     });
-    manager.appendEvent(sessionId, "checks", results);
+    if (
+      trust === "untrusted" &&
+      install.installStrategy === "none" &&
+      existsSync(join(worktree, "package.json"))
+    ) {
+      noteUninstalledToolchain(results);
+    }
+    // configSource is on the event, not inside CheckRunResults, so the
+    // transcript says which rules judged this PR and where they came from.
+    manager.appendEvent(sessionId, "checks", {
+      ...results,
+      configSource,
+      trust,
+      droppedConfigFields: sanitized.dropped,
+    });
 
-    maxFindings = loaded.config.review?.max_findings ?? 25;
+    maxFindings = config.review?.max_findings ?? 25;
     let template = defaultPromptTemplate;
-    const overridePath = loaded.config.review?.prompt;
+    // review.prompt is stripped from an untrusted config, so this can only
+    // be a path a trusted source put there. Containment is still enforced:
+    // an override that escapes the worktree is refused, not read.
+    const overridePath = config.review?.prompt;
     if (overridePath) {
-      try {
-        template = await readFile(join(worktree, overridePath), "utf8");
-      } catch {
-        // A missing override falls back to the default template; the
-        // config warning channel is the place to surface it later.
+      const resolved = resolve(worktree, overridePath);
+      const inside = resolved === worktree || resolved.startsWith(`${worktree}${sep}`);
+      if (inside) {
+        try {
+          template = await readFile(resolved, "utf8");
+        } catch {
+          // A missing override falls back to the default template; the
+          // config warning channel is the place to surface it later.
+        }
       }
     }
     const body = pr.body ?? "(no description)";
     promptText = buildReviewPrompt(template, {
       PR_NUMBER: String(pr.number),
-      PR_TITLE: pr.title,
+      PR_TITLE: cap(pr.title, MAX_PR_BODY_CHARS),
       PR_URL: pr.url,
-      PR_BODY:
-        body.length > MAX_PR_BODY_CHARS ? `${body.slice(0, MAX_PR_BODY_CHARS)}\n(truncated)` : body,
+      PR_BODY: cap(body, MAX_PR_BODY_CHARS),
       CHANGED_FILES: formatChangedFiles(files),
       CHECKS_TABLE: formatChecksTable(results),
       CHECK_FINDINGS: formatFailFindings(results),
@@ -363,5 +464,6 @@ export async function runReviewPlaybook(
     checksTable: formatChecksTable(results),
     baseSha,
     headSha,
+    trust,
   };
 }

@@ -1,5 +1,5 @@
 import { ReviewPrInputSchema } from "@aaroncx/protocol";
-import type { ReviewPrInput } from "@aaroncx/protocol";
+import type { ReviewPrInput, TrustLevel } from "@aaroncx/protocol";
 
 /**
  * gh invocation for monad review: PR metadata resolution and --post. The
@@ -54,9 +54,13 @@ export function parsePrArg(arg: string): { number: number; repo?: string } {
   throw new Error(`cannot parse ${arg} as a PR number or GitHub PR URL`);
 }
 
-/** The brief's exact gh pr view field list. */
+/**
+ * The brief's gh pr view field list, plus the two fields the trust decision
+ * needs: isCrossRepository (a fork head) and the author's login.
+ */
 export const PR_VIEW_FIELDS =
-  "number,title,body,url,author,headRefName,headRefOid,baseRefName,baseRefOid,files,isDraft";
+  "number,title,body,url,author,headRefName,headRefOid,baseRefName,baseRefOid,files,isDraft," +
+  "isCrossRepository";
 
 interface PrViewJson {
   number: number;
@@ -66,6 +70,55 @@ interface PrViewJson {
   headRefOid: string;
   baseRefName: string;
   isDraft?: boolean;
+  isCrossRepository?: boolean;
+  author?: { login?: string; is_bot?: boolean } | null;
+}
+
+/** Repo permissions that mean "this person can already run code in CI here". */
+const WRITE_PERMISSIONS = new Set(["admin", "maintain", "write"]);
+
+/**
+ * Decision record 0009: a PR is trusted only when its head is a branch on the
+ * repo itself AND its author has write access. Everything else, including any
+ * failure to establish either fact, is untrusted. The caller's --trust and
+ * --no-trust flags are handled above this and never reach here.
+ */
+export async function resolveTrust(
+  bin: string,
+  input: { repo: string; number: number; isCrossRepository?: boolean; authorLogin?: string },
+  cwd: string,
+): Promise<{ trust: TrustLevel; reason: string }> {
+  if (input.isCrossRepository !== false) {
+    return { trust: "untrusted", reason: "the PR head is on a fork" };
+  }
+  const login = input.authorLogin;
+  if (!login || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(login)) {
+    return { trust: "untrusted", reason: "the PR author could not be identified" };
+  }
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(input.repo)) {
+    return { trust: "untrusted", reason: "the repo could not be identified" };
+  }
+  let permission: string;
+  try {
+    const raw = await runGh(
+      bin,
+      ["api", `repos/${input.repo}/collaborators/${login}/permission`, "--jq", ".permission"],
+      { cwd },
+    );
+    permission = raw.trim();
+  } catch {
+    return {
+      trust: "untrusted",
+      reason: `the author's permission on ${input.repo} could not be read`,
+    };
+  }
+  if (WRITE_PERMISSIONS.has(permission)) {
+    return { trust: "trusted", reason: `${login} has ${permission} access to ${input.repo}` };
+  }
+  return {
+    trust: "untrusted",
+    reason: `${login} has ${permission || "no"} access to ${input.repo}`,
+  };
 }
 
 /**
@@ -94,5 +147,7 @@ export async function fetchPrMetadata(
     headSha: raw.headRefOid,
     baseRef: raw.baseRefName,
     isDraft: raw.isDraft,
+    isCrossRepository: raw.isCrossRepository,
+    authorLogin: raw.author?.login,
   });
 }

@@ -1,6 +1,7 @@
 import { CHECK_ORDER, defaultProfileFor, runCheckPipeline } from "./pipeline";
 import { commitsBetween } from "./git/diff";
 import { getDefaultConfig } from "./config/defaults";
+import type { TrustLevel } from "./config/loader";
 import { deepMerge } from "./config/merge";
 import type {
   ChangedFile,
@@ -22,6 +23,15 @@ export interface RunChecksInput {
   /** Default "fast". */
   profile?: CheckProfile;
   only?: CheckType[];
+  /**
+   * Whose code this is (decision record 0009). "untrusted" means `build` and
+   * `test` never execute, whatever `profile` or `only` says; they report a
+   * pass whose reason names the trust level. Defaults to "trusted": a direct
+   * library call has no session behind it, and every session-facing caller
+   * (the review playbook, the checks MCP mount, `monad checks`) passes the
+   * level explicitly.
+   */
+  trust?: TrustLevel;
   /**
    * Commits feeding the agent_patterns check. When omitted and both base and
    * head are set, they are derived via `git log base..head` in cwd; a staged
@@ -49,6 +59,7 @@ export async function runChecks(input: RunChecksInput): Promise<CheckRunResults>
     {
       profile: input.profile ?? "fast",
       only: input.only,
+      trust: input.trust,
     },
   );
 }

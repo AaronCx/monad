@@ -8,7 +8,13 @@ import {
   ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
 import { listChecks, runChecks } from "./api";
-import { loadConfig } from "./config/loader";
+import {
+  describeDroppedConfigFields,
+  loadConfig,
+  loadConfigAtRef,
+  sanitizeUntrustedConfig,
+  type TrustLevel,
+} from "./config/loader";
 import { deepMerge } from "./config/merge";
 import { detectDefaultBranch, diffBetween } from "./git/diff";
 import { formatChecksMarkdown } from "./render";
@@ -49,6 +55,19 @@ export interface ChecksMcpBinding {
   config?: Partial<PipelineConfig>;
   /** monad's session id, for logging and mount-path construction. */
   sessionId: string;
+  /**
+   * Whose code the cwd holds (decision record 0009). Absent means
+   * "untrusted": the mount is reachable by whatever the vendor agent is
+   * running, so an unset trust level must never be the permissive one.
+   * The daemon sets it from the session record.
+   */
+  trust?: TrustLevel;
+  /**
+   * The ref an untrusted session's config is read from, normally the PR's
+   * base sha. Without it an untrusted session falls back to the worktree
+   * file, sanitized, which is strictly weaker but still safe.
+   */
+  configRef?: string;
 }
 
 export interface ChecksMcpServer {
@@ -143,17 +162,51 @@ interface EffectiveConfig {
   config: PipelineConfig;
   source: string;
   warnings: string[];
+  /** Dotted config fields the trust level removed, empty when none. */
+  dropped: string[];
 }
 
+/** Default deny: a binding with no trust level is treated as untrusted. */
+function bindingTrust(binding: ChecksMcpBinding): TrustLevel {
+  return binding.trust === "trusted" ? "trusted" : "untrusted";
+}
+
+/**
+ * The session's effective config. A trusted session reads its worktree, as
+ * before. An untrusted session reads the pinned ref instead (the PR base,
+ * the last state a maintainer approved) and then has every executing field
+ * stripped, so nothing in the reviewed tree can decide what runs (decision
+ * record 0009).
+ *
+ * The per-session override (binding.config) is monad's own, not the
+ * worktree's, so it is merged AFTER sanitizing and is never stripped.
+ */
 async function resolveConfig(binding: ChecksMcpBinding): Promise<EffectiveConfig> {
-  const loaded = await loadConfig(binding.cwd);
+  const untrusted = bindingTrust(binding) === "untrusted";
+  const loaded =
+    untrusted && binding.configRef
+      ? await loadConfigAtRef(binding.cwd, binding.configRef)
+      : await loadConfig(binding.cwd);
+  let base = loaded.config;
+  let dropped: string[] = [];
+  if (untrusted) {
+    const sanitized = sanitizeUntrustedConfig(base);
+    base = sanitized.config;
+    dropped = sanitized.dropped;
+  }
   const config = binding.config
     ? (deepMerge(
-        loaded.config as unknown as Record<string, unknown>,
+        base as unknown as Record<string, unknown>,
         binding.config as Record<string, unknown>,
       ) as unknown as PipelineConfig)
-    : loaded.config;
-  return { config, source: loaded.source, warnings: loaded.warnings };
+    : base;
+  const droppedNote = describeDroppedConfigFields(dropped);
+  return {
+    config,
+    source: untrusted && binding.configRef ? `${loaded.source}@${binding.configRef}` : loaded.source,
+    warnings: droppedNote ? [...loaded.warnings, droppedNote] : loaded.warnings,
+    dropped,
+  };
 }
 
 /**
@@ -235,20 +288,43 @@ async function callTool(
   switch (name) {
     case "run_checks": {
       const { only, profile } = parseRunChecksArgs(args);
-      const { config } = await resolveConfig(binding);
+      const trust = bindingTrust(binding);
+      const { config, dropped } = await resolveConfig(binding);
       const diff = await resolveDiff(binding);
+      // An untrusted session is pinned to the fast profile whatever the model
+      // asks for. build and test are refused separately inside the pipeline,
+      // so this is about not spending a full run's time, not about safety.
+      const effectiveProfile = trust === "untrusted" ? "fast" : profile;
       const results = await runChecks({
         cwd: binding.cwd,
         files: diff.files,
         base: diff.base,
         head: diff.head,
         config,
-        profile,
+        profile: effectiveProfile,
         only,
+        trust,
       });
+      const notes: string[] = [];
+      if (trust === "untrusted") {
+        const downgraded = profile === "full" ? " (your requested full profile was downgraded)" : "";
+        notes.push(
+          `This is an untrusted session: build and test do not run, and the profile is fast${downgraded}.`,
+        );
+        const droppedNote = describeDroppedConfigFields(dropped);
+        if (droppedNote) {
+          notes.push(droppedNote);
+        }
+      }
+      const text = [...notes, formatChecksMarkdown(results)].join("\n\n");
       return {
-        content: [{ type: "text", text: formatChecksMarkdown(results) }],
-        structuredContent: results as unknown as Record<string, unknown>,
+        content: [{ type: "text", text }],
+        structuredContent: {
+          ...(results as unknown as Record<string, unknown>),
+          trust,
+          profile: effectiveProfile,
+          droppedConfigFields: dropped,
+        },
       };
     }
     case "list_checks": {
@@ -269,6 +345,8 @@ async function callTool(
         config: effective.config as unknown,
         source: effective.source,
         warnings: effective.warnings,
+        trust: bindingTrust(binding),
+        droppedConfigFields: effective.dropped,
       };
       return {
         content: [{ type: "text", text: JSON.stringify(structured, null, 2) }],
