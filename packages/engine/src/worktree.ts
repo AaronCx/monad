@@ -215,6 +215,30 @@ export async function installWorktreeDeps(input: InstallWorktreeDepsInput): Prom
   return { installStrategy: "install", installMs, warnings };
 }
 
+/** monad/fix/pr-<n>-<shortsha>: the branch fix mode commits on. */
+export function fixBranchName(pr: { number: number; headSha: string }): string {
+  return `monad/fix/pr-${pr.number}-${pr.headSha.slice(0, 7)}`;
+}
+
+/**
+ * Lazily puts a detached fix worktree on its branch. Review worktrees are
+ * detached on purpose; the branch appears on the FIRST granted edit of a fix
+ * session, at the current HEAD, so an untouched review leaves no branch
+ * behind. Idempotent: an already-attached HEAD (this branch or any other) is
+ * left alone.
+ */
+export async function ensureFixBranch(input: {
+  worktreePath: string;
+  branchName: string;
+}): Promise<{ created: boolean }> {
+  const attached = await tryGit(["symbolic-ref", "--quiet", "HEAD"], input.worktreePath);
+  if (attached !== undefined) {
+    return { created: false };
+  }
+  await git(["checkout", "-b", input.branchName], input.worktreePath);
+  return { created: true };
+}
+
 /** Parses a worktree's .git file to find the main repo root, if possible. */
 async function mainRepoRootOf(worktreePath: string): Promise<string | undefined> {
   try {
