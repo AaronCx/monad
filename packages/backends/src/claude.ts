@@ -177,6 +177,14 @@ export function createClaudeBackend(options: ClaudeBackendOptions = {}): Backend
           );
         }
       }
+      // Review sessions layer vendor plan mode over monad's policy; fix and
+      // interactive run the vendor default. Applied right after session/new
+      // or session/load per decision 0007.
+      const applyVendorMode = async () => {
+        if (record.mode !== "interactive") {
+          await backend.setSessionMode(record.mode);
+        }
+      };
       if (record.agentSessionId) {
         if (backend.supportsLoadSession()) {
           try {
@@ -192,6 +200,7 @@ export function createClaudeBackend(options: ClaudeBackendOptions = {}): Backend
             // context may be rebuilt rather than resumed. The default fixed
             // port 7331 makes this the exception, not the rule.
             await backend.loadSession(record.agentSessionId, mcpServers);
+            await applyVendorMode();
             return backend;
           } catch (error) {
             hooks.onError({
@@ -209,6 +218,7 @@ export function createClaudeBackend(options: ClaudeBackendOptions = {}): Backend
         }
       }
       await backend.newSession(mcpServers);
+      await applyVendorMode();
       return backend;
     } catch (error) {
       await backend.close().catch(() => {});
