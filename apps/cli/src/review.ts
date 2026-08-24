@@ -267,7 +267,11 @@ function renderEvent(event: EventRecord, renderer: Renderer): void {
  * hands stdin to the interactive loop. Shared by review --fix and
  * attach --mode fix.
  */
-export async function enterFixLoop(handle: DaemonHandle, record: SessionRecord): Promise<void> {
+export async function enterFixLoop(
+  handle: DaemonHandle,
+  record: SessionRecord,
+  options: { prompt?: string } = {},
+): Promise<void> {
   const renderer = new Renderer({ divider: true });
   const interactive = new InteractiveSession(renderer);
   const session = await connectAcp(handle, renderer, interactive);
@@ -280,6 +284,11 @@ export async function enterFixLoop(handle: DaemonHandle, record: SessionRecord):
   renderer.beginLive(typeof rawCount === "number" && rawCount >= 0 ? rawCount : 0);
   interactive.bind(session, record.id);
   await interactive.sendPrompt(FIX_MODE_PROMPT);
+  if (options.prompt !== undefined) {
+    await interactive.sendPrompt(options.prompt);
+    session.connection.close();
+    return;
+  }
   await interactive.runLoop();
   session.connection.close();
 }

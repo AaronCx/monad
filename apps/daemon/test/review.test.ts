@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -164,6 +165,25 @@ async function postReviewRequest(
   return out;
 }
 
+const CLI_MAIN = new URL("../../cli/src/main.ts", import.meta.url).pathname;
+
+function promptEvents(home: string, sessionId: string): Array<{ text: string }> {
+  // The daemon owns the live DB, so read it read-only rather than opening a
+  // second writer against the same WAL.
+  const db = new Database(join(home, "monad.db"), { readonly: true });
+  try {
+    const rows = db
+      .query("select payload from events where session_id = ? and kind = 'prompt' order by seq")
+      .all(sessionId) as Array<{ payload: string }>;
+    return rows.map((row) => {
+      const parsed = JSON.parse(row.payload) as { prompt?: Array<{ text?: string }> };
+      return { text: parsed.prompt?.[0]?.text ?? "" };
+    });
+  } finally {
+    db.close();
+  }
+}
+
 let home: string;
 let fixture: Fixture;
 let daemon: RunningDaemon;
@@ -315,4 +335,32 @@ describe("POST /v1/sessions/<id>/mode", () => {
     );
     expect(response.status).toBe(404);
   });
+});
+
+describe("monad attach -p", () => {
+  test("sends exactly one prompt to the session and exits without a stdin loop", async () => {
+    // Regression: cmdAttach parsed -p and then dropped it, always falling
+    // through to the interactive stdin loop. With no tty the loop saw EOF
+    // and the process exited 0 having sent nothing, so a scripted attach
+    // looked successful while the agent was never prompted.
+    const sessionId = streamed.result?.sessionId ?? "";
+    expect(sessionId).not.toBe("");
+    const before = promptEvents(home, sessionId).length;
+
+    const cli = Bun.spawnSync(
+      [process.execPath, CLI_MAIN, "attach", sessionId, "-p", "one scripted prompt"],
+      {
+        cwd: fixture.repoRoot,
+        env: { ...process.env, MONAD_HOME: home },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(cli.exitCode).toBe(0);
+    const after = promptEvents(home, sessionId);
+    expect(after.length).toBe(before + 1);
+    expect(after.at(-1)?.text).toBe("one scripted prompt");
+  }, 30_000);
 });

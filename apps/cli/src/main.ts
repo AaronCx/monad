@@ -150,8 +150,9 @@ async function cmdAttach(argv: string[]): Promise<void> {
     console.log(`mode: ${updated.mode} (${updated.cwd})`);
     if (mode === "fix") {
       // Fix mode announces itself to the agent with one user prompt, then
-      // hands stdin to the interactive loop.
-      await enterFixLoop(handle, updated);
+      // hands stdin to the interactive loop. With -p it sends that one
+      // prompt after the announcement and exits instead.
+      await enterFixLoop(handle, updated, { prompt: flags.prompt });
       process.exit(0);
     }
   }
@@ -171,6 +172,14 @@ async function cmdAttach(argv: string[]): Promise<void> {
   const replayCount = typeof rawCount === "number" && rawCount >= 0 ? rawCount : 0;
   renderer.beginLive(replayCount);
   interactive.bind(session, record.id);
+  if (flags.prompt !== undefined) {
+    // One prompt then exit, matching monad run -p. Without this the flag
+    // parses and is silently ignored, and a scripted attach exits 0 having
+    // sent nothing.
+    const stopReason = await interactive.sendPrompt(flags.prompt);
+    session.connection.close();
+    process.exit(stopReason === undefined ? 1 : 0);
+  }
   await interactive.runLoop();
   session.connection.close();
   process.exit(0);
