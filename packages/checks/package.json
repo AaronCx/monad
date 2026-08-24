@@ -1,0 +1,17 @@
+{
+  "name": "@aaroncx/checks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "yaml": "^2.7.0",
+    "zod": "^3.24.0"
+  }
+}

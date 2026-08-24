@@ -1,0 +1,14 @@
+# monad's own check configuration (packages/checks reads this; see docs/checks.md).
+version: 1
+checks:
+  secrets:
+    # The ported LastGate scanner is tested with SYNTHETIC credentials, and the
+    # pattern table itself spells out what real ones look like. Both are scanned
+    # by the very check they define, so they are allowlisted by path here rather
+    # than by weakening the patterns. Nothing outside these paths is exempt.
+    allow:
+      - "**/__tests__/**"
+      - "**/*.test.ts"
+      - "packages/checks/test/**"
+      - "packages/checks/src/scanners/regex-patterns.ts"
+      - "packages/checks/src/config/extends.ts"

@@ -9,17 +9,21 @@ import {
 import type {
   ActiveBackend,
   ErrorPayload,
+  EventKind,
   EventRecord,
   SessionId,
+  SessionMode,
+  SessionPr,
   SessionRecord,
 } from "@aaroncx/protocol";
 import {
-  InteractivePermissionPolicy,
+  ModeAwarePermissionPolicy,
   type PermissionClient,
   type PermissionPolicy,
   type PermissionPolicyHooks,
 } from "./policy.ts";
 import type { SessionStore } from "./store.ts";
+import { ensureFixBranch, fixBranchName } from "./worktree.ts";
 
 /**
  * JSON-RPC error code returned when a prompt is already in flight.
@@ -46,6 +50,12 @@ export interface SessionBackend {
   prompt(params: PromptRequest): Promise<PromptResponse>;
   cancel(): Promise<void>;
   close(): Promise<void>;
+  /**
+   * Applies a monad session mode's vendor layer (review => plan mode, fix
+   * and interactive => default; decision 0007). Optional: backends without
+   * vendor modes simply do not implement it.
+   */
+  setSessionMode?(mode: SessionMode): Promise<void>;
 }
 
 /**
@@ -104,10 +114,21 @@ export interface SessionManagerOptions {
   /**
    * Builds the permission policy from hooks the manager provides (persisting
    * permission events through the fan-out path and flipping session status).
-   * Defaults to the interactive policy; injectable for tests and for the
-   * review policy in a later milestone.
+   * Defaults to the mode-aware policy (interactive forwarding for
+   * interactive sessions, auto-deciding review/fix policies for review and
+   * fix sessions); injectable for tests.
    */
   createPolicy?: (hooks: PermissionPolicyHooks) => PermissionPolicy;
+}
+
+export interface CreateSessionParams {
+  /** Caller-supplied id (the review playbook names the worktree after it). */
+  id?: SessionId;
+  cwd: string;
+  mode?: SessionMode;
+  base?: string;
+  head?: string;
+  pr?: SessionPr;
 }
 
 export interface AttachResult {
@@ -136,34 +157,101 @@ export class SessionManager {
       persistRequested: (id, params) => {
         this.appendAndPublish(id, "permission_requested", params);
       },
-      persistResolved: (id, response) => {
-        this.appendAndPublish(id, "permission_resolved", response);
+      persistResolved: (id, response, meta) => {
+        this.appendAndPublish(id, "permission_resolved", { ...response, ...meta });
       },
       setStatus: (id, status) => {
         this.store.setStatus(id, status);
       },
     };
     const createPolicy =
-      options.createPolicy ?? ((h: PermissionPolicyHooks) => new InteractivePermissionPolicy(h));
+      options.createPolicy ??
+      ((h: PermissionPolicyHooks) =>
+        new ModeAwarePermissionPolicy({
+          hooks: h,
+          resolveContext: (id) => {
+            const record = this.store.get(id);
+            return record ? { mode: record.mode, cwd: record.cwd } : undefined;
+          },
+          beforeEditGrant: async (id) => {
+            // Fix sessions branch lazily on the first granted edit; sessions
+            // without PR metadata (a fix switch on a plain repo) stay on
+            // whatever HEAD they have.
+            const record = this.store.get(id);
+            if (record?.mode === "fix" && record.pr) {
+              await ensureFixBranch({
+                worktreePath: record.cwd,
+                branchName: fixBranchName(record.pr),
+              });
+            }
+          },
+        }));
     this.policy = createPolicy(hooks);
   }
 
-  async create(params: { cwd: string }): Promise<SessionRecord> {
+  async create(params: CreateSessionParams): Promise<SessionRecord> {
+    const record = this.createRecord(params);
+    return await this.activate(record.id);
+  }
+
+  /**
+   * Inserts the session row without starting a backend or appending any
+   * event. The review playbook uses this to get a session id (worktree paths
+   * embed it) and append its pre-session events (worktree_ready, checks)
+   * before the vendor session exists; plain create() wraps this + activate.
+   */
+  createRecord(params: CreateSessionParams): SessionRecord {
     const now = new Date().toISOString();
     const record: SessionRecord = {
-      id: Bun.randomUUIDv7(),
+      id: params.id ?? Bun.randomUUIDv7(),
       cwd: params.cwd,
       backend: "claude-acp",
-      mode: "interactive",
+      mode: params.mode ?? "interactive",
       status: "idle",
+      // Review sessions pin the checks diff to the PR's shas; interactive
+      // sessions leave both unset.
+      base: params.base,
+      head: params.head,
+      pr: params.pr,
       createdAt: now,
       updatedAt: now,
     };
     this.store.create(record);
+    return record;
+  }
+
+  /** Appends session_created and starts the backend (spawn failures surface). */
+  async activate(id: SessionId): Promise<SessionRecord> {
+    const record = this.mustGet(id);
     this.appendAndPublish(record.id, "session_created", record);
-    // Start the backend eagerly so session/new surfaces spawn failures.
     await this.ensureBackend(record.id);
     return this.mustGet(record.id);
+  }
+
+  /**
+   * Appends one event to a session's log and fans it out to subscribers.
+   * The review playbook appends its step events (worktree_ready, checks,
+   * review_report) through this.
+   */
+  appendEvent(id: SessionId, kind: EventKind, payload: unknown): EventRecord {
+    this.mustGet(id);
+    return this.appendAndPublish(id, kind, payload);
+  }
+
+  /**
+   * Switches a session's stored mode and applies the vendor layer on the
+   * live backend (review => plan, fix/interactive => default). With no live
+   * backend the mode is picked up when the next backend starts (the factory
+   * reads the record fresh).
+   */
+  async setMode(id: SessionId, mode: SessionMode): Promise<SessionRecord> {
+    this.mustGet(id);
+    this.store.setMode(id, mode);
+    const backend = this.live.get(id)?.backend;
+    if (backend?.setSessionMode) {
+      await backend.setSessionMode(mode);
+    }
+    return this.mustGet(id);
   }
 
   list(): SessionRecord[] {
@@ -224,9 +312,16 @@ export class SessionManager {
    * Runs one prompt turn. Appends the prompt verbatim, forwards it to the
    * backend, and appends turn_ended with the backend's stopReason. A second
    * prompt while one is in flight fails with a JSON-RPC error; M1 does not
-   * queue.
+   * queue. options.beforeTurnEnded runs after the backend's turn resolves
+   * but before turn_ended is appended; the review playbook uses it to place
+   * its review_report event inside the turn (it must never throw).
    */
-  async prompt(id: SessionId, params: PromptRequest, client?: SessionClient): Promise<PromptResponse> {
+  async prompt(
+    id: SessionId,
+    params: PromptRequest,
+    client?: SessionClient,
+    options?: { beforeTurnEnded?: (stopReason: string) => void },
+  ): Promise<PromptResponse> {
     const session = this.ensureLive(id);
     this.mustGet(id);
     if (client) {
@@ -244,6 +339,7 @@ export class SessionManager {
       this.store.setStatus(id, "running");
       const backend = await this.ensureBackend(id);
       const response = await backend.prompt(params);
+      options?.beforeTurnEnded?.(response.stopReason);
       this.appendAndPublish(id, "turn_ended", { stopReason: response.stopReason });
       this.store.setStatus(id, "idle");
       return response;

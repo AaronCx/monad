@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type { McpServer } from "@agentclientprotocol/sdk";
 import type { BackendFactory, BackendHooks } from "@aaroncx/engine";
 import { monadStateDir } from "@aaroncx/engine";
 import { AcpClientBackend } from "./acp-client.ts";
@@ -34,6 +35,30 @@ export interface ClaudeBackendOptions {
   logDir?: string;
   /** Where child stderr goes; default inherit (adapter logs there). */
   stderr?: "inherit" | "ignore";
+  /**
+   * Late-bound daemon HTTP endpoint for the per-session monad-checks MCP
+   * mount. Returns undefined until the daemon's listener is bound (backends
+   * only start after that, but the factory is constructed earlier).
+   */
+  checksMcp?: () => { port: number; token: string } | undefined;
+}
+
+/**
+ * The one place the monad-checks mcpServers entry is constructed, shared by
+ * the fresh-session and restore paths so both hand the vendor the identical
+ * array. `headers` is required by the ACP schema (McpServerHttp).
+ */
+export function checksMcpServerEntry(input: {
+  port: number;
+  token: string;
+  sessionId: string;
+}): McpServer {
+  return {
+    type: "http",
+    name: "monad-checks",
+    url: `http://127.0.0.1:${input.port}/mcp/${input.sessionId}`,
+    headers: [{ name: "Authorization", value: `Bearer ${input.token}` }],
+  };
 }
 
 /**
@@ -138,10 +163,44 @@ export function createClaudeBackend(options: ClaudeBackendOptions = {}): Backend
       stderr: options.stderr,
     });
     try {
+      // monad-checks injection is gated on the vendor advertising HTTP MCP
+      // support in its initialize response (decision record 0006 fact 7).
+      let mcpServers: McpServer[] = [];
+      const endpoint = options.checksMcp?.();
+      if (endpoint) {
+        const mcpCapabilities = backend.initializeResponse.agentCapabilities?.mcpCapabilities;
+        if (mcpCapabilities?.http === true) {
+          mcpServers = [checksMcpServerEntry({ ...endpoint, sessionId: record.id })];
+        } else {
+          console.log(
+            `monadd: vendor did not advertise mcpCapabilities.http; monad-checks tools are not injected for session ${record.id}`,
+          );
+        }
+      }
+      // Review sessions layer vendor plan mode over monad's policy; fix and
+      // interactive run the vendor default. Applied right after session/new
+      // or session/load per decision 0007.
+      const applyVendorMode = async () => {
+        if (record.mode !== "interactive") {
+          await backend.setSessionMode(record.mode);
+        }
+      };
       if (record.agentSessionId) {
         if (backend.supportsLoadSession()) {
           try {
-            await backend.loadSession(record.agentSessionId);
+            // The mcpServers array (URL and token included) is part of the
+            // vendor's session fingerprint (decision record 0006 fact 3), so
+            // the restore MUST pass the same entry the original session/new
+            // did. Sharing checksMcpServerEntry with the fresh path keeps
+            // them identical while the daemon's port and token are stable.
+            // Honest limitation: if the daemon restarts on a DIFFERENT port
+            // (or with a rotated token), the entry's URL changes, the
+            // fingerprint no longer matches, and the vendor recreates its
+            // Claude Code subprocess instead of resuming it, so restored
+            // context may be rebuilt rather than resumed. The default fixed
+            // port 7331 makes this the exception, not the rule.
+            await backend.loadSession(record.agentSessionId, mcpServers);
+            await applyVendorMode();
             return backend;
           } catch (error) {
             hooks.onError({
@@ -158,7 +217,8 @@ export function createClaudeBackend(options: ClaudeBackendOptions = {}): Backend
           });
         }
       }
-      await backend.newSession();
+      await backend.newSession(mcpServers);
+      await applyVendorMode();
       return backend;
     } catch (error) {
       await backend.close().catch(() => {});

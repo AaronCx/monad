@@ -6,6 +6,7 @@ import {
   type EventRecord,
   EventRecordSchema,
   type SessionId,
+  type SessionMode,
   type SessionRecord,
   SessionRecordSchema,
   type SessionStatus,
@@ -28,6 +29,9 @@ interface SessionRow {
   agent_session_id: string | null;
   mode: string;
   status: string;
+  base: string | null;
+  head: string | null;
+  pr: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +52,9 @@ function rowToSession(row: SessionRow): SessionRecord {
     agentSessionId: row.agent_session_id ?? undefined,
     mode: row.mode,
     status: row.status,
+    base: row.base ?? undefined,
+    head: row.head ?? undefined,
+    pr: row.pr === null ? undefined : JSON.parse(row.pr),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -92,6 +99,9 @@ export class SessionStore {
         agent_session_id TEXT,
         mode TEXT NOT NULL,
         status TEXT NOT NULL,
+        base TEXT,
+        head TEXT,
+        pr TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -104,6 +114,16 @@ export class SessionStore {
       );
       CREATE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, seq);
     `);
+    // M1 databases predate the base/head/pr columns; add them in place.
+    // SQLite has no ADD COLUMN IF NOT EXISTS, so a duplicate-column error
+    // means the migration already ran. pr holds the SessionPr as JSON.
+    for (const column of ["base", "head", "pr"]) {
+      try {
+        this.db.exec(`ALTER TABLE sessions ADD COLUMN ${column} TEXT;`);
+      } catch {
+        // Column already present.
+      }
+    }
   }
 
   /** Inserts a new session record. Throws if the id already exists. */
@@ -111,8 +131,8 @@ export class SessionStore {
     const parsed = SessionRecordSchema.parse(record);
     this.db
       .query(
-        `INSERT INTO sessions (id, cwd, backend, agent_session_id, mode, status, created_at, updated_at)
-         VALUES ($id, $cwd, $backend, $agentSessionId, $mode, $status, $createdAt, $updatedAt)`,
+        `INSERT INTO sessions (id, cwd, backend, agent_session_id, mode, status, base, head, pr, created_at, updated_at)
+         VALUES ($id, $cwd, $backend, $agentSessionId, $mode, $status, $base, $head, $pr, $createdAt, $updatedAt)`,
       )
       .run({
         id: parsed.id,
@@ -121,6 +141,9 @@ export class SessionStore {
         agentSessionId: parsed.agentSessionId ?? null,
         mode: parsed.mode,
         status: parsed.status,
+        base: parsed.base ?? null,
+        head: parsed.head ?? null,
+        pr: parsed.pr === undefined ? null : JSON.stringify(parsed.pr),
         createdAt: parsed.createdAt,
         updatedAt: parsed.updatedAt,
       });
@@ -181,6 +204,15 @@ export class SessionStore {
       .run({ id, status, updatedAt: new Date().toISOString() });
     if (result.changes === 0) {
       throw new Error(`setStatus: unknown session ${id}`);
+    }
+  }
+
+  setMode(id: SessionId, mode: SessionMode): void {
+    const result = this.db
+      .query("UPDATE sessions SET mode = $mode, updated_at = $updatedAt WHERE id = $id")
+      .run({ id, mode, updatedAt: new Date().toISOString() });
+    if (result.changes === 0) {
+      throw new Error(`setMode: unknown session ${id}`);
     }
   }
 

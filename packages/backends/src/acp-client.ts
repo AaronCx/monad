@@ -3,6 +3,7 @@ import {
   client,
   type ClientConnection,
   type InitializeResponse,
+  type McpServer,
   methods,
   ndJsonStream,
   PROTOCOL_VERSION,
@@ -13,7 +14,19 @@ import {
   type SessionNotification,
 } from "@agentclientprotocol/sdk";
 import type { BackendHooks, SessionBackend } from "@aaroncx/engine";
-import type { SessionId } from "@aaroncx/protocol";
+import type { SessionId, SessionMode } from "@aaroncx/protocol";
+
+/**
+ * The vendor session mode each monad mode layers on (decision 0007): review
+ * runs in plan mode (the vendor's own read-only discipline under monad's
+ * review policy); fix stays in default so monad's policy is the thing
+ * granting each edit and the transcript shows every grant.
+ */
+export const VENDOR_MODE_FOR: Record<SessionMode, string> = {
+  interactive: "default",
+  review: "plan",
+  fix: "default",
+};
 
 /**
  * Wraps a Bun.spawn stdin FileSink into the WritableStream ndJsonStream
@@ -145,12 +158,14 @@ export class AcpClientBackend implements SessionBackend {
 
   /**
    * Creates a fresh vendor session in cwd and records its id through
-   * hooks.setAgentSessionId for restore-on-restart.
+   * hooks.setAgentSessionId for restore-on-restart. `mcpServers` becomes
+   * part of the vendor's session fingerprint (decision record 0006 fact 3),
+   * so the restore path must pass the identical array.
    */
-  async newSession(): Promise<string> {
+  async newSession(mcpServers: McpServer[] = []): Promise<string> {
     const response = await this.connection.agent.request(methods.agent.session.new, {
       cwd: this.options.cwd,
-      mcpServers: [],
+      mcpServers,
     });
     this.vendorSessionId = response.sessionId;
     this.options.hooks.setAgentSessionId(response.sessionId);
@@ -163,18 +178,31 @@ export class AcpClientBackend implements SessionBackend {
    * Throws if the vendor rejects the load; callers decide what a failed
    * restore means (packages/backends/src/claude.ts never degrades silently).
    */
-  async loadSession(agentSessionId: string): Promise<void> {
+  async loadSession(agentSessionId: string, mcpServers: McpServer[] = []): Promise<void> {
     this.restoring = true;
     try {
       await this.connection.agent.request(methods.agent.session.load, {
         sessionId: agentSessionId,
         cwd: this.options.cwd,
-        mcpServers: [],
+        mcpServers,
       });
       this.vendorSessionId = agentSessionId;
     } finally {
       this.restoring = false;
     }
+  }
+
+  /**
+   * Applies a monad mode's vendor layer via session/set_mode. Decision 0007
+   * fact 4: a client-initiated set_mode returns an empty response and emits
+   * NO current_mode_update; the empty acknowledgment IS success, so nothing
+   * here waits for a mode notification.
+   */
+  async setSessionMode(mode: SessionMode): Promise<void> {
+    await this.connection.agent.request(methods.agent.session.setMode, {
+      sessionId: this.requireVendorSessionId(),
+      modeId: VENDOR_MODE_FOR[mode],
+    });
   }
 
   /** Forwards one prompt turn, rewriting monad id -> vendor id. */

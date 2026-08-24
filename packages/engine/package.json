@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aaroncx/checks": "workspace:*",
     "@aaroncx/protocol": "workspace:*",
     "@agentclientprotocol/sdk": "^1.4.0",
     "zod": "^4"

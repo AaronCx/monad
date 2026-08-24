@@ -1,22 +1,28 @@
 import { methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { createHttpStream } from "@aaroncx/engine/transport";
 import {
-  ListSessionsResponseSchema,
   REPLAY_COUNT_META_KEY,
+  type SessionMode,
   type SessionRecord,
 } from "@aaroncx/protocol";
+import { cmdChecks } from "./checks.ts";
 import { connectAcp, describeSessionStartError, InteractiveSession } from "./client.ts";
 import {
   authHeaders,
+  type DaemonHandle,
   ensureDaemon,
+  fetchSessions,
   fetchStatus,
   findRunningDaemon,
   pidAlive,
   readDaemonInfo,
+  setSessionMode,
   startDaemon,
   stopDaemon,
 } from "./daemon.ts";
+import { cmdGc } from "./gc.ts";
 import { Renderer } from "./render.ts";
+import { cmdReview, enterFixLoop } from "./review.ts";
 
 const VERSION = "0.1.0";
 
@@ -27,7 +33,12 @@ function usage(): string {
     "Usage: monad <command> [options]",
     "",
     "  run [-p \"prompt\"] [--thoughts]   open a session in the current directory",
-    "  attach <id> [--thoughts]         replay a session, then follow it live",
+    "  attach <id> [--mode review|fix]  replay a session, then follow it live",
+    "  review <pr> [--full] [--post]    review a PR in its own worktree",
+    "             [--fix] [--no-install] [--backend claude]",
+    "  checks [--staged | --base <ref>] run the checks here, no session",
+    "         [--only a,b] [--full] [--json]",
+    "  gc [--older-than 7d]             remove closed sessions' worktrees",
     "  ls                               list sessions",
     "  daemon start|stop|status         manage monadd",
     "  acp-stdio                        stdio<->daemon ACP bridge for editors",
@@ -36,6 +47,8 @@ function usage(): string {
     "run streams the agent's answer to stdout; each stdin line is a prompt",
     "(ctrl+D exits, ctrl+C cancels the in-flight turn). attach prints the",
     "history with a [replay] prefix, one --- live --- divider, then follows.",
+    "review exits 0 when the verdict is looks_good or comment and no check",
+    "failed; checks exits 1 on any failing check.",
   ].join("\n");
 }
 
@@ -99,23 +112,8 @@ async function cmdRun(argv: string[]): Promise<void> {
   process.exit(0);
 }
 
-async function fetchSessions(handle: { url: string; token: string }): Promise<SessionRecord[]> {
-  const response = await fetch(`${handle.url}/v1/sessions`, {
-    headers: authHeaders(handle.token),
-  });
-  if (!response.ok) {
-    fail(`GET /v1/sessions failed with ${response.status}`);
-  }
-  return ListSessionsResponseSchema.parse(await response.json()).sessions;
-}
-
-async function cmdAttach(argv: string[]): Promise<void> {
-  const id = argv[0];
-  if (!id || id.startsWith("-")) {
-    fail("attach needs a session id (see monad ls)");
-  }
-  const flags = parseRunFlags(argv.slice(1));
-  const handle = await ensureDaemon();
+/** Resolves a full or abbreviated session id against the daemon's list. */
+async function resolveSession(handle: DaemonHandle, id: string): Promise<SessionRecord> {
   const sessions = await fetchSessions(handle);
   const matches = sessions.filter((s) => s.id === id || s.id.startsWith(id));
   if (matches.length === 0) {
@@ -124,7 +122,40 @@ async function cmdAttach(argv: string[]): Promise<void> {
   if (matches.length > 1) {
     fail(`ambiguous session id ${id}; matches ${matches.map((s) => s.id).join(", ")}`);
   }
-  const record = matches[0] as SessionRecord;
+  return matches[0] as SessionRecord;
+}
+
+async function cmdAttach(argv: string[]): Promise<void> {
+  const id = argv[0];
+  if (!id || id.startsWith("-")) {
+    fail("attach needs a session id (see monad ls)");
+  }
+  const rest = argv.slice(1);
+  let mode: SessionMode | undefined;
+  const modeIndex = rest.indexOf("--mode");
+  if (modeIndex !== -1) {
+    const value = rest[modeIndex + 1];
+    if (value !== "review" && value !== "fix") {
+      fail("--mode needs review or fix");
+    }
+    mode = value;
+    rest.splice(modeIndex, 2);
+  }
+  const flags = parseRunFlags(rest);
+  const handle = await ensureDaemon();
+  const record = await resolveSession(handle, id);
+
+  if (mode !== undefined) {
+    const updated = await setSessionMode(handle, record.id, mode);
+    console.log(`mode: ${updated.mode} (${updated.cwd})`);
+    if (mode === "fix") {
+      // Fix mode announces itself to the agent with one user prompt, then
+      // hands stdin to the interactive loop. With -p it sends that one
+      // prompt after the announcement and exits instead.
+      await enterFixLoop(handle, updated, { prompt: flags.prompt });
+      process.exit(0);
+    }
+  }
 
   const renderer = new Renderer({ thoughts: flags.thoughts, divider: true });
   const interactive = new InteractiveSession(renderer);
@@ -141,6 +172,14 @@ async function cmdAttach(argv: string[]): Promise<void> {
   const replayCount = typeof rawCount === "number" && rawCount >= 0 ? rawCount : 0;
   renderer.beginLive(replayCount);
   interactive.bind(session, record.id);
+  if (flags.prompt !== undefined) {
+    // One prompt then exit, matching monad run -p. Without this the flag
+    // parses and is silently ignored, and a scripted attach exits 0 having
+    // sent nothing.
+    const stopReason = await interactive.sendPrompt(flags.prompt);
+    session.connection.close();
+    process.exit(stopReason === undefined ? 1 : 0);
+  }
   await interactive.runLoop();
   session.connection.close();
   process.exit(0);
@@ -154,7 +193,10 @@ async function cmdLs(): Promise<void> {
     return;
   }
   for (const s of sessions) {
-    console.log(`${s.id}  ${s.status.padEnd(22)}  ${s.cwd}  ${s.updatedAt}`);
+    const pr = s.pr ? `#${s.pr.number}` : "-";
+    console.log(
+      `${s.id}  ${s.status.padEnd(22)}  ${s.mode.padEnd(11)}  ${pr.padEnd(6)}  ${s.cwd}  ${s.updatedAt}`,
+    );
   }
 }
 
@@ -243,30 +285,45 @@ if (command === "--version" || command === "-v") {
   process.exit(0);
 }
 
-switch (command) {
-  case "run":
-    await cmdRun(rest);
-    break;
-  case "attach":
-    await cmdAttach(rest);
-    break;
-  case "ls":
-    await cmdLs();
-    break;
-  case "daemon":
-    await cmdDaemon(rest);
-    break;
-  case "acp-stdio":
-    await cmdAcpStdio();
-    break;
-  case "--help":
-  case "-h":
-  case "help":
-  case undefined:
-    console.log(usage());
-    process.exit(command === undefined ? 1 : 0);
-    break;
-  default:
-    console.error(`monad: unknown command ${command}\n\n${usage()}`);
-    process.exit(2);
+try {
+  switch (command) {
+    case "run":
+      await cmdRun(rest);
+      break;
+    case "attach":
+      await cmdAttach(rest);
+      break;
+    case "review":
+      await cmdReview(rest);
+      break;
+    case "checks":
+      await cmdChecks(rest);
+      break;
+    case "gc":
+      await cmdGc(rest);
+      break;
+    case "ls":
+      await cmdLs();
+      break;
+    case "daemon":
+      await cmdDaemon(rest);
+      break;
+    case "acp-stdio":
+      await cmdAcpStdio();
+      break;
+    case "--help":
+    case "-h":
+    case "help":
+    case undefined:
+      console.log(usage());
+      process.exit(command === undefined ? 1 : 0);
+      break;
+    default:
+      console.error(`monad: unknown command ${command}\n\n${usage()}`);
+      process.exit(2);
+  }
+} catch (error) {
+  // Commands throw plain Errors for bad input and failed subprocesses; a
+  // stack trace is never the right thing to show a user at the prompt.
+  fail(error instanceof Error ? error.message : String(error));
 }

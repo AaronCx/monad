@@ -15,11 +15,28 @@ export const BackendIdSchema = z.literal("claude-acp");
 export type BackendId = z.infer<typeof BackendIdSchema>;
 
 /**
- * How a session was opened. M1 has interactive only; review lands with the
- * GitHub App milestone.
+ * How a session is being driven. interactive is M1's terminal loop; review
+ * and fix are M2's PR-review modes (read-only policy, then worktree-scoped
+ * edit policy). Stored on the record and switchable via monad attach --mode.
  */
-export const SessionModeSchema = z.literal("interactive");
+export const SessionModeSchema = z.enum(["interactive", "review", "fix"]);
 export type SessionMode = z.infer<typeof SessionModeSchema>;
+
+/**
+ * PR metadata pinned to a review session, resolved once via gh pr view when
+ * the review starts. baseSha is the computed merge base, not the branch tip.
+ */
+export const SessionPrSchema = z.object({
+  /** owner/name, e.g. "AaronCx/monad". */
+  repo: z.string(),
+  number: z.number().int().positive(),
+  url: z.string(),
+  headSha: z.string(),
+  baseRef: z.string(),
+  baseSha: z.string(),
+  title: z.string(),
+});
+export type SessionPr = z.infer<typeof SessionPrSchema>;
 
 export const SessionStatusSchema = z.enum([
   "idle",
@@ -46,6 +63,16 @@ export const SessionRecordSchema = z.object({
   agentSessionId: z.string().optional(),
   mode: SessionModeSchema,
   status: SessionStatusSchema,
+  /**
+   * Diff bounds for the session's checks binding. Review sessions (M2 stage
+   * 3) pin them to the PR's base and head shas; interactive sessions leave
+   * them unset, so run_checks diffs against the default-branch merge-base
+   * at call time.
+   */
+  base: z.string().optional(),
+  head: z.string().optional(),
+  /** Present on review/fix sessions: the PR under review. */
+  pr: SessionPrSchema.optional(),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
 });
