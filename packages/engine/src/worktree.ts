@@ -30,6 +30,28 @@ import { monadStateDir } from "./paths.ts";
  * frozen-install failure surfaces as a loud error, never a mutated install.
  */
 
+/**
+ * PR numbers and branch names arrive from `gh pr view` on a repo monad did
+ * not write, so they are untrusted input to a git command line. git treats
+ * a leading dash as an option, and options such as --upload-pack turn a
+ * fetch into arbitrary command execution on this machine. Validate both
+ * before they reach argv rather than trusting the caller.
+ */
+function assertPrNumber(number: number): number {
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    throw new Error(`not a PR number: ${String(number)}`);
+  }
+  return number;
+}
+
+/** Conservative git ref name: no leading dash, no option or path traversal. */
+function assertRefName(name: string, what: string): string {
+  if (!/^[A-Za-z0-9._][A-Za-z0-9._/-]{0,254}$/.test(name) || name.includes("..")) {
+    throw new Error(`${what} is not a valid git ref name: ${name}`);
+  }
+  return name;
+}
+
 /** Overrides the bun binary the installer runs; tests point it at a script. */
 export const MONAD_BUN_BIN_ENV = "MONAD_BUN_BIN";
 
@@ -137,8 +159,9 @@ export async function fetchPullRequestHead(input: {
   repoRoot: string;
   number: number;
 }): Promise<{ headSha: string; ref: string }> {
-  const ref = `refs/monad/pr/${input.number}`;
-  await git(["fetch", "origin", `+refs/pull/${input.number}/head:${ref}`], input.repoRoot);
+  const number = assertPrNumber(input.number);
+  const ref = `refs/monad/pr/${number}`;
+  await git(["fetch", "origin", `+refs/pull/${number}/head:${ref}`], input.repoRoot);
   const headSha = (await git(["rev-parse", ref], input.repoRoot)).trim();
   return { headSha, ref };
 }
@@ -155,9 +178,10 @@ export async function resolveBaseSha(input: {
   baseRef: string;
   headSha: string;
 }): Promise<{ baseSha: string }> {
-  await git(["fetch", "origin", input.baseRef], input.repoRoot);
+  const baseRef = assertRefName(input.baseRef, "base ref");
+  await git(["fetch", "origin", baseRef], input.repoRoot);
   const baseSha = (
-    await git(["merge-base", `origin/${input.baseRef}`, input.headSha], input.repoRoot)
+    await git(["merge-base", `origin/${baseRef}`, input.headSha], input.repoRoot)
   ).trim();
   return { baseSha };
 }

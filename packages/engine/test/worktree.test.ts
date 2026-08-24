@@ -150,6 +150,28 @@ describe("PR head and base resolution", () => {
     });
     expect(resolved).toBe(baseSha);
   });
+
+  test("a ref name git would read as an option never reaches argv", async () => {
+    for (const baseRef of [
+      "--upload-pack=touch /tmp/pwned",
+      "-o",
+      "main;touch /tmp/pwned",
+      "../../etc/passwd",
+      "",
+    ]) {
+      await expect(
+        resolveBaseSha({ repoRoot: repoDir, baseRef, headSha: prHeadSha }),
+      ).rejects.toThrow(/not a valid git ref name/);
+    }
+  });
+
+  test("a PR number that is not a positive integer is refused", async () => {
+    for (const number of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(fetchPullRequestHead({ repoRoot: repoDir, number })).rejects.toThrow(
+        /not a PR number/,
+      );
+    }
+  });
 });
 
 describe("install strategy (decision 0008)", () => {

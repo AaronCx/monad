@@ -86,7 +86,9 @@ function detectTypechecker(cwd: string): { command: string; kind: string } | { s
 export function parseTscOutput(output: string): Finding[] {
   const findings: Finding[] = [];
   for (const line of output.split("\n")) {
-    const match = line.match(/^(.+?)\((\d+),(\d+)\):\s+error\s+TS(\d+):\s*(.*)$/);
+    const match = line.match(
+      /^(.{1,4096}?)\((\d{1,9}),(\d{1,9})\):[ \t]+error[ \t]+TS(\d{1,9}):[ \t]*(.*)$/,
+    );
     if (!match) continue;
     findings.push({
       file: match[1] ?? "",

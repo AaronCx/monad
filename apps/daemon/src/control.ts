@@ -26,6 +26,10 @@ const MAX_BODY_BYTES = 1024 * 1024;
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
+  // codeql[js/stack-trace-exposure]: error text reaching here has been through
+  // errorMessage (first line only, no stack frames, length capped), and this
+  // server is loopback-only behind a bearer token, serving the same user who
+  // ran the command. Reporting why a review failed is the point of the reply.
   res.end(JSON.stringify(body));
 }
 
@@ -47,8 +51,20 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+/**
+ * The diagnostic monad shows the caller for a failed control request. The
+ * control API is loopback-only behind a bearer token and its only client is
+ * the user's own CLI, so the failure reason IS the product: "git fetch
+ * origin main failed: ..." is what the user needs to see. What is never
+ * shown is anything past it, so this keeps the first line only, drops any
+ * line that looks like a stack frame, and caps the length. An Error's stack
+ * is never read.
+ */
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const raw = error instanceof Error ? error.message : String(error);
+  const firstLine = raw.split("\n", 1)[0] ?? "";
+  const cleaned = /^\s*at\s/.test(firstLine) ? "request failed" : firstLine.trim();
+  return (cleaned || "request failed").slice(0, 500);
 }
 
 /**

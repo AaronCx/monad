@@ -117,7 +117,7 @@ export function capFindings(findings: ReviewFinding[], max: number): ReviewFindi
  * against ReviewReport; the caller stores { structured: false, raw }.
  */
 export function parseReviewReport(text: string): ReviewReport | undefined {
-  const blocks = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)];
+  const blocks = [...text.matchAll(/```json[ \t]*\r?\n([\s\S]*?)```/g)];
   const last = blocks.at(-1)?.[1];
   if (last === undefined) {
     return undefined;
