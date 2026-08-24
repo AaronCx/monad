@@ -38,6 +38,13 @@ Every session therefore carries a trust level, `trusted` or `untrusted`, resolve
 and stored on the session record. An absent or unrecognized value is `untrusted`. Decision
 record 0009 has the resolution rules and what each level allows.
 
+The vendor agent is a second boundary. It runs monad's prompt but it is a process monad does not
+control, and whatever monad puts in its `mcpServers` config is exposed by construction: the
+Agent SDK passes that config to the `claude` binary as a command line argument, so it sits in
+the process table. The vendor therefore never holds the daemon token. Each session's checks
+mount takes a token derived for that session alone, so reading it buys running that session's
+own checks and nothing else. Decision record 0009 has the derivation and the measurements.
+
 ## Persistence
 
 Sessions persist as an append-only event log in SQLite (one file under `~/.monad`, WAL mode).
@@ -70,6 +77,10 @@ every request:
   `initialize` (advertises `loadSession` and `sessionCapabilities.list`), `session/new`,
   `session/load`, `session/list`, `session/prompt`, `session/cancel`.
 - `/v1/sessions`, `/v1/status`: the control API, plain JSON.
+- `/mcp/<sessionId>` (M2): that session's monad-checks tools over Streamable HTTP. This is the
+  one route the daemon token does NOT open. It takes only that session's derived mount token,
+  `HMAC-SHA256(daemonToken, "mcp-mount:" + sessionId)`, because the credential is handed to the
+  vendor agent and must not be monad's master one (decision record 0009).
 
 Attach semantics: `session/load` replays the log to the calling connection in seq order
 (`update` events verbatim, `prompt` events as `user_message_chunk` updates), then the

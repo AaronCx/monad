@@ -2,7 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkBearer, ensureAuthToken, timingSafeStringEqual } from "../src/auth.ts";
+import {
+  checkBearer,
+  deriveMountToken,
+  ensureAuthToken,
+  timingSafeStringEqual,
+} from "../src/auth.ts";
 
 let dirs: string[] = [];
 
@@ -65,5 +70,41 @@ describe("timingSafeStringEqual", () => {
     expect(timingSafeStringEqual("abc", "abcd")).toBe(false);
     expect(timingSafeStringEqual("", "")).toBe(true);
     expect(timingSafeStringEqual("", "x")).toBe(false);
+  });
+});
+
+describe("deriveMountToken", () => {
+  const daemonToken = "a".repeat(64);
+  const sessionA = "01a0349e-5ca2-7000-8c96-83988af10447";
+  const sessionB = "01a0348d-42e3-7000-8337-4c5d2aa7dd9d";
+
+  test("is deterministic, so a restarted daemon derives the same value", () => {
+    expect(deriveMountToken(daemonToken, sessionA)).toBe(deriveMountToken(daemonToken, sessionA));
+  });
+
+  test("differs per session", () => {
+    expect(deriveMountToken(daemonToken, sessionA)).not.toBe(
+      deriveMountToken(daemonToken, sessionB),
+    );
+  });
+
+  test("differs per daemon token, so rotating the token invalidates every mount", () => {
+    expect(deriveMountToken(daemonToken, sessionA)).not.toBe(
+      deriveMountToken("b".repeat(64), sessionA),
+    );
+  });
+
+  test("is a 64 hex char digest that contains neither input", () => {
+    const derived = deriveMountToken(daemonToken, sessionA);
+    expect(derived).toMatch(/^[0-9a-f]{64}$/);
+    expect(derived).not.toContain(daemonToken);
+    expect(derived).not.toContain(sessionA);
+  });
+
+  test("checkBearer accepts the derived token and refuses the daemon token", () => {
+    const derived = deriveMountToken(daemonToken, sessionA);
+    expect(checkBearer(`Bearer ${derived}`, derived)).toBe(true);
+    expect(checkBearer(`Bearer ${daemonToken}`, derived)).toBe(false);
+    expect(checkBearer(`Bearer ${deriveMountToken(daemonToken, sessionB)}`, derived)).toBe(false);
   });
 });

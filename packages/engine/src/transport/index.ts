@@ -58,10 +58,23 @@ export interface CreateAcpHttpServerOptions {
   /** Passed through to the SDK's node handler (default 16 MiB). */
   maxRequestBodyBytes?: number;
   /**
-   * Handles authenticated non-ACP requests (the /v1/* control API).
-   * Runs after the bearer check; absent, non-ACP paths get a 404.
+   * Handles non-ACP requests (the /v1/* control API and the /mcp/<sessionId>
+   * checks mounts). Runs after the bearer check unless the pathname matched
+   * selfAuthenticated; absent, non-ACP paths get a 404.
    */
   fallback?: (req: IncomingMessage, res: ServerResponse) => void;
+  /**
+   * Pathnames the fallback authenticates by itself. A match SKIPS the
+   * blanket daemon-token check and goes straight to the fallback, which must
+   * refuse anything it does not recognize. Default deny: absent, every path
+   * goes through the daemon-token check.
+   *
+   * /mcp/<sessionId> uses this because the daemon token is deliberately NOT
+   * a credential there (decision record 0009): only that session's derived
+   * mount token opens it, so a blanket check ahead of the route would both
+   * admit the wrong token and reject the right one.
+   */
+  selfAuthenticated?: (pathname: string) => boolean;
   /**
    * How long (ms) a connection may sit with zero live SSE receivers before
    * it is declared dead and torn down (default 3000). Reconnecting SSE
@@ -191,11 +204,19 @@ export function createAcpHttpServer(
   }
 
   const nodeServer: Server = createServer((req, res) => {
+    const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    if (options.selfAuthenticated?.(pathname) === true) {
+      if (options.fallback) {
+        options.fallback(req, res);
+        return;
+      }
+      sendJson(res, 404, { error: "not found" });
+      return;
+    }
     if (!checkBearer(req.headers.authorization, options.authToken)) {
       sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": 'Bearer realm="monad"' });
       return;
     }
-    const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
     if (pathname === acpPath) {
       if (req.method === "GET") {
         const connectionId = req.headers[CONNECTION_ID_HEADER];

@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Subprocess } from "bun";
+import { deriveMountToken } from "@aaroncx/engine";
 import type { EventRecord, ReviewReport, SessionRecord } from "@aaroncx/protocol";
 import {
   makeMaliciousRepo,
@@ -466,7 +467,9 @@ async function callRunChecks(
   const response = await fetch(`http://127.0.0.1:${daemon.port}/mcp/${sessionId}`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${daemon.token}`,
+      // The mount takes that session's derived token, never the daemon
+      // token (decision record 0009); this is the vendor's own credential.
+      Authorization: `Bearer ${deriveMountToken(daemon.token, sessionId)}`,
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
     },

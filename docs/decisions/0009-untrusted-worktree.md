@@ -76,6 +76,58 @@ says which happened rather than implying a clean pass. The alternative, installi
 `--ignore-scripts`, buys a real type check at the cost of a partial install that can fail on
 its own; it is worth revisiting with real numbers once M3 reviews outside PRs daily.
 
+## The agent does not hold the daemon token
+
+The same boundary applied to credentials. M2 handed `{ port, token }` to the Claude backend and
+`checksMcpServerEntry` put the daemon's own bearer token into the `mcpServers` headers forwarded
+to `claude-agent-acp`. That token is monad's only credential: it opens `/acp`, `/v1/*`, and every
+session's `/mcp/<id>`. Anything running under the vendor process could read it out of the vendor's
+own config and then create sessions with an arbitrary `cwd`. New sessions default to interactive,
+so permission requests forward to a human, which is what contained it; the containment was
+incidental, not designed.
+
+Each session's checks mount now takes its own credential:
+
+    deriveMountToken(daemonToken, sessionId) =
+      HMAC-SHA256(key = daemonToken, message = "mcp-mount:" + sessionId)
+
+Nothing is stored. It is recomputable from the daemon token plus the id, so it survives a daemon
+restart for free and stays stable for the session's lifetime, which the vendor's session
+fingerprint requires (record 0006 fact 3).
+
+`/mcp/<sessionId>` accepts that value and nothing else. The daemon token is refused there, and so
+is any other session's mount token. Because the daemon token is not a credential on that route,
+the ACP transport's blanket bearer check cannot sit in front of it (it would admit the wrong token
+and reject the right one), so the mount is registered through the transport's `selfAuthenticated`
+hook and does its own check inside the route, ahead of the session lookup. Default deny both ways:
+a path is only self authenticating when the daemon says so, and an unrecognized token is 401
+before the route says whether the session exists.
+
+## Where the mount token is visible, and why that is the point
+
+Measured on the Mac Mini on 2026-08-24 against adapter `claude-agent-acp` 0.70.0 and
+`@anthropic-ai/claude-agent-sdk` 0.3.232, by creating a real session and reading the process table:
+
+- The adapter's own log (`CLAUDE_AGENT_LOGS`, `~/.monad/logs/agent.log`) does NOT write the
+  `mcpServers` array. It logs one `Claude ACP started` line and one `[session/query]` line per
+  session, neither carrying a URL or a header. The existing `agent.log` on this machine, covering
+  every session monad has run, contains no token.
+- Claude Code's own transcripts under `~/.claude/projects/**` do NOT carry it either. They name
+  the tools (`mcp__monad-checks__run_checks` and friends) but not the server config.
+- The Agent SDK DOES pass the whole config as a command line argument: it spawns the `claude`
+  binary with `--mcp-config {"mcpServers":{"monad-checks":{...,"headers":{"Authorization":
+  "Bearer <token>"}}}}`. That argument is in the process table for as long as the session's
+  subprocess lives, readable by any process running as the same user (and by root).
+
+So the credential in the vendor's `mcpServers` is exposed by construction, whatever monad does.
+That is exactly why it must not be the daemon token. After this change the process table carries
+one session's mount token, which opens that session's checks mount and nothing else: no `/acp`,
+no `/v1/*`, no other session. The blast radius of reading it is running that session's own checks.
+Verified: with a real session live, the daemon token appears nowhere in the process table.
+
+Not filed upstream from here; it is worth Aaron's judgement whether the SDK should pass
+`--mcp-config` by file or stdin instead of argv.
+
 ## Prompt injection is not solved
 
 The PR's diff, title, and body still reach the model. That is the product. The template fences
@@ -98,6 +150,13 @@ The policy layer is what stops the session from doing anything.
 - `extends` is resolved inside `parseConfigWithWarnings`, before `sanitizeUntrustedConfig` sees
   the result, and today only built-in packs resolve. Dropping the key is defense in depth so a
   future file-or-URL `PackResolver` does not silently reopen the config path.
+- Mount tokens are derived, not stored, so anyone who can read `~/.monad/token` can derive every
+  one of them. That is the same user on the same machine, which is already the M1 trust model.
+  Rotating `~/.monad/token` invalidates every mount, which also changes the vendor session
+  fingerprint (record 0006 fact 3) and so recreates the vendor subprocess.
+- A mount token stays valid for as long as the session id exists and is not closed; there is no
+  expiry and no revocation short of rotating the daemon token. A session that has ended is not a
+  usable mount because the route 404s a closed record, but the token itself is still derivable.
 
 ## Revisit when
 

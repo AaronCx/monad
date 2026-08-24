@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   daemonInfoPath,
   daemonPidPath,
+  deriveMountToken,
   ensureAuthToken,
   monadStateDir,
   SessionManager,
@@ -13,7 +14,7 @@ import { createClaudeBackend } from "@aaroncx/backends";
 import type { DaemonInfo } from "@aaroncx/protocol";
 import { createDaemonAgentFactory } from "./acp-agent.ts";
 import { createControlHandler } from "./control.ts";
-import { createMcpRoute } from "./mcp.ts";
+import { createMcpRoute, isMcpMountPath } from "./mcp.ts";
 
 const VERSION = "0.1.0";
 
@@ -103,7 +104,13 @@ const manager = new SessionManager({
   // for tests; CLAUDE_AGENT_LOGS makes the adapter log under $MONAD_HOME.
   createBackend: createClaudeBackend({
     logDir,
-    checksMcp: () => (bound.port === undefined ? undefined : { port: bound.port, token }),
+    // The vendor gets a per-session mount token, never the daemon token
+    // (decision record 0009). Deriving it here keeps the daemon token out of
+    // the backend package entirely.
+    checksMcp: (sessionId) =>
+      bound.port === undefined
+        ? undefined
+        : { port: bound.port, mountToken: deriveMountToken(token, sessionId) },
   }),
 });
 
@@ -114,12 +121,16 @@ const startedAt = new Date();
 // waiting path exactly like a graceful disconnect. MONAD_SSE_GRACE_MS
 // shortens the reconnect grace window in tests.
 const sseGraceEnv = Number(process.env.MONAD_SSE_GRACE_MS ?? "");
-// Authenticated non-ACP paths: /mcp/<sessionId> first (per-session checks
-// MCP mounts, same bearer token as /acp), then the /v1/* control API.
-const mcpRoute = createMcpRoute({ manager });
+// Non-ACP paths: /mcp/<sessionId> first (per-session checks MCP mounts,
+// which authenticate themselves against that session's mount token and
+// refuse the daemon token), then the authenticated /v1/* control API.
+const mcpRoute = createMcpRoute({ manager, daemonToken: token });
 const controlHandler = createControlHandler({ manager, version: VERSION, startedAt });
 const server = createAcpHttpServer(createDaemonAgentFactory({ manager, version: VERSION }), {
   authToken: token,
+  // The mount route does its own bearer check; the blanket daemon-token
+  // check must not run in front of it (decision record 0009).
+  selfAuthenticated: isMcpMountPath,
   fallback: (req, res) => {
     if (mcpRoute(req, res)) {
       return;
