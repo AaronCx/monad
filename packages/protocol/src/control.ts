@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { BackendIdSchema, SessionIdSchema, SessionRecordSchema } from "./session.ts";
+import { EventRecordSchema } from "./events.ts";
+import {
+  BackendIdSchema,
+  SessionIdSchema,
+  SessionModeSchema,
+  SessionRecordSchema,
+} from "./session.ts";
 
 /**
  * The control API covers what ACP does not: cross-repo session listing and
@@ -40,3 +46,103 @@ export const DaemonInfoSchema = z.object({
   startedAt: z.iso.datetime(),
 });
 export type DaemonInfo = z.infer<typeof DaemonInfoSchema>;
+
+/**
+ * PR metadata the CLI resolves via gh pr view before asking the daemon to
+ * review. The daemon never runs gh for metadata; the caller's cwd (and gh
+ * auth) resolve the PR, the daemon does the git and session work.
+ */
+export const ReviewPrInputSchema = z.object({
+  /** owner/name, parsed from the PR url. */
+  repo: z.string(),
+  number: z.number().int().positive(),
+  url: z.string(),
+  title: z.string(),
+  body: z.string().optional(),
+  headSha: z.string(),
+  baseRef: z.string(),
+  isDraft: z.boolean().optional(),
+});
+export type ReviewPrInput = z.infer<typeof ReviewPrInputSchema>;
+
+/** Body of POST /v1/review. */
+export const ReviewRequestSchema = z.object({
+  /** The caller's repo checkout; worktrees are created from it. */
+  repoRoot: z.string(),
+  pr: ReviewPrInputSchema,
+  /** Force the full profile (--full). */
+  full: z.boolean().optional(),
+  /** Skip dependency install (--no-install). */
+  noInstall: z.boolean().optional(),
+  /** The only value in M2; the field exists so M4 does not change the API. */
+  backend: z.literal("claude-acp").optional(),
+});
+export type ReviewRequest = z.infer<typeof ReviewRequestSchema>;
+
+/** One severity of a ReviewReport finding, highest first. */
+export const ReviewSeveritySchema = z.enum(["critical", "high", "medium", "low", "nit"]);
+export type ReviewSeverity = z.infer<typeof ReviewSeveritySchema>;
+
+export const ReviewFindingSchema = z.object({
+  path: z.string(),
+  line: z.number().int().positive().optional(),
+  severity: ReviewSeveritySchema,
+  title: z.string(),
+  body: z.string(),
+  suggestion: z.string().optional(),
+});
+export type ReviewFinding = z.infer<typeof ReviewFindingSchema>;
+
+/** The structured contract the review agent's final json block must match. */
+export const ReviewReportSchema = z.object({
+  summary: z.string(),
+  verdict: z.enum(["looks_good", "comment", "needs_changes"]),
+  findings: z.array(ReviewFindingSchema),
+  checks_acknowledged: z.boolean(),
+});
+export type ReviewReport = z.infer<typeof ReviewReportSchema>;
+
+/** Stored (and streamed) when the final message had no parsable json block. */
+export const UnstructuredReportSchema = z.object({
+  structured: z.literal(false),
+  raw: z.string(),
+});
+export type UnstructuredReport = z.infer<typeof UnstructuredReportSchema>;
+
+/**
+ * Lines of the POST /v1/review ndjson response stream: every appended event
+ * as it happens, then exactly one result (or error) line.
+ */
+export const ReviewStreamLineSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("event"), event: EventRecordSchema }),
+  z.object({
+    type: z.literal("result"),
+    sessionId: SessionIdSchema,
+    worktree: z.string(),
+    report: z.union([ReviewReportSchema, UnstructuredReportSchema]),
+    structured: z.boolean(),
+    /** True when any check had status fail. */
+    checksFailed: z.boolean(),
+    /** True => monad review exits 1. */
+    failed: z.boolean(),
+    /** Rendered checks table for printing and for --post. */
+    checksTable: z.string(),
+    /** Diff bounds, for --post anchoring. */
+    baseSha: z.string(),
+    headSha: z.string(),
+  }),
+  z.object({ type: z.literal("error"), message: z.string() }),
+]);
+export type ReviewStreamLine = z.infer<typeof ReviewStreamLineSchema>;
+
+/** Body of POST /v1/sessions/<id>/mode. */
+export const SetModeRequestSchema = z.object({
+  mode: SessionModeSchema,
+});
+export type SetModeRequest = z.infer<typeof SetModeRequestSchema>;
+
+/** Response of POST /v1/sessions/<id>/mode. */
+export const SetModeResponseSchema = z.object({
+  session: SessionRecordSchema,
+});
+export type SetModeResponse = z.infer<typeof SetModeResponseSchema>;
