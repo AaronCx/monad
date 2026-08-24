@@ -63,6 +63,7 @@ describe("EventRecordSchema", () => {
       "update",
       "permission_requested",
       "permission_resolved",
+      "vendor_tools",
       "worktree_ready",
       "checks",
       "review_report",

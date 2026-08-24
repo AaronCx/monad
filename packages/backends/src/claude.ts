@@ -1,7 +1,9 @@
+import { existsSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { McpServer } from "@agentclientprotocol/sdk";
 import type { BackendFactory, BackendHooks } from "@aaroncx/engine";
 import { monadStateDir } from "@aaroncx/engine";
+import type { SessionRecord } from "@aaroncx/protocol";
 import { AcpClientBackend } from "./acp-client.ts";
 
 /**
@@ -129,14 +131,116 @@ export function resolveBackendCommand(
 }
 
 /**
+ * Environment variable naming the minimal home an untrusted vendor session
+ * runs under. Defaults to <state dir>/vendor-home.
+ */
+export const VENDOR_HOME_ENV = "MONAD_VENDOR_HOME";
+
+/** The minimal home for untrusted vendor sessions. */
+export function vendorHomeDir(env: Record<string, string | undefined> = process.env): string {
+  const override = env[VENDOR_HOME_ENV]?.trim();
+  return override ? override : join(monadStateDir(env), "vendor-home");
+}
+
+export interface ResolvedVendorHome {
+  /** The value to hand the child as HOME. */
+  home: string | undefined;
+  /** Which one it is, for the vendor_tools event. */
+  kind: "user" | "vendor";
+  /** Present only when the minimal home was wanted and not used. */
+  reason?: string;
+  /**
+   * True when the fallback says something is wrong on this machine (a real
+   * file where the credential link belongs, an unwritable state directory)
+   * rather than something expected (no file-based login to link at all, which
+   * is every CI runner and any Keychain-only Mac). Only a degraded fallback
+   * becomes an error event; the reason is recorded either way.
+   */
+  degraded: boolean;
+}
+
+/**
+ * Decide the child's HOME.
+ *
+ * A trusted session runs under the user's own home, which is the M1 contract
+ * and the thing that makes the vendor find its own login (record 0005). An
+ * untrusted session is triggered by a stranger's push, so it runs under a
+ * minimal home holding nothing but a link to the credential file: no plugins,
+ * no agents, no MCP servers with write credentials to other systems.
+ *
+ * The credential is LINKED, never copied. monad storing a vendor token, even
+ * a copy of one, breaks the repo rule that authentication lives inside the
+ * vendor, and a copy also goes stale the moment the vendor refreshes it.
+ *
+ * Two conditions make monad keep the user home instead, both of them
+ * "authentication outranks this hardening", which is the M1 rule:
+ *
+ * - there is no `~/.claude/.credentials.json` to link (the login may live in
+ *   the macOS Keychain, where a different HOME is unproven);
+ * - something replaced the link with a real file, which means a token copy
+ *   monad must neither own nor delete.
+ */
+export function resolveVendorHome(
+  trust: SessionRecord["trust"],
+  env: Record<string, string | undefined> = process.env,
+): ResolvedVendorHome {
+  const userHome = env.HOME;
+  if (trust !== "untrusted" || !userHome) {
+    return { home: userHome, kind: "user", degraded: false };
+  }
+
+  const credentials = join(userHome, ".claude", ".credentials.json");
+  if (!existsSync(credentials)) {
+    return {
+      home: userHome,
+      kind: "user",
+      reason: `no ${credentials} to link, so the vendor login may not follow a different HOME; authentication outranks this isolation (decision record 0005)`,
+      degraded: false,
+    };
+  }
+
+  const home = vendorHomeDir(env);
+  const link = join(home, ".claude", ".credentials.json");
+  try {
+    mkdirSync(join(home, ".claude"), { recursive: true, mode: 0o700 });
+    const existing = lstatSync(link, { throwIfNoEntry: false });
+    if (existing && !existing.isSymbolicLink()) {
+      return {
+        home: userHome,
+        kind: "user",
+        reason: `${link} is a real file rather than a link to ${credentials}; monad will not own a copy of a vendor credential and will not delete one, so the untrusted session runs under the user home until that file is removed by hand`,
+        degraded: true,
+      };
+    }
+    if (existing && readlinkSync(link) !== credentials) {
+      unlinkSync(link);
+    }
+    if (!existsSync(link)) {
+      symlinkSync(credentials, link);
+    }
+  } catch (error) {
+    return {
+      home: userHome,
+      kind: "user",
+      reason: `could not prepare ${home}: ${errorMessage(error)}; authentication outranks this isolation`,
+      degraded: true,
+    };
+  }
+  return { home, kind: "vendor", degraded: false };
+}
+
+/**
  * The deliberate minimal child environment proven in decision record 0005:
  * HOME (the vendor finds its own login under ~/.claude) plus a PATH that
  * contains node >= 22. monad passes no tokens, ever.
  */
-function defaultChildEnv(options: ClaudeBackendOptions): Record<string, string | undefined> {
+function defaultChildEnv(
+  options: ClaudeBackendOptions,
+  home: string | undefined,
+): Record<string, string | undefined> {
   const nodeDir = options.nodeDir ?? DEFAULT_NODE_DIR;
   const env: Record<string, string | undefined> = {
-    HOME: process.env.HOME,
+    HOME: home,
     PATH: `${nodeDir}:/usr/bin:/bin`,
   };
   if (options.logDir) {
@@ -163,11 +267,23 @@ export function createClaudeBackend(options: ClaudeBackendOptions = {}): Backend
   return async (record, hooks: BackendHooks) => {
     const command =
       options.command ?? resolveBackendCommand(process.env, options.nodeDir ?? DEFAULT_NODE_DIR);
+    // An untrusted session gets monad's minimal home, so the vendor is not
+    // handed the plugins, agents, and MCP servers of whoever owns this
+    // machine. A fallback is never silent: it becomes an error event.
+    const vendorHome = resolveVendorHome(record.trust);
+    if (vendorHome.degraded && vendorHome.reason) {
+      hooks.onError({
+        message: `untrusted session runs under the user home: ${vendorHome.reason}`,
+      });
+    }
+    const env = options.env ?? defaultChildEnv(options, vendorHome.home);
     const backend = await AcpClientBackend.start({
       command,
       cwd: record.cwd,
-      env: options.env ?? defaultChildEnv(options),
+      env,
       monadSessionId: record.id,
+      homeKind: options.env ? "user" : vendorHome.kind,
+      ...(options.env ? {} : { homeReason: vendorHome.reason }),
       hooks,
       stderr: options.stderr,
     });
