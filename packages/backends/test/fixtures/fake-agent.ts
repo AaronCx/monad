@@ -16,10 +16,19 @@
  * - session/load replays two session/update notifications before its
  *   response, like a vendor restoring context.
  *
+ * MCP observability for the daemon tests: session/new and session/load
+ * append { method, mcpServers } as one JSON line to fake-agent-mcp.jsonl in
+ * the session cwd, so tests can assert exactly which mcpServers entries the
+ * vendor was handed (including the empty array when injection is skipped).
+ *
  * Flags:
- *   --no-load    advertise loadSession: false
- *   --fail-load  advertise loadSession: true but fail every session/load
+ *   --no-load      advertise loadSession: false
+ *   --fail-load    advertise loadSession: true but fail every session/load
+ *   --no-mcp-http  do not advertise mcpCapabilities.http (daemon must skip
+ *                  monad-checks injection)
  */
+import { appendFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   agent,
   type AgentContext,
@@ -33,6 +42,27 @@ import {
 
 const noLoad = process.argv.includes("--no-load");
 const failLoad = process.argv.includes("--fail-load");
+const noMcpHttp = process.argv.includes("--no-mcp-http");
+
+/**
+ * One JSON line per session/new or session/load, written into cwd. Never
+ * writes into a git checkout (tests sometimes run the fake agent with a
+ * real repo as cwd, and the recording must not leave droppings there); the
+ * daemon MCP tests use plain temp-dir cwds, which are recorded.
+ */
+function recordMcpServers(cwd: string, method: string, mcpServers: unknown): void {
+  try {
+    if (existsSync(join(cwd, ".git"))) {
+      return;
+    }
+    appendFileSync(
+      join(cwd, "fake-agent-mcp.jsonl"),
+      `${JSON.stringify({ method, mcpServers: mcpServers ?? [] })}\n`,
+    );
+  } catch {
+    // Recording must never break the protocol flow.
+  }
+}
 
 function promptText(params: PromptRequest): string {
   return params.prompt
@@ -99,11 +129,17 @@ const sessions = new Set<string>();
 const app = agent({ name: "fake-agent" })
   .onRequest(methods.agent.initialize, () => ({
     protocolVersion: PROTOCOL_VERSION,
-    agentCapabilities: { loadSession: !noLoad },
+    agentCapabilities: {
+      loadSession: !noLoad,
+      // The real vendor advertises { http: true, sse: true } (spike 0a);
+      // --no-mcp-http exercises the daemon's skip-injection path.
+      ...(noMcpHttp ? {} : { mcpCapabilities: { http: true, sse: true } }),
+    },
   }))
   .onRequest(methods.agent.session.new, async (ctx) => {
     const sessionId = `fake-vendor-${crypto.randomUUID()}`;
     sessions.add(sessionId);
+    recordMcpServers(ctx.params.cwd, "session/new", ctx.params.mcpServers);
     // The real vendor fires this right after session/new.
     await notifyUpdate(ctx.client, sessionId, {
       sessionUpdate: "available_commands_update",
@@ -117,6 +153,7 @@ const app = agent({ name: "fake-agent" })
     }
     const sessionId = ctx.params.sessionId;
     sessions.add(sessionId);
+    recordMcpServers(ctx.params.cwd, "session/load", ctx.params.mcpServers);
     // Vendor-side context replay: these must NOT be double-appended to
     // monad's event log (the adapter drops updates while restoring).
     await notifyUpdate(ctx.client, sessionId, {
