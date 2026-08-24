@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { runReviewPlaybook, type SessionManager } from "@aaroncx/engine";
 import {
+  type CancelSessionResponse,
   type DaemonStatus,
   type ListSessionsResponse,
   ReviewRequestSchema,
@@ -162,6 +163,37 @@ async function handleSetMode(
   }
 }
 
+/**
+ * POST /v1/sessions/<id>/cancel: cancels the in-flight turn and resolves any
+ * held permission request, leaving the session idle and open.
+ *
+ * It exists for the App (M3): when a new commit supersedes a review that is
+ * still running, the App cancels that session rather than leaving two
+ * reviews racing for one pull request. Cancelling over ACP would need a
+ * connection that has loaded the session; the App has neither, so the
+ * control API carries it, the same way the mode switch does.
+ */
+async function handleCancel(
+  deps: ControlDeps,
+  res: ServerResponse,
+  sessionId: string,
+): Promise<void> {
+  const record = deps.manager.get(sessionId);
+  if (!record) {
+    sendJson(res, 404, { error: `no session ${sessionId}` });
+    return;
+  }
+  try {
+    await deps.manager.cancel(sessionId);
+    const response: CancelSessionResponse = {
+      session: deps.manager.get(sessionId) ?? record,
+    };
+    sendJson(res, 200, response);
+  } catch (error) {
+    sendJson(res, 500, { error: errorMessage(error) });
+  }
+}
+
 export function createControlHandler(deps: ControlDeps) {
   return (req: IncomingMessage, res: ServerResponse): void => {
     const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
@@ -173,6 +205,11 @@ export function createControlHandler(deps: ControlDeps) {
       const modeMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/mode$/);
       if (modeMatch) {
         void handleSetMode(deps, req, res, modeMatch[1] ?? "");
+        return;
+      }
+      const cancelMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/cancel$/);
+      if (cancelMatch) {
+        void handleCancel(deps, res, cancelMatch[1] ?? "");
         return;
       }
       sendJson(res, 404, { error: "not found" });

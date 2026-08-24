@@ -394,6 +394,31 @@ describe("POST /v1/sessions/<id>/mode", () => {
   });
 });
 
+describe("POST /v1/sessions/<id>/cancel", () => {
+  test("cancels the session and answers with its record", async () => {
+    // The App calls this when a new head supersedes a review that is still
+    // running. Cancelling a session whose turn already ended is a no-op on
+    // purpose: the App races the stream and must not treat that as failure.
+    const sessionId = streamed.result?.sessionId ?? "";
+    const response = await fetch(
+      `http://127.0.0.1:${daemon.port}/v1/sessions/${sessionId}/cancel`,
+      { method: "POST", headers: { Authorization: `Bearer ${daemon.token}` } },
+    );
+    expect(response.status).toBe(200);
+    const { session } = (await response.json()) as { session: SessionRecord };
+    expect(session.id).toBe(sessionId);
+    expect(session.status).toBe("idle");
+  });
+
+  test("an unknown session id gets 404", async () => {
+    const response = await fetch(
+      `http://127.0.0.1:${daemon.port}/v1/sessions/00000000-0000-7000-8000-000000000000/cancel`,
+      { method: "POST", headers: { Authorization: `Bearer ${daemon.token}` } },
+    );
+    expect(response.status).toBe(404);
+  });
+});
+
 describe("monad attach -p", () => {
   test("sends exactly one prompt to the session and exits without a stdin loop", async () => {
     // Regression: cmdAttach parsed -p and then dropped it, always falling

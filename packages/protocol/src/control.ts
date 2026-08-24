@@ -165,3 +165,14 @@ export const SetModeResponseSchema = z.object({
   session: SessionRecordSchema,
 });
 export type SetModeResponse = z.infer<typeof SetModeResponseSchema>;
+
+/**
+ * Response of POST /v1/sessions/<id>/cancel: the record after the in-flight
+ * turn was cancelled. The route takes no body; cancelling an idle session is
+ * a no-op that still answers with the record, so a caller racing a turn that
+ * has just ended does not have to treat that as a failure.
+ */
+export const CancelSessionResponseSchema = z.object({
+  session: SessionRecordSchema,
+});
+export type CancelSessionResponse = z.infer<typeof CancelSessionResponseSchema>;
