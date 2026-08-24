@@ -208,6 +208,51 @@ describe("decideFixPermission", () => {
     }
   });
 
+  test("an allowlisted prefix cannot smuggle a second command past the human", () => {
+    const { worktree } = makeWorktree();
+    writeFileSync(
+      join(worktree, "package.json"),
+      JSON.stringify({ scripts: { lint: "biome check .", test: "bun test" } }),
+    );
+    const context = fixContext(worktree);
+    const smuggled = [
+      "git commit -m x && git push",
+      "git commit -m x; git push",
+      "git add -A & git push origin main",
+      "git status || git push",
+      "git log | tee /tmp/leak",
+      "git diff > /tmp/leak",
+      "git show `git push`",
+      'git commit -m "$(git push)"',
+      "git status\ngit push",
+      "bun run lint && git push",
+      "git commit -m 'unterminated",
+    ];
+    for (const command of smuggled) {
+      const verdict = decideFixPermission(
+        request({ kind: "execute", rawInput: { command } }),
+        context,
+      );
+      expect(verdict).toEqual({ kind: "forward" });
+    }
+  });
+
+  test("quoted shell metacharacters stay a single allowlisted command", () => {
+    const { worktree } = makeWorktree();
+    const context = fixContext(worktree);
+    for (const command of [
+      "git commit -m 'fix(policy): shell control syntax'",
+      'git commit -m "fix(policy): braces {and} pipes | inside quotes"',
+      "git commit -m 'a && b'",
+    ]) {
+      const verdict = decideFixPermission(
+        request({ kind: "execute", rawInput: { command } }),
+        context,
+      );
+      expect(verdict).toEqual({ kind: "allow" });
+    }
+  });
+
   test("git shorthand prefixes do not leak: gitk and git pushx are not allowlisted", () => {
     const { worktree } = makeWorktree();
     for (const command of ["gitk", "git statusx", "git diff-index"]) {

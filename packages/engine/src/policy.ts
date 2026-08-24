@@ -373,8 +373,77 @@ function commandFromRawInput(rawInput: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Shell syntax that makes a command more than the single program its prefix
+ * names: chaining and separators (&& || ; & newline), pipes, redirections,
+ * command substitution ($( ` <( ), and subshell/brace grouping. A prefix
+ * match cannot vouch for what runs after any of these, so
+ * `git commit -m x && git push` must NOT ride in on the `git commit` entry.
+ */
+const SHELL_CONTROL_CHARS = new Set([";", "&", "|", "<", ">", "`", "(", ")", "{", "}", "\n", "\r"]);
+
+/**
+ * True when the command carries shell syntax outside quotes. Quoting is
+ * tracked so a conventional-commit subject such as
+ * `git commit -m "fix(policy): thing"` stays a single command, while
+ * `git commit -m x && git push` does not. Backslash escapes are honored
+ * outside single quotes. Substitution (backtick, $(, ${) still counts
+ * inside DOUBLE quotes, where a real shell expands it; single quotes
+ * suppress everything. Unterminated quoting counts as control syntax, since
+ * the real shell would then read further than this scan can model.
+ */
+export function hasShellControlSyntax(command: string): boolean {
+  let quote: '"' | "'" | undefined;
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command[i] as string;
+    if (char === "\\" && quote !== "'") {
+      i += 1;
+      continue;
+    }
+    if (quote === "'") {
+      if (char === "'") {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '"') {
+        quote = undefined;
+        continue;
+      }
+      if (char === "`" || (char === "$" && (command[i + 1] === "(" || command[i + 1] === "{"))) {
+        return true;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (SHELL_CONTROL_CHARS.has(char)) {
+      return true;
+    }
+    if (char === "$" && (command[i + 1] === "(" || command[i + 1] === "{")) {
+      return true;
+    }
+  }
+  return quote !== undefined;
+}
+
+/**
+ * True only for a single unchained command whose text begins with an
+ * allowlist entry. Anything carrying shell control syntax (chaining,
+ * separators, pipes, redirections, command substitution, grouping) is never
+ * matched here, because a prefix match cannot vouch for what runs after it;
+ * the caller forwards those to the attached human instead. That is what
+ * keeps `git push` behind a permission prompt however it is spelled,
+ * including `git commit -m x && git push`.
+ */
 function matchesAllowlist(command: string, allowlist: string[]): boolean {
-  const normalized = command.trim().replace(/\s+/g, " ");
+  const normalized = command.trim().replace(/[ \t]+/g, " ");
+  if (hasShellControlSyntax(normalized)) {
+    return false;
+  }
   return allowlist.some(
     (prefix) => normalized === prefix || normalized.startsWith(`${prefix} `),
   );
@@ -386,6 +455,9 @@ function matchesAllowlist(command: string, allowlist: string[]): boolean {
  * resolves inside the worktree. Allowlisted executes run without a human;
  * every other execute (git push included) forwards to the attached human
  * exactly as interactive does, and is held when nobody is attached.
+ * An allowlisted prefix only counts on a single unchained command: anything
+ * with shell control syntax outside quotes forwards, so `git push` cannot
+ * ride in behind `git commit -m x &&`.
  */
 export function decideFixPermission(
   params: RequestPermissionRequest,
