@@ -49,3 +49,13 @@ export type {
   ReviewIntent,
   WebhookIntent,
 } from "./events.ts";
+
+export {
+  commenterMayRunFix,
+  hasWriteAccess,
+  isForkPullRequest,
+  resolveTrustFromIntent,
+  resolveTrustFromPullRequest,
+  WRITE_ASSOCIATIONS,
+} from "./trust.ts";
+export type { TrustDecision } from "./trust.ts";
