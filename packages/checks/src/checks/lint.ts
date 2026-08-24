@@ -116,7 +116,7 @@ export async function checkLint(
 ): Promise<CheckResult> {
   const cwd = (config as LintCheckConfig & { cwd?: string }).cwd ?? process.cwd();
 
-  // Scope the linter to changed lintable files only — don't run against the whole repo.
+  // Scope the linter to changed lintable files only; do not run against the whole repo.
   const lintableFiles = files
     .filter((f) => f.status !== "removed")
     .map((f) => f.path)

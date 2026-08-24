@@ -68,7 +68,7 @@ export interface ChangedFile {
   patch?: string;
   /**
    * Real new-file line numbers of added lines. Derive via parseAddedLines(patch) at the producer
-   * boundary (CLI / playbook). Optional for backward compat — checks fall back to deriving from
+   * boundary (CLI / playbook). Optional for backward compat: checks fall back to deriving from
    * `patch`, or as a last resort scanning `content` as fully-added (correct for status=added).
    */
   addedLines?: AddedLine[];
@@ -80,7 +80,7 @@ export type FindingSeverity = "critical" | "high" | "medium" | "low";
 /**
  * Run profile selector.
  *  - `fast` — pre-commit / interactive loop. Skips heavy operations like full builds.
- *  - `full` — pre-push / CI. Runs everything including the build verifier and test runner.
+ *  - `full`: pre-push / CI. Runs everything including the build verifier and test runner.
  */
 export type CheckProfile = "fast" | "full";
 
