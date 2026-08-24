@@ -312,9 +312,16 @@ export class SessionManager {
    * Runs one prompt turn. Appends the prompt verbatim, forwards it to the
    * backend, and appends turn_ended with the backend's stopReason. A second
    * prompt while one is in flight fails with a JSON-RPC error; M1 does not
-   * queue.
+   * queue. options.beforeTurnEnded runs after the backend's turn resolves
+   * but before turn_ended is appended; the review playbook uses it to place
+   * its review_report event inside the turn (it must never throw).
    */
-  async prompt(id: SessionId, params: PromptRequest, client?: SessionClient): Promise<PromptResponse> {
+  async prompt(
+    id: SessionId,
+    params: PromptRequest,
+    client?: SessionClient,
+    options?: { beforeTurnEnded?: (stopReason: string) => void },
+  ): Promise<PromptResponse> {
     const session = this.ensureLive(id);
     this.mustGet(id);
     if (client) {
@@ -332,6 +339,7 @@ export class SessionManager {
       this.store.setStatus(id, "running");
       const backend = await this.ensureBackend(id);
       const response = await backend.prompt(params);
+      options?.beforeTurnEnded?.(response.stopReason);
       this.appendAndPublish(id, "turn_ended", { stopReason: response.stopReason });
       this.store.setStatus(id, "idle");
       return response;
