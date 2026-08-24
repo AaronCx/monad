@@ -96,3 +96,29 @@ export {
   trustSummaryLine,
 } from "./render.ts";
 export type { CheckRunSummaryInput } from "./render.ts";
+
+export {
+  anchorableLines,
+  anchorMap,
+  buildReviewPayload,
+  formatComment,
+  formatReviewBody,
+  hasMonadReviewForHead,
+  octokitReviewTransport,
+  planReviewPost,
+  postReview,
+  reviewMarker,
+  REVIEW_MARKER_PREFIX,
+} from "./review-post.ts";
+export type {
+  BuildPayloadInput,
+  ExistingReview,
+  PostPlan,
+  PostReviewInput,
+  PostReviewResult,
+  ReviewBodyInput,
+  ReviewComment,
+  ReviewEvent,
+  ReviewPayload,
+  ReviewTransport,
+} from "./review-post.ts";
