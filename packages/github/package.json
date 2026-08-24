@@ -1,0 +1,20 @@
+{
+  "name": "@aaroncx/github",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aaroncx/checks": "workspace:*",
+    "@aaroncx/protocol": "workspace:*",
+    "@octokit/auth-app": "^8.3.0",
+    "@octokit/webhooks": "^14.2.0",
+    "octokit": "^5.0.5",
+    "zod": "^4"
+  }
+}
