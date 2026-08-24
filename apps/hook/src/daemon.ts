@@ -2,6 +2,7 @@ import { methods } from "@agentclientprotocol/sdk";
 import {
   cancelSession,
   connectAcp,
+  type DaemonHandle,
   ensureDaemon,
   fetchSessions,
   type ReviewResultLine,
@@ -47,25 +48,33 @@ const NO_HUMAN_HERE =
   "monad-hook cannot answer permission requests: an unattended session has no human, " +
   "so the request is held for monad attach";
 
-export function liveDaemonAccess(): DaemonAccess {
+/**
+ * The real thing. resolveHandle is ensureDaemon in production, which starts
+ * monadd when it is not running; the end-to-end test passes the handle of a
+ * daemon it booted itself, so everything below this line is still the shared
+ * client rather than a stand-in.
+ */
+export function liveDaemonAccess(
+  resolveHandle: () => Promise<DaemonHandle> = ensureDaemon,
+): DaemonAccess {
   return {
     async ensure(): Promise<void> {
-      await ensureDaemon();
+      await resolveHandle();
     },
     async review(body, onEvent): Promise<ReviewResultLine> {
-      return streamReview(await ensureDaemon(), body, onEvent);
+      return streamReview(await resolveHandle(), body, onEvent);
     },
     async cancel(sessionId): Promise<void> {
-      await cancelSession(await ensureDaemon(), sessionId);
+      await cancelSession(await resolveHandle(), sessionId);
     },
     async sessions(): Promise<SessionRecord[]> {
-      return fetchSessions(await ensureDaemon());
+      return fetchSessions(await resolveHandle());
     },
     async setMode(sessionId, mode): Promise<SessionRecord> {
-      return setSessionMode(await ensureDaemon(), sessionId, mode);
+      return setSessionMode(await resolveHandle(), sessionId, mode);
     },
     async prompt(record, texts): Promise<void> {
-      const handle = await ensureDaemon();
+      const handle = await resolveHandle();
       const session = await connectAcp(
         handle,
         { requestPermission: () => Promise.reject(new Error(NO_HUMAN_HERE)) },
