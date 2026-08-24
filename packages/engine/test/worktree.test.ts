@@ -14,7 +14,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createWorktree,
+  ensureFixBranch,
   fetchPullRequestHead,
+  fixBranchName,
   gcWorktrees,
   installWorktreeDeps,
   MONAD_BUN_BIN_ENV,
@@ -289,5 +291,34 @@ describe("gcWorktrees", () => {
     expect(removed).toEqual([]);
     expect(existsSync(young.path)).toBe(true);
     await removeWorktree({ repoRoot: repoDir, path: young.path });
+  });
+});
+
+describe("fix branches", () => {
+  test("fixBranchName is monad/fix/pr-<n>-<shortsha>", () => {
+    expect(fixBranchName({ number: 12, headSha: "0123456789abcdef" })).toBe(
+      "monad/fix/pr-12-0123456",
+    );
+  });
+
+  test("ensureFixBranch attaches a detached worktree once and is idempotent", async () => {
+    const wt = await createWorktree({
+      repoRoot: repoDir,
+      sha: baseSha,
+      sessionId: "sess-fix-branch",
+      env,
+    });
+    // Detached to start (review worktrees always are).
+    expect(() => git(wt.path, "symbolic-ref", "--quiet", "HEAD")).toThrow();
+    const branchName = fixBranchName({ number: 7, headSha: baseSha });
+    const first = await ensureFixBranch({ worktreePath: wt.path, branchName });
+    expect(first.created).toBe(true);
+    expect(git(wt.path, "symbolic-ref", "--short", "HEAD")).toBe(branchName);
+    const second = await ensureFixBranch({ worktreePath: wt.path, branchName });
+    expect(second.created).toBe(false);
+    expect(git(wt.path, "symbolic-ref", "--short", "HEAD")).toBe(branchName);
+    await removeWorktree({ repoRoot: repoDir, path: wt.path });
+    // The branch ref lives in the main repo bookkeeping; drop it for cleanliness.
+    git(repoDir, "branch", "-D", branchName);
   });
 });
