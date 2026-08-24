@@ -80,3 +80,19 @@ export type {
   CreateCheckRunParams,
   UpdateCheckRunParams,
 } from "./check-runs.ts";
+
+export {
+  checkRunConclusion,
+  checkRunSummary,
+  checkRunText,
+  checkRunTitle,
+  formatCheckFindings,
+  inProgressCheckRunOutput,
+  isUnstructuredReport,
+  queuedCheckRunOutput,
+  renderCompletedCheckRun,
+  secretsWarning,
+  sessionFooter,
+  trustSummaryLine,
+} from "./render.ts";
+export type { CheckRunSummaryInput } from "./render.ts";
