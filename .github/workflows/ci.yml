@@ -35,3 +35,4 @@ jobs:
         run: |
           ./apps/daemon/dist/monadd --version
           ./apps/cli/dist/monad --version
+          ./apps/hook/dist/monad-hook --version
