@@ -37,11 +37,12 @@ import { monadStateDir } from "./paths.ts";
  * fetch into arbitrary command execution on this machine. Validate both
  * before they reach argv rather than trusting the caller.
  */
-function assertPrNumber(number: number): number {
-  if (!Number.isSafeInteger(number) || number <= 0) {
-    throw new Error(`not a PR number: ${String(number)}`);
+function assertPrNumber(number: number): string {
+  const digits = String(number);
+  if (!/^[1-9][0-9]{0,8}$/.test(digits)) {
+    throw new Error(`not a PR number: ${digits}`);
   }
-  return number;
+  return digits;
 }
 
 /** Conservative git ref name: no leading dash, no option or path traversal. */

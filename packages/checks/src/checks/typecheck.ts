@@ -86,8 +86,10 @@ function detectTypechecker(cwd: string): { command: string; kind: string } | { s
 export function parseTscOutput(output: string): Finding[] {
   const findings: Finding[] = [];
   for (const line of output.split("\n")) {
+    // Unambiguous by construction: the file part cannot contain "(", and
+    // every run of spacing is bounded, so no input backtracks quadratically.
     const match = line.match(
-      /^(.{1,4096}?)\((\d{1,9}),(\d{1,9})\):[ \t]+error[ \t]+TS(\d{1,9}):[ \t]*(.*)$/,
+      /^([^(\n]{1,4096})\((\d{1,9}),(\d{1,9})\):[ \t]{1,8}error[ \t]{1,8}TS(\d{1,9}):[ \t]{0,8}(.*)$/,
     );
     if (!match) continue;
     findings.push({
