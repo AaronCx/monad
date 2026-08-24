@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   type ChangedFile,
   type CheckRunResults,
+  describeFinding,
   diffBetween,
   formatChecksTable,
   loadConfig,
@@ -156,13 +157,6 @@ function formatChangedFiles(files: ChangedFile[]): string {
     .join("\n");
 }
 
-interface CheckFinding {
-  file: string;
-  line: number;
-  rule: string;
-  message: string;
-}
-
 function formatFailFindings(results: CheckRunResults): string {
   const lines: string[] = [];
   for (const check of results.checks) {
@@ -173,8 +167,9 @@ function formatFailFindings(results: CheckRunResults): string {
     if (!Array.isArray(findings)) {
       continue;
     }
-    for (const finding of findings as CheckFinding[]) {
-      lines.push(`- ${finding.file}:${finding.line} [${check.type}/${finding.rule}] ${finding.message}`);
+    // Finding shapes differ per check; describeFinding normalizes them.
+    for (const finding of findings as Array<Record<string, unknown>>) {
+      lines.push(`- ${describeFinding(check.type, finding)}`);
     }
   }
   if (lines.length === 0) {

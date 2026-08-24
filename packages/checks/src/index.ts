@@ -53,7 +53,14 @@ export {
 // Session-bound MCP surface and shared rendering
 export { createChecksMcpServer } from "./mcp";
 export type { ChecksMcpBinding, ChecksMcpServer } from "./mcp";
-export { formatChecksTable, formatChecksMarkdown } from "./render";
+export {
+  formatChecksTable,
+  formatChecksMarkdown,
+  describeFinding,
+  findingLocation,
+  findingMessage,
+  findingRule,
+} from "./render";
 
 // Checks
 export { statusFromFindings } from "./checks/status";
