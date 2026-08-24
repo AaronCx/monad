@@ -13,6 +13,7 @@ import { createClaudeBackend } from "@aaroncx/backends";
 import type { DaemonInfo } from "@aaroncx/protocol";
 import { createDaemonAgentFactory } from "./acp-agent.ts";
 import { createControlHandler } from "./control.ts";
+import { createMcpRoute } from "./mcp.ts";
 
 const VERSION = "0.1.0";
 
@@ -93,11 +94,17 @@ mkdirSync(logDir, { recursive: true, mode: 0o700 });
 
 const token = ensureAuthToken(join(stateDir, "token"));
 const store = new SessionStore({ dbPath: flags.db ?? join(stateDir, "monad.db") });
+// The bound port is only known after listen(); backends start later (first
+// session/new at the earliest), so the checksMcp thunk is safe by then.
+const bound: { port?: number } = {};
 const manager = new SessionManager({
   store,
   // MONAD_BACKEND_CMD (read per backend start) overrides the vendor command
   // for tests; CLAUDE_AGENT_LOGS makes the adapter log under $MONAD_HOME.
-  createBackend: createClaudeBackend({ logDir }),
+  createBackend: createClaudeBackend({
+    logDir,
+    checksMcp: () => (bound.port === undefined ? undefined : { port: bound.port, token }),
+  }),
 });
 
 const startedAt = new Date();
@@ -107,9 +114,18 @@ const startedAt = new Date();
 // waiting path exactly like a graceful disconnect. MONAD_SSE_GRACE_MS
 // shortens the reconnect grace window in tests.
 const sseGraceEnv = Number(process.env.MONAD_SSE_GRACE_MS ?? "");
+// Authenticated non-ACP paths: /mcp/<sessionId> first (per-session checks
+// MCP mounts, same bearer token as /acp), then the /v1/* control API.
+const mcpRoute = createMcpRoute({ manager });
+const controlHandler = createControlHandler({ manager, version: VERSION, startedAt });
 const server = createAcpHttpServer(createDaemonAgentFactory({ manager, version: VERSION }), {
   authToken: token,
-  fallback: createControlHandler({ manager, version: VERSION, startedAt }),
+  fallback: (req, res) => {
+    if (mcpRoute(req, res)) {
+      return;
+    }
+    controlHandler(req, res);
+  },
   ...(Number.isFinite(sseGraceEnv) && sseGraceEnv > 0 ? { sseGraceMs: sseGraceEnv } : {}),
   onConnectionDead: (connectionId) => {
     console.log(`monadd: client connection ${connectionId} vanished without DELETE; reaped`);
@@ -119,6 +135,7 @@ const server = createAcpHttpServer(createDaemonAgentFactory({ manager, version: 
 // Loopback only in M1; exposing the daemon beyond 127.0.0.1 is a later,
 // deliberate decision, not a flag.
 const { port } = await server.listen(flags.port, "127.0.0.1");
+bound.port = port;
 
 const infoPath = daemonInfoPath();
 const pidPath = daemonPidPath();
