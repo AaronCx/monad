@@ -43,7 +43,7 @@ export async function checkBuild(config: BuildCheckConfig): Promise<CheckResult>
   const command = config.command ?? (hasPackageJson ? "bun run build" : "swift build");
 
   const parts = command.split(/\s+/);
-  const [cmd, ...args] = parts;
+  const [cmd = "", ...args] = parts;
 
   try {
     const { exitCode, stdout, stderr } = await new Promise<{

@@ -14,7 +14,7 @@ interface RunResult {
 
 function runCommand(command: string, cwd: string, timeoutMs: number): Promise<RunResult> {
   const parts = command.split(/\s+/);
-  const [cmd, ...args] = parts;
+  const [cmd = "", ...args] = parts;
   return new Promise((resolve) => {
     const child = execFile(
       cmd,
@@ -113,29 +113,29 @@ export function parseTestCounts(output: string): { passed: number; failed: numbe
   const bunFail = output.match(/^\s*(\d+)\s+fail\b/m);
   if (bunPass || bunFail) {
     return {
-      passed: bunPass ? Number.parseInt(bunPass[1], 10) : 0,
-      failed: bunFail ? Number.parseInt(bunFail[1], 10) : 0,
+      passed: bunPass ? Number.parseInt(bunPass[1] ?? "0", 10) : 0,
+      failed: bunFail ? Number.parseInt(bunFail[1] ?? "0", 10) : 0,
     };
   }
 
   const jest = output.match(/Tests:\s+(?:(\d+)\s+failed,\s+)?(\d+)\s+passed/);
   if (jest) {
-    return { passed: Number.parseInt(jest[2], 10), failed: jest[1] ? Number.parseInt(jest[1], 10) : 0 };
+    return { passed: Number.parseInt(jest[2] ?? "0", 10), failed: jest[1] ? Number.parseInt(jest[1], 10) : 0 };
   }
 
   const pytest = output.match(/(\d+)\s+passed(?:,\s+(\d+)\s+failed)?/);
   const pytestFailFirst = output.match(/(\d+)\s+failed,\s+(\d+)\s+passed/);
   if (pytestFailFirst) {
-    return { passed: Number.parseInt(pytestFailFirst[2], 10), failed: Number.parseInt(pytestFailFirst[1], 10) };
+    return { passed: Number.parseInt(pytestFailFirst[2] ?? "0", 10), failed: Number.parseInt(pytestFailFirst[1] ?? "0", 10) };
   }
   if (pytest) {
-    return { passed: Number.parseInt(pytest[1], 10), failed: pytest[2] ? Number.parseInt(pytest[2], 10) : 0 };
+    return { passed: Number.parseInt(pytest[1] ?? "0", 10), failed: pytest[2] ? Number.parseInt(pytest[2], 10) : 0 };
   }
 
   const swift = output.match(/Executed\s+(\d+)\s+tests?,\s+with\s+(\d+)\s+failures?/);
   if (swift) {
-    const total = Number.parseInt(swift[1], 10);
-    const failed = Number.parseInt(swift[2], 10);
+    const total = Number.parseInt(swift[1] ?? "0", 10);
+    const failed = Number.parseInt(swift[2] ?? "0", 10);
     return { passed: total - failed, failed };
   }
 

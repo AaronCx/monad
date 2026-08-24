@@ -3,7 +3,7 @@ import type { ChangedFile, CheckResult, DependencyCheckConfig } from "../types";
 
 async function runCommand(command: string, cwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const parts = command.split(/\s+/);
-  const [cmd, ...args] = parts;
+  const [cmd = "", ...args] = parts;
 
   return new Promise((resolve) => {
     const child = execFile(cmd, args, {

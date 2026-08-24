@@ -15,7 +15,7 @@ interface RunResult {
 
 function runCommand(command: string, cwd: string, timeoutMs: number): Promise<RunResult> {
   const parts = command.split(/\s+/);
-  const [cmd, ...args] = parts;
+  const [cmd = "", ...args] = parts;
   return new Promise((resolve) => {
     const child = execFile(
       cmd,
@@ -89,10 +89,10 @@ export function parseTscOutput(output: string): Finding[] {
     const match = line.match(/^(.+?)\((\d+),(\d+)\):\s+error\s+TS(\d+):\s*(.*)$/);
     if (!match) continue;
     findings.push({
-      file: match[1],
-      line: Number.parseInt(match[2], 10),
+      file: match[1] ?? "",
+      line: Number.parseInt(match[2] ?? "0", 10),
       rule: `TS${match[4]}`,
-      message: match[5].trim(),
+      message: (match[5] ?? "").trim(),
       severity: "high",
     });
   }

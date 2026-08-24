@@ -53,7 +53,7 @@ export function extractTokens(line: string): string[] {
   const quotedStrings = /["']([^"']{20,})["']/g;
   match = quotedStrings.exec(line);
   while (match !== null) {
-    addToken(match[1]);
+    addToken(match[1] ?? "");
     match = quotedStrings.exec(line);
   }
 
@@ -61,7 +61,7 @@ export function extractTokens(line: string): string[] {
   const assignments = /[=:]\s*["']?([^\s"',;}{)]{20,})["']?/g;
   match = assignments.exec(line);
   while (match !== null) {
-    addToken(match[1]);
+    addToken(match[1] ?? "");
     match = assignments.exec(line);
   }
 

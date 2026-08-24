@@ -29,7 +29,7 @@ function parseNameStatus(output: string): { status: string; path: string }[] {
     .split("\n")
     .filter((line) => line.length > 0)
     .map((line) => {
-      const [status, ...pathParts] = line.split("\t");
+      const [status = "", ...pathParts] = line.split("\t");
       return { status: status.trim(), path: pathParts.join("\t").trim() };
     });
 }
@@ -55,7 +55,7 @@ export function splitPatchByFile(diffOutput: string): Map<string, string> {
   for (const chunk of chunks) {
     const headerMatch = chunk.match(/^a\/(.+?) b\/(.+)/m);
     if (headerMatch) {
-      const filePath = headerMatch[2];
+      const filePath = headerMatch[2] ?? "";
       map.set(filePath, `diff --git ${chunk}`);
     }
   }

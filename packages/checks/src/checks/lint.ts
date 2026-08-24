@@ -18,7 +18,7 @@ function isLintable(path: string): boolean {
 
 async function runCommand(command: string, cwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const parts = command.split(/\s+/);
-  const [cmd, ...args] = parts;
+  const [cmd = "", ...args] = parts;
 
   return new Promise((resolve) => {
     const child = execFile(cmd, args, {
@@ -79,22 +79,22 @@ function parseOutput(stdout: string, stderr: string): LintError[] {
     const biomeMatch = line.match(/^(.+?):(\d+):(\d+)\s+((?:lint|assist|syntax|format)\/[\w/.-]+)\b/);
     if (biomeMatch) {
       errors.push({
-        file: biomeMatch[1],
-        line: Number.parseInt(biomeMatch[2], 10),
+        file: biomeMatch[1] ?? "",
+        line: Number.parseInt(biomeMatch[2] ?? "0", 10),
         rule: biomeMatch[4],
-        message: biomeMatch[4],
+        message: biomeMatch[4] ?? "",
       });
       continue;
     }
 
     const match = line.match(/^(.+?):(\d+)(?::\d+)?:\s*(?:error|Error|ERR)\s*(.+)/);
     if (match) {
-      const msg = match[3].trim();
+      const msg = (match[3] ?? "").trim();
       // Try to extract rule name from message (e.g. "no-unused-vars" or "(no-unused-vars)")
       const ruleMatch = msg.match(/\(?([\w-]+\/[\w-]+|[\w-]{3,})\)?$/);
       errors.push({
-        file: match[1],
-        line: Number.parseInt(match[2], 10),
+        file: match[1] ?? "",
+        line: Number.parseInt(match[2] ?? "0", 10),
         rule: ruleMatch ? ruleMatch[1] : undefined,
         message: ruleMatch ? msg.replace(ruleMatch[0], '').trim() : msg,
       });
@@ -103,7 +103,7 @@ function parseOutput(stdout: string, stderr: string): LintError[] {
 
     const errorMatch = line.match(/^(?:error|Error|ERROR)[:\s]+(.+)/);
     if (errorMatch) {
-      errors.push({ message: errorMatch[1].trim() });
+      errors.push({ message: (errorMatch[1] ?? "").trim() });
     }
   }
 
