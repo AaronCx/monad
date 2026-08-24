@@ -59,3 +59,24 @@ export {
   WRITE_ASSOCIATIONS,
 } from "./trust.ts";
 export type { TrustDecision } from "./trust.ts";
+
+export {
+  annotationTruncationNote,
+  clampSummary,
+  completeCheckRun,
+  createCheckRun,
+  updateCheckRun,
+  CHECK_RUN_NAME,
+  MAX_ANNOTATIONS_PER_REQUEST,
+  MAX_ANNOTATIONS_TOTAL,
+  MAX_SUMMARY_LENGTH,
+} from "./check-runs.ts";
+export type {
+  CheckRunConclusion,
+  CheckRunOutput,
+  CheckRunStatus,
+  CompleteCheckRunParams,
+  CompleteCheckRunResult,
+  CreateCheckRunParams,
+  UpdateCheckRunParams,
+} from "./check-runs.ts";
