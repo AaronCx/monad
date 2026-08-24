@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createGitHubApp,
   INSTALLATION_TOKEN_TTL_MS,
@@ -61,8 +64,17 @@ describe("normalizePrivateKey", () => {
   });
 
   test("readPrivateKey reads the file the config points at", async () => {
-    const path = `${import.meta.dir}/fixtures/fake-app-key.pem`;
-    expect((await readPrivateKey(path)).trim().startsWith("-----BEGIN")).toBe(true);
+    // Written here rather than committed as a .pem fixture: monad's own
+    // secrets check scans this repo, and a committed key header is exactly
+    // what it should flag. Test files are already allowlisted in .monad.yml.
+    const dir = mkdtempSync(join(tmpdir(), "monad-app-key-"));
+    const path = join(dir, "app.private-key.pem");
+    try {
+      writeFileSync(path, `${PRIVATE_KEY}\n`);
+      expect(await readPrivateKey(path)).toBe(`${PRIVATE_KEY}\n`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
