@@ -52,6 +52,18 @@ export type {
 } from "./events.ts";
 
 export {
+  ACK_REACTION,
+  DONE_REACTION,
+  fetchPullRequest,
+  postIssueComment,
+  reactToComment,
+  REACTIONS,
+  REFUSED_REACTION,
+  UNKNOWN_REACTION,
+} from "./comments.ts";
+export type { CommentRef, ReactionContent } from "./comments.ts";
+
+export {
   commenterMayRunFix,
   hasWriteAccess,
   isForkPullRequest,

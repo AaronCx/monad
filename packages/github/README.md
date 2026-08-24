@@ -17,6 +17,7 @@ the wrong package. This package does not import from `apps/`.
 | `trust.ts` | trusted or untrusted, from the signed payload alone. No API call, no `gh`, no fallback. |
 | `check-runs.ts` | create, update, and complete a Check Run, paging annotations 50 at a time. |
 | `render.ts` | verdict and checks into `output.title`, `output.summary`, `output.text`, and a conclusion. |
+| `comments.ts` | reactions, one reply on the PR conversation, and reading a pull request back through the API. |
 | `review-post.ts` | one COMMENT review with inline comments, shared with the CLI through a transport interface. |
 | `octokit.ts` | `OctokitLike`, the one shape everything here needs, so tests fake the request layer. |
 
