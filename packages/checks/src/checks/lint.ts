@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { runCommand } from "../exec";
 import type { ChangedFile, CheckResult, LintCheckConfig } from "../types";
 import type { TrustLevel } from "../config/loader";
 import { existsSync } from "node:fs";
@@ -15,24 +15,6 @@ function isLintable(path: string): boolean {
   const dot = path.lastIndexOf(".");
   if (dot === -1) return false;
   return LINTABLE_EXTENSIONS.has(path.slice(dot).toLowerCase());
-}
-
-async function runCommand(command: string, cwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const parts = command.split(/\s+/);
-  const [cmd = "", ...args] = parts;
-
-  return new Promise((resolve) => {
-    const child = execFile(cmd, args, {
-      cwd: cwd ?? process.cwd(),
-      maxBuffer: 10 * 1024 * 1024,
-    }, (error, stdout, stderr) => {
-      resolve({
-        exitCode: error ? (child.exitCode ?? 1) : 0,
-        stdout: stdout || "",
-        stderr: stderr || "",
-      });
-    });
-  });
 }
 
 type LinterKind = "biome" | "eslint" | "ruff" | "swiftlint";
@@ -169,7 +151,7 @@ export async function checkLint(
   }
 
   try {
-    const result = await runCommand(command, cwd);
+    const result = await runCommand(command, { cwd });
 
     if (result.exitCode === 0) {
       return {

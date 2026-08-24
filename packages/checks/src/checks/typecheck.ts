@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { runCommand } from "../exec";
 import { existsSync, readFileSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import type { CheckResult, Finding, TypecheckCheckConfig } from "../types";
@@ -6,37 +6,6 @@ import type { TrustLevel } from "../config/loader";
 import { statusFromFindings } from "./status";
 
 const DEFAULT_TIMEOUT_SECONDS = 300;
-
-interface RunResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-}
-
-function runCommand(command: string, cwd: string, timeoutMs: number): Promise<RunResult> {
-  const parts = command.split(/\s+/);
-  const [cmd = "", ...args] = parts;
-  return new Promise((resolve) => {
-    const child = execFile(
-      cmd,
-      args,
-      { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error && "killed" in error && error.killed) {
-          resolve({ exitCode: -1, stdout: stdout || "", stderr: stderr || "", timedOut: true });
-          return;
-        }
-        resolve({
-          exitCode: error ? (Number(error.code) || child.exitCode || 1) : 0,
-          stdout: stdout || "",
-          stderr: stderr || "",
-          timedOut: false,
-        });
-      },
-    );
-  });
-}
 
 function isOnPath(binary: string): boolean {
   const pathVar = process.env.PATH ?? "";
@@ -165,7 +134,7 @@ export async function checkTypecheck(config: TypecheckCheckConfig): Promise<Chec
   }
 
   try {
-    const result = await runCommand(command, cwd, timeoutSeconds * 1000);
+    const result = await runCommand(command, { cwd, timeoutMs: timeoutSeconds * 1000 });
 
     if (result.timedOut) {
       return {
