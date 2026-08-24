@@ -239,6 +239,28 @@ describe("supersede", () => {
     expect(h.daemon.reviews).toHaveLength(2);
   });
 
+  test("a newer head supersedes even with no slot free to start it", async () => {
+    // The stale review is stale whether or not there is room for its
+    // replacement: with the cap full, the cancel must still happen now.
+    h = harness({ maxConcurrent: 1 });
+    h.daemon.autoReview = (call) => {
+      h.daemon.announce(call, checkResults());
+    };
+    await deliver(h, "d-a", pullRequestEvent("opened"));
+    await waitFor(() => h.daemon.reviews.length === 1, "the first review to start");
+    await deliver(h, "d-other", pullRequestEvent("opened", { number: 21 }));
+    await deliver(
+      h,
+      "d-newer",
+      pullRequestEvent("synchronize", {
+        head: { sha: NEW_HEAD, ref: "feature", repo: { full_name: "AaronCx/monad-review-demo" } },
+      }),
+    );
+    await waitFor(() => h.daemon.cancels.length === 1, "the stale review to be cancelled");
+    expect(h.queue.get("d-a")?.status).toBe("superseded");
+    expect(h.queue.get("d-newer")?.status).not.toBe("superseded");
+  });
+
   test("a command is not superseded by a push", async () => {
     h = harness();
     h.daemon.sessionsError = new Error("monadd is down");

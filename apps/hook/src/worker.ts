@@ -138,10 +138,11 @@ export class HookWorker {
     }
     this.pumping = true;
     try {
-      for (const row of this.options.queue.ready(this.options.now())) {
-        if (this.running.size >= this.options.maxConcurrent) {
-          break;
-        }
+      const ready = this.options.queue.ready(this.options.now());
+      // Supersede first, and for every waiting delivery rather than only the
+      // ones a free slot reaches: a newer head makes a running review stale
+      // whether or not there is room to start its replacement yet.
+      for (const row of ready) {
         if (this.running.has(row.deliveryId)) {
           continue;
         }
@@ -149,6 +150,17 @@ export class HookWorker {
         const busy = key === undefined ? undefined : this.byPr.get(key);
         if (busy !== undefined) {
           this.supersedeIfStale(busy, row);
+        }
+      }
+      for (const row of ready) {
+        if (this.running.size >= this.options.maxConcurrent) {
+          break;
+        }
+        if (this.running.has(row.deliveryId)) {
+          continue;
+        }
+        const key = prKeyOf(row);
+        if (key !== undefined && this.byPr.has(key)) {
           continue;
         }
         this.begin(row, key);
