@@ -106,9 +106,61 @@ checks default to untrusted when handed no level at all, which is the opposite o
 library default and deliberate: the pipeline always injects a resolved level, so an absent one
 means a caller that did not think about it.
 
-Not covered, and worth saying: `bunx` fetches the allowed tools from the npm registry when they
-are not installed, so an untrusted run still executes third-party code monad named. That is the
-same supply chain the machine already runs, not the PR's.
+### The allowed detections ran a binary the PR committed, until 2026-08-24
+
+The table above was the whole answer for one day, and it was wrong by one step. Naming a fixed
+command line is not enough when something else decides which file that name resolves to.
+`detectLinter` returned `bunx biome check` and `detectTypechecker` returned
+`bunx tsc --noEmit -p tsconfig.json`, both run with `cwd` set to the worktree, and `bunx` prefers
+a locally installed binary: `<worktree>/node_modules/.bin/<name>`. An untrusted review skips
+install, so that directory should not exist, but nothing stopped a PR from committing it.
+
+Measured on the Mac Mini on 2026-08-24, twice, before this commit:
+
+- Isolated: a directory holding `package.json`, `biome.json`, and an executable
+  `node_modules/.bin/biome` that touches a canary. `bunx biome check .` ran the canary.
+- Through monad: a repo whose attack branch commits that same executable plus `biome.json`.
+  `monad checks --base main --untrusted --only lint` wrote the canary and reported
+  `Lint check passed (biome, 1 file(s))`. Silent execution of the PR's own binary, disguised as a
+  green check, on exactly the path this record had declared safe because "its configuration
+  format cannot carry code". The format could not; the resolver could.
+
+It was exploitable, on the default path, with no flags, by any PR. Saying it plainly because the
+draft above says the opposite and both sentences now sit in the same file.
+
+The fix is that monad resolves the binary itself instead of letting bun do it.
+`resolveTool(name, { trust, cwd })` in `packages/checks/src/exec.ts` is the one place that
+decides:
+
+| | trusted | untrusted |
+|---|---|---|
+| where the binary comes from | `bunx <name>`, so the repo's pinned local toolchain wins | `Bun.which(name)`, PATH only, returned as an absolute path |
+| the worktree | may supply it, and should: it is your repo | never consulted, and a PATH entry that resolves inside the worktree is refused as well |
+| nothing found | `bunx` fetches it, as before | the check reports `skipped` with a reason naming the tool |
+
+Applied to every detection an untrusted run is allowed to reach: `biome`, `ruff`, `swiftlint`
+in `detectLinter`, and `tsc`, `pyright` in `detectTypechecker`. `eslint` and `mypy` are still
+refused earlier, for the reasons in the table above, and the `package.json` script detection is
+still trusted-only. `build` and `test` never run untrusted at all, so their detectors are
+unchanged.
+
+Re-measured after the fix, same fixture: `monad checks --base main --untrusted --only lint`
+leaves no canary and reports `Lint check skipped: biome could not be resolved`, with the reason
+`untrusted PR: biome is not on PATH, and monad will not resolve it from the worktree because the
+PR could have committed that binary`. The same command without `--untrusted` still writes the
+canary, which is the trusted contract unchanged: your repo, your toolchain, your machine.
+
+The cost is real and lands on this machine specifically: none of `biome`, `tsc`, `ruff`,
+`swiftlint`, `pyright` is on the Mac Mini's PATH (they are all repo-local devDependencies), so
+today every untrusted lint and typecheck on this host skips. That is the honest version of what
+M2 shipped, which was a green check produced by the PR's own program. Installing those tools
+globally, or giving the daemon a PATH that includes a monad-owned toolchain directory, is what
+turns untrusted lint back on, and neither is the PR's decision to make.
+
+Not covered, and worth saying: on a trusted run `bunx` still fetches the named tool from the npm
+registry when it is not installed, so a trusted run executes third-party code monad named. That
+is the same supply chain the machine already runs, not the PR's. An untrusted run no longer
+fetches anything.
 
 ## The agent does not hold the daemon token
 
@@ -266,6 +318,9 @@ The policy layer is what stops the session from doing anything.
 
 - Trusted reviews still execute the head's toolchain. That is correct (it is your repo and your
   collaborators) but it means a compromised collaborator account is a code-execution path.
+- Untrusted lint and typecheck are now PATH-only, so on a host whose linters are all repo-local
+  they skip rather than run. A skip with a reason is the correct answer and it is still a
+  thinner review than a trusted one gets.
 - `git show <ref>:.monad.yml` reads the base of the PR. A malicious PR that is merged makes its
   config the base for the next PR. The gate is the human merging, which is the same gate as any
   CI config change.

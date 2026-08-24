@@ -1,4 +1,4 @@
-import { runCommand } from "../exec";
+import { resolveTool, runCommand } from "../exec";
 import type { ChangedFile, CheckResult, LintCheckConfig } from "../types";
 import type { TrustLevel } from "../config/loader";
 import { existsSync } from "node:fs";
@@ -19,12 +19,34 @@ function isLintable(path: string): boolean {
 
 type LinterKind = "biome" | "eslint" | "ruff" | "swiftlint";
 
+export interface DetectedLinter {
+  kind: LinterKind;
+  /** Bare binary name. `resolveTool` decides where it may come from. */
+  tool: string;
+  /** The fixed arguments monad wrote, never the PR's. */
+  args: string[];
+  /** Trusted runs reach this one through bunx. */
+  viaBunx: boolean;
+  /** Display form of the invocation, for messages and the details payload. */
+  commandPrefix: string;
+}
+
+function linter(kind: LinterKind, tool: string, args: string[], viaBunx: boolean): DetectedLinter {
+  return {
+    kind,
+    tool,
+    args,
+    viaBunx,
+    commandPrefix: [...(viaBunx ? ["bunx"] : []), tool, ...args].join(" "),
+  };
+}
+
 export function detectLinter(
   cwd: string,
   trust: TrustLevel = "trusted",
-): { kind: LinterKind; commandPrefix: string } | null {
+): DetectedLinter | null {
   if (existsSync(join(cwd, "biome.json")) || existsSync(join(cwd, "biome.jsonc"))) {
-    return { kind: "biome", commandPrefix: "bunx biome check" };
+    return linter("biome", "biome", ["check"], true);
   }
   const eslintConfigs = [
     ".eslintrc", ".eslintrc.js", ".eslintrc.cjs", ".eslintrc.json",
@@ -41,14 +63,14 @@ export function detectLinter(
       if (trust === "untrusted") {
         return null;
       }
-      return { kind: "eslint", commandPrefix: "bunx eslint" };
+      return linter("eslint", "eslint", [], true);
     }
   }
   if (existsSync(join(cwd, "pyproject.toml"))) {
-    return { kind: "ruff", commandPrefix: "ruff check" };
+    return linter("ruff", "ruff", ["check"], false);
   }
   if (existsSync(join(cwd, ".swiftlint.yml"))) {
-    return { kind: "swiftlint", commandPrefix: "swiftlint lint --path" };
+    return linter("swiftlint", "swiftlint", ["lint", "--path"], false);
   }
   return null;
 }
@@ -130,11 +152,16 @@ export async function checkLint(
     };
   }
 
+  // `invocation` is argv when monad built the command line, which is every
+  // detected case; a config-supplied command stays a string and is split the
+  // way it always was. `command` is the display form either way.
+  let invocation: string | string[];
   let command: string;
   let kind: LinterKind | null = null;
 
   if (config.command) {
     command = config.command;
+    invocation = config.command;
   } else {
     const detected = detectLinter(cwd, trust);
     if (!detected) {
@@ -146,12 +173,27 @@ export async function checkLint(
         details: { skipped: true },
       };
     }
-    command = `${detected.commandPrefix} ${lintableFiles.join(" ")}`;
+    // Detection said which tool. Resolution says whether monad is allowed to
+    // run it from where it would otherwise be found: an untrusted run takes
+    // the binary from PATH or takes nothing (decision record 0009).
+    const resolved = resolveTool(detected.tool, { trust, cwd, viaBunx: detected.viaBunx });
+    if (!resolved.ok) {
+      return {
+        type: "lint",
+        status: "pass",
+        title: "Lint & Type Check",
+        summary: `Lint check skipped: ${detected.kind} could not be resolved`,
+        details: { skipped: true, reason: resolved.reason, linter: detected.kind },
+      };
+    }
+    const argv = [...resolved.argv, ...detected.args, ...lintableFiles];
+    invocation = argv;
+    command = argv.join(" ");
     kind = detected.kind;
   }
 
   try {
-    const result = await runCommand(command, { cwd });
+    const result = await runCommand(invocation, { cwd });
 
     if (result.exitCode === 0) {
       return {
