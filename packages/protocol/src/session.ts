@@ -90,6 +90,15 @@ export const SessionRecordSchema = z.object({
   head: z.string().optional(),
   /** Present on review/fix sessions: the PR under review. */
   pr: SessionPrSchema.optional(),
+  /**
+   * The fix policy's execute allowlist, frozen once when the session first
+   * enters fix mode and never recomputed (decision record 0009). It is
+   * derived from the PR BASE commit's package.json for a review-derived
+   * session, so a fix session cannot widen its own allowlist by editing the
+   * worktree's package.json. Absent means nothing was frozen, which the fix
+   * policy reads as an empty allowlist: default deny.
+   */
+  execAllowlist: z.array(z.string()).optional(),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
 });

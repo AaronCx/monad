@@ -12,7 +12,10 @@ import type { PermissionResolutionMeta } from "@aaroncx/protocol";
 import {
   decideFixPermission,
   decideReviewPermission,
+  editedExecAllowlistInputs,
+  execAllowlistFromManifest,
   fixExecAllowlist,
+  isExecAllowlistInput,
   ModeAwarePermissionPolicy,
   type PermissionClient,
   type PermissionPolicyHooks,
@@ -307,6 +310,133 @@ describe("decideFixPermission", () => {
   });
 });
 
+describe("the frozen exec allowlist (finding 3)", () => {
+  test("execAllowlistFromManifest names only the scripts the manifest has", () => {
+    const allow = execAllowlistFromManifest(
+      JSON.stringify({ scripts: { lint: "biome check .", test: "bun test" } }),
+    );
+    expect(allow).toContain("git commit");
+    expect(allow).toContain("bun run lint");
+    expect(allow).toContain("bun test");
+    expect(allow).not.toContain("bun run build");
+    expect(allow).not.toContain("bun run typecheck");
+  });
+
+  test("execAllowlistFromManifest degrades to the git prefixes, never wider", () => {
+    for (const manifest of [undefined, "not json at all", "{}", JSON.stringify({ scripts: {} })]) {
+      expect(execAllowlistFromManifest(manifest)).toEqual([
+        "git status",
+        "git diff",
+        "git add",
+        "git commit",
+        "git log",
+        "git show",
+      ]);
+    }
+  });
+
+  test("every execute forwards once the allowlist inputs were edited", () => {
+    const worktree = mkdtempSync(join(tmpdir(), "monad-fix-edited-"));
+    writeFileSync(
+      join(worktree, "package.json"),
+      JSON.stringify({ scripts: { lint: "biome check .", test: "bun test" } }),
+    );
+    const context = {
+      worktree,
+      execAllowlist: fixExecAllowlist(worktree),
+      execAllowlistInputsEdited: true,
+    };
+    for (const command of ["git status", "bun run lint", "bun test", "git commit -m x"]) {
+      expect(
+        decideFixPermission(request({ kind: "execute", rawInput: { command } }), context),
+      ).toEqual({ kind: "forward" });
+    }
+    // Reads and in-worktree edits are untouched by the rule.
+    expect(decideFixPermission(request({ kind: "read" }), context)).toEqual({ kind: "allow" });
+  });
+
+  test("isExecAllowlistInput matches the manifest and every lockfile by basename", () => {
+    for (const path of [
+      "package.json",
+      "/a/b/package.json",
+      "packages/engine/package.json",
+      "bun.lock",
+      "bun.lockb",
+      "package-lock.json",
+      "npm-shrinkwrap.json",
+      "pnpm-lock.yaml",
+      "yarn.lock",
+    ]) {
+      expect(isExecAllowlistInput(path)).toBe(true);
+    }
+    for (const path of ["src/package.json.ts", "README.md", "tsconfig.json", "lock.json"]) {
+      expect(isExecAllowlistInput(path)).toBe(false);
+    }
+  });
+});
+
+describe("editedExecAllowlistInputs", () => {
+  function requested(toolCall: Partial<ToolCallUpdate>) {
+    return { kind: "permission_requested", payload: request(toolCall) };
+  }
+  function resolved(toolCallId: string, optionId: string) {
+    return {
+      kind: "permission_resolved",
+      payload: { outcome: { outcome: "selected", optionId }, by: "policy:fix", toolCallId },
+    };
+  }
+
+  test("a granted package.json edit counts", () => {
+    expect(
+      editedExecAllowlistInputs([
+        requested({ kind: "edit", locations: [{ path: "/wt/package.json" }] }),
+        resolved("call-1", "allow"),
+      ]),
+    ).toBe(true);
+  });
+
+  test("a granted source edit does not", () => {
+    expect(
+      editedExecAllowlistInputs([
+        requested({ kind: "edit", locations: [{ path: "/wt/src/a.ts" }] }),
+        resolved("call-1", "allow"),
+      ]),
+    ).toBe(false);
+  });
+
+  test("a rejected package.json edit does not, and an unresolved one does not yet", () => {
+    const pending = requested({ kind: "edit", locations: [{ path: "/wt/package.json" }] });
+    expect(editedExecAllowlistInputs([pending, resolved("call-1", "reject")])).toBe(false);
+    expect(editedExecAllowlistInputs([pending])).toBe(false);
+  });
+
+  test("a granted edit with no locations counts: the target is unknowable", () => {
+    expect(
+      editedExecAllowlistInputs([requested({ kind: "edit" }), resolved("call-1", "allow")]),
+    ).toBe(true);
+  });
+
+  test("a granted edit whose selected option is not in the request counts", () => {
+    expect(
+      editedExecAllowlistInputs([
+        requested({ kind: "edit", locations: [{ path: "/wt/bun.lock" }] }),
+        resolved("call-1", "some-option-nobody-offered"),
+      ]),
+    ).toBe(true);
+  });
+
+  test("executes and reads are not edits, whatever they name", () => {
+    expect(
+      editedExecAllowlistInputs([
+        requested({ kind: "read", locations: [{ path: "/wt/package.json" }] }),
+        resolved("call-1", "allow"),
+        requested({ kind: "execute", rawInput: { command: "cat package.json" } }),
+        resolved("call-1", "allow"),
+      ]),
+    ).toBe(false);
+  });
+});
+
 describe("selectPolicyOption", () => {
   test("never selects allow_always or reject_always", () => {
     const options: PermissionOption[] = [
@@ -448,6 +578,25 @@ describe("ModeAwarePermissionPolicy", () => {
     expect(response.outcome).toEqual({ outcome: "selected", optionId: "allow" });
     expect(granted).toBe(1);
     expect(resolved[0]?.meta.by).toBe("policy:fix");
+  });
+
+  test("fix: a context with no frozen allowlist forwards every execute", async () => {
+    // Default deny (record 0009): an M2 session row carries no frozen list,
+    // and a context that cannot say whether package.json was edited answers
+    // as if it was. Neither may end in an unattended execute, even though the
+    // worktree's own package.json would have allowed this command in M2.
+    const worktree = mkdtempSync(join(tmpdir(), "monad-fix-nolist-"));
+    writeFileSync(join(worktree, "package.json"), JSON.stringify({ scripts: { test: "bun test" } }));
+    const { policy, statuses } = makeModePolicy({ mode: "fix", cwd: worktree });
+    const held = policy.request(
+      SESSION_ID,
+      request({ kind: "execute", rawInput: { command: "bun run test" } }),
+      undefined,
+    );
+    await Bun.sleep(10);
+    expect(statuses).toEqual(["waiting_for_permission"]);
+    policy.cancel(SESSION_ID);
+    expect((await held).outcome).toEqual({ outcome: "cancelled" });
   });
 
   test("fix: forwards git push to the attached human (answered by: human)", async () => {

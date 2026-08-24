@@ -18,13 +18,16 @@ import type {
   TrustLevel,
 } from "@aaroncx/protocol";
 import {
+  editedExecAllowlistInputs,
+  execAllowlistFromManifest,
+  fixExecAllowlist,
   ModeAwarePermissionPolicy,
   type PermissionClient,
   type PermissionPolicy,
   type PermissionPolicyHooks,
 } from "./policy.ts";
 import type { SessionStore } from "./store.ts";
-import { ensureFixBranch, fixBranchName } from "./worktree.ts";
+import { ensureFixBranch, fixBranchName, readFileAtRef } from "./worktree.ts";
 
 /**
  * JSON-RPC error code returned when a prompt is already in flight.
@@ -159,6 +162,12 @@ export class SessionManager {
   private readonly policy: PermissionPolicy;
   private readonly createBackend: BackendFactory;
   private readonly live = new Map<SessionId, LiveSession>();
+  /**
+   * Sessions known to have edited package.json or a lockfile. Editing one is
+   * monotone, so this only ever grows and only ever saves a log scan; it is
+   * never the source of a permissive answer.
+   */
+  private readonly allowlistInputsEdited = new Set<SessionId>();
 
   constructor(options: SessionManagerOptions) {
     this.store = options.store;
@@ -181,7 +190,22 @@ export class SessionManager {
           hooks: h,
           resolveContext: (id) => {
             const record = this.store.get(id);
-            return record ? { mode: record.mode, cwd: record.cwd } : undefined;
+            if (!record) {
+              return undefined;
+            }
+            if (record.mode !== "fix") {
+              return { mode: record.mode, cwd: record.cwd };
+            }
+            return {
+              mode: record.mode,
+              cwd: record.cwd,
+              // Frozen at fix-mode entry (decision record 0009). Reading it
+              // off the record rather than off the worktree is the whole
+              // point: the worktree is what the agent edits. Only fix mode
+              // consults either field, so only fix mode pays for the scan.
+              execAllowlist: record.execAllowlist,
+              execAllowlistInputsEdited: this.editedExecAllowlistInputs(id),
+            };
           },
           beforeEditGrant: async (id) => {
             // Fix sessions branch lazily on the first granted edit; sessions
@@ -234,7 +258,12 @@ export class SessionManager {
   /** Appends session_created and starts the backend (spawn failures surface). */
   async activate(id: SessionId): Promise<SessionRecord> {
     const record = this.mustGet(id);
-    this.appendAndPublish(record.id, "session_created", record);
+    if (record.mode === "fix") {
+      // A session created directly in fix mode never passes through setMode,
+      // so freeze its allowlist here too. Both paths are idempotent.
+      await this.freezeExecAllowlist(id);
+    }
+    this.appendAndPublish(record.id, "session_created", this.mustGet(record.id));
     await this.ensureBackend(record.id);
     return this.mustGet(record.id);
   }
@@ -262,6 +291,9 @@ export class SessionManager {
   async setMode(id: SessionId, mode: SessionMode): Promise<SessionRecord> {
     this.mustGet(id);
     this.store.setMode(id, mode);
+    if (mode === "fix") {
+      await this.freezeExecAllowlist(id);
+    }
     const backend = this.live.get(id)?.backend;
     if (backend?.setSessionMode) {
       await backend.setSessionMode(mode);
@@ -399,6 +431,68 @@ export class SessionManager {
       }
     }
     this.live.clear();
+  }
+
+  /**
+   * Freezes the fix policy's execute allowlist on the record the first time a
+   * session enters fix mode, from a source the session itself cannot edit
+   * (decision record 0009, finding 3).
+   *
+   * Order, strictest first:
+   * 1. A review-derived session reads `git show <baseSha>:package.json`. The
+   *    base is the last state a repo maintainer approved, and open decision 4
+   *    picks it over the fix-entry state deliberately: an earlier legitimate
+   *    fix commit adding a script is the cost, and it is a cheap one (that
+   *    command forwards to the human once instead of running unattended).
+   * 2. A trusted session with no PR (you switched `monad run` to fix in your
+   *    own repo) reads the worktree's package.json, which is yours.
+   * 3. Anything else gets the git prefixes alone.
+   *
+   * Written exactly once. A session already carrying a list keeps it, so a
+   * second `--mode fix` cannot refresh it against an edited worktree.
+   */
+  private async freezeExecAllowlist(id: SessionId): Promise<void> {
+    const record = this.mustGet(id);
+    if (record.execAllowlist !== undefined) {
+      return;
+    }
+    const baseSha = record.pr?.baseSha ?? record.base;
+    let allowlist: string[];
+    if (baseSha !== undefined && baseSha.length > 0) {
+      allowlist = execAllowlistFromManifest(
+        await readFileAtRef(record.cwd, baseSha, "package.json"),
+      );
+    } else if (record.trust === "trusted") {
+      allowlist = fixExecAllowlist(record.cwd);
+    } else {
+      allowlist = execAllowlistFromManifest(undefined);
+    }
+    this.store.setExecAllowlist(id, allowlist);
+  }
+
+  /**
+   * Whether the session has been granted an edit to package.json or a
+   * lockfile, reconstructed from the permission events already in the log so
+   * this needs no new state. Monotone (an edit never un-happens), so a true
+   * answer is memoized and the log is not scanned again.
+   */
+  private editedExecAllowlistInputs(id: SessionId): boolean {
+    if (this.allowlistInputsEdited.has(id)) {
+      return true;
+    }
+    let edited: boolean;
+    try {
+      edited = editedExecAllowlistInputs(
+        this.store.replayKinds(id, ["permission_requested", "permission_resolved"]),
+      );
+    } catch {
+      // The edited set could not be determined; default deny (record 0009).
+      edited = true;
+    }
+    if (edited) {
+      this.allowlistInputsEdited.add(id);
+    }
+    return edited;
   }
 
   private appendAndPublish(id: SessionId, kind: EventRecord["kind"], payload: unknown): EventRecord {

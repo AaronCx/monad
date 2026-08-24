@@ -337,26 +337,72 @@ export interface FixPolicyContext {
   /**
    * Execute prefixes allowed without a human: git status/diff/add/commit/
    * log/show plus the repo's lint/typecheck/test/build scripts.
+   *
+   * Frozen once at fix-mode entry from a trusted source (the PR base commit)
+   * and passed in. It is NEVER recomputed from the worktree mid-session: the
+   * worktree is what the agent is editing, so deriving a permission from it
+   * lets the agent widen its own permissions (decision record 0009).
    */
   execAllowlist: string[];
+  /**
+   * True when the session has already been granted an edit to package.json or
+   * a lockfile, or when what a granted edit touched cannot be determined. The
+   * frozen allowlist names SCRIPTS, not the command lines they run, so once
+   * package.json is writable by the agent `bun run test` no longer means what
+   * it meant when the list was frozen. Every execute forwards to the human
+   * from that point on, whatever the allowlist says.
+   */
+  execAllowlistInputsEdited?: boolean;
 }
 
+/**
+ * `git commit` is on the allowlist, and git commit runs the repo's hooks
+ * (`.git/hooks`, or wherever `core.hooksPath` points). That is safe under
+ * monad's CURRENT worktree layout and only under it: a fix session works in a
+ * detached worktree whose `.git` is a file pointing at
+ * `<main repo>/.git/worktrees/<name>`, so both the hooks directory and the
+ * config that could repoint it live OUTSIDE the session worktree, where the
+ * fix policy rejects every edit. The agent can commit but cannot install a
+ * hook, and the hooks it triggers are the user's own.
+ *
+ * If the worktree layout ever changes so that a session can write inside its
+ * own `.git` (an in-place checkout, a bare clone per session, a container
+ * mount that includes the git dir), this entry becomes arbitrary code
+ * execution and must be revisited: either drop `git commit` from the list or
+ * gate it on the hooks directory resolving outside the worktree.
+ *
+ * On `--no-verify`: monad deliberately does NOT add it implicitly, and cannot.
+ * A permission response carries an optionId, nothing else (see
+ * RequestPermissionResponse); there is no channel in ACP for answering a
+ * permission request with a REWRITTEN command, and the vendor runs the string
+ * it already holds. Rewriting would also mean the event log shows one command
+ * while another ran, which destroys the property that the transcript is what
+ * happened. The agent may pass `--no-verify` itself and it still matches the
+ * `git commit` prefix, so the safer spelling is available without monad
+ * forging it.
+ */
 const FIX_GIT_ALLOWLIST = ["git status", "git diff", "git add", "git commit", "git log", "git show"];
 
 /**
- * The execute allowlist for a fix session: the fixed git prefixes plus
- * `<runner> run <script>` for each of the repo's lint/typecheck/test/build
- * package.json scripts (and the bare `bun test` / `npm test` shorthands when
- * a test script exists).
+ * The execute allowlist for a fix session, derived from one package.json:
+ * the fixed git prefixes plus `<runner> run <script>` for each of the repo's
+ * lint/typecheck/test/build scripts (and the bare `bun test` / `npm test`
+ * shorthands when a test script exists).
+ *
+ * Pass the manifest read from a TRUSTED source. For a review-derived fix
+ * session that is `git show <baseSha>:package.json`, the last state a repo
+ * maintainer approved; undefined (no manifest, or unparseable) yields the git
+ * prefixes alone, which is the safe direction.
  */
-export function fixExecAllowlist(worktree: string): string[] {
+export function execAllowlistFromManifest(manifest: string | undefined): string[] {
   const allow = [...FIX_GIT_ALLOWLIST];
   let scripts: Record<string, unknown> = {};
+  if (manifest === undefined) {
+    return allow;
+  }
   try {
-    const manifest = JSON.parse(readFileSync(join(worktree, "package.json"), "utf8")) as {
-      scripts?: Record<string, unknown>;
-    };
-    scripts = manifest.scripts ?? {};
+    const parsed = JSON.parse(manifest) as { scripts?: Record<string, unknown> };
+    scripts = parsed.scripts ?? {};
   } catch {
     return allow;
   }
@@ -371,6 +417,118 @@ export function fixExecAllowlist(worktree: string): string[] {
     allow.push("bun test", "npm test");
   }
   return allow;
+}
+
+/**
+ * The allowlist derived from the worktree's own package.json. This is a
+ * TRUSTED-ONLY path: the SessionManager uses it as the fallback for an
+ * interactive session in a repo the user owns that switched to fix mode, and
+ * for nothing else. A review-derived session reads the base commit instead,
+ * because its worktree is the PR (decision record 0009).
+ */
+export function fixExecAllowlist(worktree: string): string[] {
+  let manifest: string | undefined;
+  try {
+    manifest = readFileSync(join(worktree, "package.json"), "utf8");
+  } catch {
+    manifest = undefined;
+  }
+  return execAllowlistFromManifest(manifest);
+}
+
+/**
+ * Files that decide what an allowlisted `<runner> run <script>` actually
+ * executes: the manifest holding the script bodies, and the lockfiles that
+ * decide which dependency code a script pulls in. Matched by basename, so a
+ * nested workspace manifest counts too; that is stricter than necessary and
+ * deliberately so.
+ */
+const EXEC_ALLOWLIST_INPUT_FILES = new Set([
+  "package.json",
+  "bun.lock",
+  "bun.lockb",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+]);
+
+/** True when this path is one of the files the exec allowlist depends on. */
+export function isExecAllowlistInput(path: string): boolean {
+  return EXEC_ALLOWLIST_INPUT_FILES.has(basename(path));
+}
+
+/**
+ * Reconstructs, from a session's permission events, whether a granted edit
+ * has touched a file the exec allowlist depends on. Feed it the session's
+ * permission_requested and permission_resolved events in seq order; nothing
+ * else in the log is needed, so this holds no state of its own.
+ *
+ * Default deny in three places: an edit with no locations counts (the target
+ * is unknown, so it may have been package.json), a resolution monad cannot
+ * match back to its request counts, and a selected option monad cannot find
+ * in the request's options counts. A pending request does not count, because
+ * it has not happened yet.
+ */
+export function editedExecAllowlistInputs(
+  events: { kind: string; payload: unknown }[],
+): boolean {
+  const requests: { toolCallId?: string; params: RequestPermissionRequest }[] = [];
+  const resolutions = new Map<string, { outcome?: string; optionId?: string }>();
+  for (const event of events) {
+    if (event.kind === "permission_requested") {
+      const params = event.payload as RequestPermissionRequest | null;
+      if (params?.toolCall === undefined) {
+        continue;
+      }
+      const toolCallId = params.toolCall.toolCallId;
+      requests.push({
+        toolCallId: typeof toolCallId === "string" && toolCallId.length > 0 ? toolCallId : undefined,
+        params,
+      });
+      continue;
+    }
+    if (event.kind !== "permission_resolved") {
+      continue;
+    }
+    const payload = event.payload as
+      | { outcome?: { outcome?: string; optionId?: string }; toolCallId?: string }
+      | null
+      | undefined;
+    const toolCallId = payload?.toolCallId;
+    if (typeof toolCallId === "string" && toolCallId.length > 0) {
+      resolutions.set(toolCallId, {
+        outcome: payload?.outcome?.outcome,
+        optionId: payload?.outcome?.optionId,
+      });
+    }
+  }
+  for (const { toolCallId, params } of requests) {
+    if (!isEditKind(params)) {
+      continue;
+    }
+    const locations = params.toolCall?.locations ?? [];
+    const touchesInputs =
+      locations.length === 0 || locations.some((location) => isExecAllowlistInput(location.path));
+    if (!touchesInputs) {
+      continue;
+    }
+    if (toolCallId === undefined) {
+      return true; // No id to match a resolution by: assume it was granted.
+    }
+    const resolution = resolutions.get(toolCallId);
+    if (!resolution) {
+      continue; // Never resolved: still pending, so it has not happened.
+    }
+    if (resolution.outcome !== "selected") {
+      continue; // Cancelled or refused outright.
+    }
+    const option = params.options.find((entry) => entry.optionId === resolution.optionId);
+    if (option === undefined || option.kind.startsWith("allow")) {
+      return true; // Granted, or granted-or-not is unknowable: deny.
+    }
+  }
+  return false;
 }
 
 function commandFromRawInput(rawInput: unknown): string | undefined {
@@ -505,6 +663,9 @@ function matchesAllowlist(command: string, allowlist: string[]): boolean {
  * An allowlisted prefix only counts on a single unchained command: anything
  * with shell control syntax outside quotes forwards, so `git push` cannot
  * ride in behind `git commit -m x &&`.
+ * The allowlist is frozen input, never read from the worktree here, and it
+ * stops applying entirely once the session has edited package.json or a
+ * lockfile (decision record 0009).
  */
 export function decideFixPermission(
   params: RequestPermissionRequest,
@@ -541,6 +702,12 @@ export function decideFixPermission(
       return { kind: "allow" };
     }
     case "execute": {
+      if (context.execAllowlistInputsEdited) {
+        // package.json or a lockfile has been edited in this session, so the
+        // frozen allowlist no longer describes what its entries run. Every
+        // execute goes to a human from here (decision record 0009).
+        return { kind: "forward" };
+      }
       const command = commandFromRawInput(params.toolCall?.rawInput);
       if (command !== undefined && matchesAllowlist(command, context.execAllowlist)) {
         return { kind: "allow" };
@@ -586,6 +753,19 @@ export interface PolicySessionContext {
   mode: SessionMode;
   /** The session cwd; for review/fix sessions this is the worktree. */
   cwd: string;
+  /**
+   * The fix policy's execute allowlist as frozen on the session record at
+   * fix-mode entry (decision record 0009). Absent means no list was frozen,
+   * which is read as an empty one: default deny, every execute forwards.
+   */
+  execAllowlist?: string[];
+  /**
+   * Whether the session has been granted an edit to package.json or a
+   * lockfile (or one whose target is unknown). Absent is read as true, so a
+   * context that cannot answer the question forwards executes rather than
+   * allowing them.
+   */
+  execAllowlistInputsEdited?: boolean;
 }
 
 export interface ModeAwarePolicyOptions {
@@ -645,7 +825,11 @@ export class ModeAwarePermissionPolicy implements PermissionPolicy {
           ? decideReviewPermission(params)
           : decideFixPermission(params, {
               worktree: context.cwd,
-              execAllowlist: fixExecAllowlist(context.cwd),
+              // Frozen on the record at fix-mode entry, never recomputed from
+              // the worktree the agent is editing (decision record 0009).
+              // Both fields default to the denying answer.
+              execAllowlist: context.execAllowlist ?? [],
+              execAllowlistInputsEdited: context.execAllowlistInputsEdited ?? true,
             });
       const by = mode === "review" ? ("policy:review" as const) : ("policy:fix" as const);
       if (verdict.kind === "allow") {

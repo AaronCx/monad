@@ -192,6 +192,27 @@ export async function resolveBaseSha(input: {
   return { baseSha };
 }
 
+/**
+ * One file as it exists at a git ref, or undefined when it cannot be read
+ * there. This is how a decision reads a file the worktree also contains
+ * without letting the worktree answer: `git show <ref>:<path>` reads the
+ * committed object, not the working copy (decision record 0009).
+ *
+ * Undefined covers both "the commit has no such file" and "git could not
+ * answer", deliberately: every caller treats an unreadable file as the empty,
+ * most restrictive input, so a failure here can only narrow permissions.
+ */
+export async function readFileAtRef(
+  cwd: string,
+  ref: string,
+  path: string,
+): Promise<string | undefined> {
+  if (!/^[A-Za-z0-9._][A-Za-z0-9._/-]{0,254}$/.test(ref) || ref.includes("..")) {
+    return undefined;
+  }
+  return await tryGit(["show", `${ref}:${path}`], cwd);
+}
+
 export interface InstallWorktreeDepsInput {
   /** The worktree path dependencies are installed into. */
   path: string;

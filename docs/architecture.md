@@ -38,6 +38,13 @@ Every session therefore carries a trust level, `trusted` or `untrusted`, resolve
 and stored on the session record. An absent or unrecognized value is `untrusted`. Decision
 record 0009 has the resolution rules and what each level allows.
 
+The same rule governs the fix policy's execute allowlist. It is derived from `package.json`,
+which lives in the worktree the fix session is editing, so it is computed once when the session
+enters fix mode, read from the PR base commit, and frozen on the session record. Nothing
+recomputes it from the worktree afterwards, and once the session has been granted an edit to
+`package.json` or a lockfile every execute forwards to a human whatever the frozen list says.
+Decision record 0009 has the reasoning.
+
 The vendor agent is a second boundary. It runs monad's prompt but it is a process monad does not
 control, and whatever monad puts in its `mcpServers` config is exposed by construction: the
 Agent SDK passes that config to the `claude` binary as a command line argument, so it sits in

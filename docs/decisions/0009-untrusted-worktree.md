@@ -128,6 +128,59 @@ Verified: with a real session live, the daemon token appears nowhere in the proc
 Not filed upstream from here; it is worth Aaron's judgement whether the SDK should pass
 `--mcp-config` by file or stdin instead of argv.
 
+## The fix allowlist is frozen at the base, and stops applying when its inputs are edited
+
+The fix policy runs allowlisted commands without a human: the git prefixes, plus
+`<runner> run <script>` for each of the repo's lint, typecheck, test, and build scripts. In M2
+that list was rebuilt from `<worktree>/package.json` on every single decision, inside
+`ModeAwarePermissionPolicy.request`. Fix mode auto-grants edits inside the worktree, and
+`package.json` is inside the worktree, so the agent could grant itself an edit and then have its
+own command match the list. Nothing else was in the way: the vendor `claude` subprocess is
+spawned with `--allow-dangerously-skip-permissions` and `--permission-prompt-tool stdio`, so
+monad's policy layer is the only gate on that side.
+
+The list is now computed once, when a session first enters fix mode, and stored on the record as
+`execAllowlist`. It comes from `git show <baseSha>:package.json` for a review-derived session;
+a trusted session with no PR (you switched `monad run` to fix in your own repo) falls back to its
+own worktree, which is yours; anything else gets the git prefixes alone. A session that already
+carries a list keeps it, so re-entering fix mode cannot refresh it against an edited worktree, and
+a row with no list at all (any M2 session) is read as an empty list: default deny.
+
+Open decision 4 asked base or fix-mode entry. Base, because it is the same ref the config comes
+from and the same argument applies: it is the last state a repo maintainer approved. The cost is
+that a legitimate earlier fix commit adding a script is not on the list, and running it forwards
+to the human once instead of running unattended. That is the cheap direction to be wrong in.
+
+Freezing alone is not enough, because the list names SCRIPTS and not the command lines they run.
+`bun run test` is on the list whatever `scripts.test` says, so an agent that rewrites
+`scripts.test` to `./canary.sh` and then runs `bun run test` defeats any list that still contains
+that entry. So the second half: if the session has been granted an edit to `package.json` or any
+lockfile, every subsequent execute forwards to a human regardless of the allowlist. This is
+reconstructed from the `permission_requested` and `permission_resolved` events already in the log,
+so it needs no new state and survives a daemon restart for free. Default deny three times over: a
+granted edit with no `locations` counts (the target is unknowable), a resolution that cannot be
+matched back to its request counts, and a selected option that is not among the offered ones
+counts. A still-pending request does not count, because it has not happened.
+
+## git commit, hooks, and --no-verify
+
+`git commit` stays on the allowlist, and git commit runs the repo's hooks. That is safe under the
+current worktree layout and only under it: a fix session works in a detached worktree whose `.git`
+is a file pointing at `<main repo>/.git/worktrees/<name>`, so the hooks directory and the config
+that could repoint it via `core.hooksPath` both live outside the session worktree, where the fix
+policy rejects every edit. The agent can commit but cannot install a hook, and the hooks it fires
+are the user's own. A future change to the worktree layout that lets a session write inside its
+own git dir turns this entry into arbitrary code execution; the comment above the list in
+`policy.ts` says so.
+
+monad does not add `--no-verify` implicitly, and structurally cannot. An ACP permission response
+carries an `optionId` and nothing else: there is no channel for answering a permission request
+with a rewritten command, and the vendor runs the string it already holds. Even with a channel it
+would be the wrong move, because the event log would then show one command while another ran,
+which destroys the property that the transcript is what happened. The agent may pass
+`--no-verify` itself; it still matches the `git commit` prefix, so the safer spelling is available
+without monad forging it.
+
 ## Prompt injection is not solved
 
 The PR's diff, title, and body still reach the model. That is the product. The template fences
@@ -150,6 +203,14 @@ The policy layer is what stops the session from doing anything.
 - `extends` is resolved inside `parseConfigWithWarnings`, before `sanitizeUntrustedConfig` sees
   the result, and today only built-in packs resolve. Dropping the key is defense in depth so a
   future file-or-URL `PackResolver` does not silently reopen the config path.
+- The frozen fix allowlist names scripts, not command lines, so on its own it cannot tell a
+  rewritten `scripts.test` from the original. The package.json-edited rule is what covers that,
+  and it is coarse on purpose: after one manifest edit the session asks a human about every
+  command it runs, including `git status`.
+- A trusted session with no PR reads its own worktree for the allowlist. That is the user's repo
+  on the user's machine, and the same worktree the user could edit by hand, so there is nothing
+  to protect it from. It is still the one path where the allowlist and the edited tree are the
+  same bytes.
 - Mount tokens are derived, not stored, so anyone who can read `~/.monad/token` can derive every
   one of them. That is the same user on the same machine, which is already the M1 trust model.
   Rotating `~/.monad/token` invalidates every mount, which also changes the vendor session
