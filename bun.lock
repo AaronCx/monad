@@ -41,6 +41,7 @@
         "@aaroncx/engine": "workspace:*",
         "@aaroncx/github": "workspace:*",
         "@aaroncx/protocol": "workspace:*",
+        "@agentclientprotocol/sdk": "^1.4.0",
         "smee-client": "^5.0.0",
         "zod": "^4",
       },
