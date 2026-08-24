@@ -3,18 +3,17 @@ import { diffBetween } from "@aaroncx/checks";
 import { methods } from "@agentclientprotocol/sdk";
 import {
   REPLAY_COUNT_META_KEY,
-  ReviewStreamLineSchema,
   type EventRecord,
   type ReviewFinding,
   type ReviewReport,
   type ReviewSeverity,
-  type ReviewStreamLine,
   type SessionRecord,
   type TrustLevel,
   type UnstructuredReport,
 } from "@aaroncx/protocol";
+import { FIX_MODE_PROMPT, type ReviewResultLine } from "@aaroncx/engine";
 import { connectAcp, InteractiveSession } from "./client.ts";
-import { authHeaders, type DaemonHandle, ensureDaemon, setSessionMode } from "./daemon.ts";
+import { type DaemonHandle, ensureDaemon, setSessionMode, streamReview } from "./daemon.ts";
 import { fetchPrMetadata, ghBin, resolveTrust } from "./gh.ts";
 import { postReview } from "./post.ts";
 import { Renderer } from "./render.ts";
@@ -26,10 +25,11 @@ import { Renderer } from "./render.ts";
  * the report, decides the exit code, and optionally posts the review.
  */
 
-/** The one user prompt a switch into fix mode sends (ACP has no system channel). */
-export const FIX_MODE_PROMPT =
-  "Mode switched to fix. You may now edit files inside this worktree to address the " +
-  "review findings. Commit when done; do not push.";
+/**
+ * The one user prompt a switch into fix mode sends (ACP has no system
+ * channel). It lives in @aaroncx/engine because the App sends the same one.
+ */
+export { FIX_MODE_PROMPT };
 
 export interface ReviewFlags {
   pr: string;
@@ -190,56 +190,6 @@ export function repoRootOf(cwd: string): Promise<string> {
       }
     });
   });
-}
-
-type ResultLine = Extract<ReviewStreamLine, { type: "result" }>;
-
-/**
- * Streams POST /v1/review, handing every event to onEvent as it arrives and
- * returning the single result line. An error line becomes a thrown error.
- */
-export async function streamReview(
-  handle: DaemonHandle,
-  body: unknown,
-  onEvent: (event: EventRecord) => void,
-): Promise<ResultLine> {
-  const response = await fetch(`${handle.url}/v1/review`, {
-    method: "POST",
-    headers: { ...authHeaders(handle.token), "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok || !response.body) {
-    throw new Error(`POST /v1/review failed with ${response.status}`);
-  }
-  const decoder = new TextDecoder();
-  let buffered = "";
-  let result: ResultLine | undefined;
-  const consume = (line: string): void => {
-    if (line.trim().length === 0) {
-      return;
-    }
-    const parsed = ReviewStreamLineSchema.parse(JSON.parse(line));
-    if (parsed.type === "event") {
-      onEvent(parsed.event);
-    } else if (parsed.type === "result") {
-      result = parsed;
-    } else {
-      throw new Error(parsed.message);
-    }
-  };
-  for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
-    buffered += decoder.decode(chunk, { stream: true });
-    const lines = buffered.split("\n");
-    buffered = lines.pop() ?? "";
-    for (const line of lines) {
-      consume(line);
-    }
-  }
-  consume(buffered);
-  if (result === undefined) {
-    throw new Error("the daemon closed the review stream without a result");
-  }
-  return result;
 }
 
 /** Prints the playbook's non-update events; updates go through the renderer. */
@@ -413,7 +363,7 @@ async function postFromResult(
   repoRoot: string,
   repo: string,
   number: number,
-  result: ResultLine,
+  result: ReviewResultLine,
 ): Promise<void> {
   if (!result.structured) {
     console.log("not posting: the review report was not structured");
