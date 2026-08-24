@@ -201,5 +201,35 @@ describe("@monad review", () => {
     const head = (pullRequest().head as { sha: string }).sha;
     expect(h.daemon.reviews[0]?.body.pr.headSha).toBe(head);
     expect(h.queue.get("d-review-cmd")?.kind).toBe("review");
+    // A review asked for in a comment is acknowledged on that comment; one
+    // triggered by a push is not, because the check run already says it.
+    expect(reactions(h)).toEqual(["eyes", "rocket"]);
+  });
+
+  test("a review triggered by a push reacts to nothing", async () => {
+    h = harness();
+    await h.handle(
+      deliveryRequest({
+        event: "pull_request",
+        deliveryId: "d-pushed",
+        payload: {
+          action: "opened",
+          pull_request: {
+            number: 7,
+            title: "t",
+            html_url: "https://example.invalid/pr",
+            draft: false,
+            author_association: "MEMBER",
+            user: { login: "AaronCx" },
+            head: { sha: "a".repeat(40), ref: "feature", repo: { full_name: REPOSITORY.full_name } },
+            base: { ref: "main", repo: { full_name: REPOSITORY.full_name } },
+          },
+          repository: REPOSITORY,
+          installation: { id: 4242 },
+        },
+      }),
+    );
+    await h.worker.idle();
+    expect(reactions(h)).toHaveLength(0);
   });
 });

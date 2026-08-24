@@ -1,13 +1,16 @@
 import { diffBetween, type CheckRunResults } from "@aaroncx/checks";
 import {
+  ACK_REACTION,
   CHECK_RUN_NAME,
   completeCheckRun,
   createCheckRun,
+  DONE_REACTION,
   fetchPullRequest,
   inProgressCheckRunOutput,
   octokitReviewTransport,
   postReview,
   queuedCheckRunOutput,
+  reactToComment,
   renderCompletedCheckRun,
   resolveTrustFromIntent,
   resolveTrustFromPullRequest,
@@ -84,6 +87,31 @@ async function resolvePullRequest(
   return { pr, trust: resolveTrustFromPullRequest(pr) };
 }
 
+/**
+ * A review asked for by a comment is acknowledged on that comment: eyes when
+ * it starts, rocket when it lands. A review triggered by a push is not,
+ * because the Check Run appearing within seconds already says it.
+ */
+async function acknowledge(
+  ctx: JobContext,
+  intent: ReviewIntent,
+  content: typeof ACK_REACTION | typeof DONE_REACTION,
+): Promise<void> {
+  const comment = intent.comment;
+  if (comment === undefined) {
+    return;
+  }
+  await reactToComment(ctx.octokit, {
+    owner: intent.repo.owner,
+    repo: intent.repo.name,
+    commentId: comment.id,
+    content,
+  }).catch(() => {
+    // A reaction is the progress UI, never the work; losing one is not a
+    // reason to abandon a review.
+  });
+}
+
 export async function runReviewJob(
   ctx: JobContext,
   row: DeliveryRow,
@@ -120,6 +148,7 @@ export async function runReviewJob(
     return { status: "retry", reason: `monadd is not available: ${messageOf(error)}` };
   }
 
+  await acknowledge(ctx, intent, ACK_REACTION);
   const { id: checkRunId } = await createCheckRun(ctx.octokit, {
     owner: intent.repo.owner,
     repo: intent.repo.name,
@@ -232,6 +261,7 @@ export async function runReviewJob(
       );
     }
     // The session stays open and idle on purpose (step 7).
+    await acknowledge(ctx, intent, DONE_REACTION);
     return { status: "done" };
   } catch (error) {
     if (control.superseded !== undefined) {
