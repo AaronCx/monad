@@ -5,3 +5,4 @@ export * from "./policy.ts";
 export * from "./session.ts";
 export * from "./store.ts";
 export * from "./transport/index.ts";
+export * from "./worktree.ts";
