@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +29,9 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     backend: "claude-acp",
     mode: "interactive",
     status: "idle",
+    // M2 records had no trust level; the column and the default arrived with
+    // decision record 0009, so the fixture states one explicitly.
+    trust: "trusted",
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -47,6 +51,30 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
   }
   dirs = [];
+});
+
+describe("SessionStore trust column", () => {
+  test("a row written before decision record 0009 reads back as untrusted", () => {
+    const dbPath = tempDbPath();
+    const store = openStore(dbPath);
+    const record = store.create(makeRecord({ mode: "review" }));
+    // Simulate an M2 row: the column exists after the migration but holds
+    // NULL, which is exactly what ALTER TABLE ADD COLUMN leaves behind.
+    const db = new Database(dbPath, { strict: true });
+    db.query("UPDATE sessions SET trust = NULL WHERE id = $id").run({ id: record.id });
+    db.close();
+
+    expect(store.get(record.id)?.trust).toBe("untrusted");
+    expect(store.list().find((r) => r.id === record.id)?.trust).toBe("untrusted");
+  });
+
+  test("a trust level survives a round trip", () => {
+    const store = openStore();
+    const trusted = store.create(makeRecord({ trust: "trusted" }));
+    const untrusted = store.create(makeRecord({ trust: "untrusted" }));
+    expect(store.get(trusted.id)?.trust).toBe("trusted");
+    expect(store.get(untrusted.id)?.trust).toBe("untrusted");
+  });
 });
 
 describe("SessionStore events", () => {

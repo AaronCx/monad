@@ -1,5 +1,6 @@
 import {
   CHECK_ORDER,
+  describeDroppedConfigFields,
   detectDefaultBranch,
   formatChecksMarkdown,
   getBranchDiff,
@@ -7,6 +8,7 @@ import {
   LASTGATE_RENAME_NOTICE,
   loadConfig,
   runChecks,
+  sanitizeUntrustedConfig,
   type ChangedFile,
   type CheckRunResults,
   type CheckType,
@@ -25,6 +27,13 @@ export interface ChecksFlags {
   only?: CheckType[];
   full: boolean;
   json: boolean;
+  /**
+   * --untrusted: treat this checkout as somebody else's code (decision
+   * record 0009). Drops the config's command fields, custom secret patterns,
+   * and review.prompt, and refuses to run build and test. The default is
+   * trusted, because you cd'd here.
+   */
+  untrusted?: boolean;
 }
 
 const KNOWN_CHECKS = CHECK_ORDER as ReadonlyArray<CheckType>;
@@ -66,6 +75,8 @@ export function parseChecksFlags(argv: string[]): ChecksFlags {
       flags.full = true;
     } else if (arg === "--json") {
       flags.json = true;
+    } else if (arg === "--untrusted") {
+      flags.untrusted = true;
     } else {
       throw new Error(`unknown flag ${arg}`);
     }
@@ -112,9 +123,17 @@ export interface ChecksOutcome {
 
 export async function runChecksCommand(flags: ChecksFlags, cwd: string): Promise<ChecksOutcome> {
   const loaded = await loadConfig(cwd);
+  const trust = flags.untrusted ? "untrusted" : "trusted";
+  const sanitized = flags.untrusted
+    ? sanitizeUntrustedConfig(loaded.config)
+    : { config: loaded.config, dropped: [] as string[] };
   // The loader already printed the rename notice itself; the rest of the
   // warnings (removed keys, unknown keys) are this command's to surface.
-  for (const warning of loaded.warnings.filter((w) => w !== LASTGATE_RENAME_NOTICE)) {
+  const droppedNote = describeDroppedConfigFields(sanitized.dropped);
+  for (const warning of [
+    ...loaded.warnings.filter((w) => w !== LASTGATE_RENAME_NOTICE),
+    ...(droppedNote ? [droppedNote] : []),
+  ]) {
     console.error(`monad checks: ${warning}`);
   }
   const scope = await resolveScope(flags, cwd);
@@ -123,9 +142,10 @@ export async function runChecksCommand(flags: ChecksFlags, cwd: string): Promise
     files: scope.files,
     base: scope.base,
     head: scope.head,
-    config: loaded.config,
+    config: sanitized.config,
     profile: flags.full ? "full" : "fast",
     only: flags.only,
+    trust,
     commits: scope.base === undefined ? [] : undefined,
   });
   const failed = results.checks.some((check) => check.status === "fail");

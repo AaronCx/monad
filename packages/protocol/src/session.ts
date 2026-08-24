@@ -38,6 +38,17 @@ export const SessionPrSchema = z.object({
 });
 export type SessionPr = z.infer<typeof SessionPrSchema>;
 
+/**
+ * How much of a session's own worktree monad is willing to obey. `trusted`
+ * means the content came from someone who can already run code here (your own
+ * repo, a collaborator with write access, or you saying so on the command
+ * line); `untrusted` means the worktree is attacker-controlled content that may
+ * be read but may never decide what monad executes (decision record 0009).
+ * Anything unrecognized reads back as untrusted: default deny.
+ */
+export const TrustLevelSchema = z.enum(["trusted", "untrusted"]);
+export type TrustLevel = z.infer<typeof TrustLevelSchema>;
+
 export const SessionStatusSchema = z.enum([
   "idle",
   "running",
@@ -63,6 +74,12 @@ export const SessionRecordSchema = z.object({
   agentSessionId: z.string().optional(),
   mode: SessionModeSchema,
   status: SessionStatusSchema,
+  /**
+   * Decision record 0009. Absent (an M2 row read back, or any value the enum
+   * does not know) means untrusted, so a pre-trust session never gains the
+   * trusted path by accident.
+   */
+  trust: TrustLevelSchema.catch("untrusted").default("untrusted"),
   /**
    * Diff bounds for the session's checks binding. Review sessions (M2 stage
    * 3) pin them to the PR's base and head shas; interactive sessions leave

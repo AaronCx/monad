@@ -10,11 +10,12 @@ import {
   type ReviewSeverity,
   type ReviewStreamLine,
   type SessionRecord,
+  type TrustLevel,
   type UnstructuredReport,
 } from "@aaroncx/protocol";
 import { connectAcp, InteractiveSession } from "./client.ts";
 import { authHeaders, type DaemonHandle, ensureDaemon, setSessionMode } from "./daemon.ts";
-import { fetchPrMetadata, ghBin } from "./gh.ts";
+import { fetchPrMetadata, ghBin, resolveTrust } from "./gh.ts";
 import { postReview } from "./post.ts";
 import { Renderer } from "./render.ts";
 
@@ -36,6 +37,13 @@ export interface ReviewFlags {
   post: boolean;
   fix: boolean;
   noInstall: boolean;
+  /**
+   * --trust / --no-trust, decision record 0009. Undefined means "work it out
+   * from the PR's origin and the author's permission".
+   */
+  trust?: TrustLevel;
+  /** --install: install an untrusted PR's dependencies anyway. */
+  install?: boolean;
   /** The protocol value; --backend claude is the only accepted spelling in M2. */
   backend: "claude-acp";
 }
@@ -64,6 +72,12 @@ export function parseReviewFlags(argv: string[]): ReviewFlags {
       flags.fix = true;
     } else if (arg === "--no-install") {
       flags.noInstall = true;
+    } else if (arg === "--install") {
+      flags.install = true;
+    } else if (arg === "--trust") {
+      flags.trust = "trusted";
+    } else if (arg === "--no-trust") {
+      flags.trust = "untrusted";
     } else if (arg === "--backend") {
       const value = argv[++i];
       if (value === undefined) {
@@ -82,6 +96,9 @@ export function parseReviewFlags(argv: string[]): ReviewFlags {
   }
   if (pr === undefined) {
     throw new Error("review needs a PR number or URL");
+  }
+  if (flags.noInstall && flags.install) {
+    throw new Error("--install and --no-install are mutually exclusive");
   }
   flags.pr = pr;
   return flags;
@@ -229,17 +246,35 @@ export async function streamReview(
 function renderEvent(event: EventRecord, renderer: Renderer): void {
   switch (event.kind) {
     case "worktree_ready": {
-      const payload = event.payload as { path: string; installStrategy: string; installMs: number };
+      const payload = event.payload as {
+        path: string;
+        installStrategy: string;
+        installMs: number;
+        warnings?: string[];
+      };
       renderer.line(
         renderer.dim(
           `worktree: ${payload.path} (install ${payload.installStrategy}, ${payload.installMs}ms)`,
         ),
       );
+      for (const warning of payload.warnings ?? []) {
+        renderer.line(renderer.dim(`worktree: ${warning}`));
+      }
       return;
     }
     case "checks": {
-      const payload = event.payload as { summary?: string };
+      const payload = event.payload as {
+        summary?: string;
+        configSource?: { file: string; ref: string };
+      };
       renderer.line(renderer.dim(`checks: ${payload.summary ?? "done"}`));
+      if (payload.configSource) {
+        renderer.line(
+          renderer.dim(
+            `checks: config from ${payload.configSource.file} at ${payload.configSource.ref}`,
+          ),
+        );
+      }
       return;
     }
     case "session_created":
@@ -299,9 +334,35 @@ export async function cmdReview(argv: string[]): Promise<void> {
   const pr = await fetchPrMetadata(ghBin(), flags.pr, repoRoot);
   const handle = await ensureDaemon();
 
+  // Decision record 0009. The flags are a human saying so and win outright;
+  // otherwise one gh api call decides, and any doubt lands on untrusted.
+  const resolved =
+    flags.trust !== undefined
+      ? { trust: flags.trust, reason: flags.trust === "trusted" ? "--trust" : "--no-trust" }
+      : await resolveTrust(
+          ghBin(),
+          {
+            repo: pr.repo,
+            number: pr.number,
+            isCrossRepository: pr.isCrossRepository,
+            authorLogin: pr.authorLogin,
+          },
+          repoRoot,
+        );
+
   const renderer = new Renderer({ divider: false });
   renderer.beginLive(0);
   renderer.line(renderer.dim(`reviewing ${pr.repo}#${pr.number}: ${pr.title}`));
+  renderer.line(renderer.dim(`trust: ${resolved.trust} (${resolved.reason})`));
+  if (resolved.trust === "untrusted") {
+    renderer.line(
+      renderer.dim(
+        flags.install
+          ? "untrusted: build and test will not run; --install will run this PR's lifecycle scripts"
+          : "untrusted: no dependency install, and build and test will not run",
+      ),
+    );
+  }
   const result = await streamReview(
     handle,
     {
@@ -309,6 +370,8 @@ export async function cmdReview(argv: string[]): Promise<void> {
       pr,
       full: flags.full,
       noInstall: flags.noInstall,
+      trust: resolved.trust,
+      install: flags.install,
       backend: flags.backend,
     },
     (event) => {

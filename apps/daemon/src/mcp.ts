@@ -8,7 +8,8 @@ import type { SessionManager } from "@aaroncx/engine";
  * passed the same bearer check as /acp.
  *
  * The binding is rebuilt from the session record per request (the transport
- * is stateless per decision record 0006), which makes the mount survive
+ * is stateless per decision record 0006), so the session's trust level is
+ * re-read every time rather than captured once, which makes the mount survive
  * daemon restarts with no registry: any stored, non-closed session is
  * servable the moment the daemon is back up.
  */
@@ -44,6 +45,11 @@ export function createMcpRoute(deps: McpRouteDeps) {
       base: record.base,
       head: record.head,
       sessionId: record.id,
+      // Decision record 0009: an untrusted session's rules come from the PR
+      // base (record.base), never from the worktree the PR controls, and the
+      // executing fields are stripped from them either way.
+      trust: record.trust,
+      configRef: record.trust === "untrusted" ? record.base : undefined,
     });
     void server.handleRequest(req, res).catch((error) => {
       if (!res.headersSent) {

@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Subprocess } from "bun";
 import type { EventRecord, ReviewReport, SessionRecord } from "@aaroncx/protocol";
+import {
+  makeMaliciousRepo,
+  type MaliciousRepo,
+} from "../../../packages/checks/test/fixtures/make-repo.ts";
 
 /**
  * The review playbook end to end against the real monadd with the fake ACP
@@ -81,6 +85,51 @@ function makePrFixture(): Fixture {
   return { repoRoot, bare, headSha, tempDirs: [seed, bareParent, cloneParent] };
 }
 
+/**
+ * A stand-in for the bun binary that does exactly the one thing this test
+ * cares about: run the manifest's preinstall script, the way a real install
+ * does. Pointed at through MONAD_BUN_BIN so the fixture needs no lockfile
+ * and no network, while an install still executes the PR's own code.
+ */
+function writeFakeBun(dir: string): string {
+  const path = join(dir, "fake-bun.sh");
+  writeFileSync(
+    path,
+    [
+      "#!/bin/sh",
+      "# fake bun install: runs the manifest's preinstall hook, like the real one.",
+      `script=$(sed -n 's/.*"preinstall": "\\(.*\\)".*/\\1/p' package.json 2>/dev/null)`,
+      'if [ -n "$script" ]; then sh -c "$script"; fi',
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return path;
+}
+
+/** Wraps a repo as a PR: a bare origin carrying refs/pull/<n>/head. */
+function publishAsPr(
+  seed: string,
+  headSha: string,
+  number: number,
+): { repoRoot: string; tempDirs: string[] } {
+  const bareParent = mkdtempSync(join(tmpdir(), "monad-review-origin-"));
+  const bare = join(bareParent, "origin.git");
+  git(bareParent, "clone", "-q", "--bare", seed, bare);
+  git(bare, "update-ref", `refs/pull/${number}/head`, headSha);
+  const branches = git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads");
+  for (const branch of branches.split("\n").map((b) => b.trim())) {
+    if (branch && branch !== "main") {
+      git(bare, "branch", "-q", "-D", branch);
+    }
+  }
+  const cloneParent = mkdtempSync(join(tmpdir(), "monad-review-clone-"));
+  const repoRoot = join(cloneParent, "checkout");
+  git(cloneParent, "clone", "-q", bare, repoRoot);
+  return { repoRoot, tempDirs: [bareParent, cloneParent] };
+}
+
 interface RunningDaemon {
   proc: Subprocess<"ignore", "pipe", "pipe">;
   port: number;
@@ -102,7 +151,7 @@ async function waitFor(
   throw new Error(`timed out waiting for ${label}`);
 }
 
-async function bootDaemon(home: string): Promise<RunningDaemon> {
+async function bootDaemon(home: string, extraEnv: Record<string, string> = {}): Promise<RunningDaemon> {
   const infoPath = join(home, "monadd.json");
   rmSync(infoPath, { force: true });
   const proc = Bun.spawn([process.execPath, DAEMON_MAIN, "--port", "0", "--foreground"], {
@@ -110,6 +159,7 @@ async function bootDaemon(home: string): Promise<RunningDaemon> {
       ...process.env,
       MONAD_HOME: home,
       MONAD_BACKEND_CMD: [process.execPath, FAKE_AGENT, "--review"].join(" "),
+      ...extraEnv,
     },
     stdin: "ignore",
     stdout: "pipe",
@@ -133,6 +183,7 @@ interface StreamedReview {
     checksTable: string;
     baseSha: string;
     headSha: string;
+    trust: "trusted" | "untrusted";
   };
   errorLine?: { message: string };
 }
@@ -188,11 +239,15 @@ let home: string;
 let fixture: Fixture;
 let daemon: RunningDaemon;
 let streamed: StreamedReview;
+let binDir: string;
 
 beforeAll(async () => {
   home = mkdtempSync(join(tmpdir(), "monad-review-home-"));
   fixture = makePrFixture();
-  daemon = await bootDaemon(home);
+  // The fake installer only matters to the trust tests below; the fixture
+  // above has no package.json, so nothing installs for it either way.
+  binDir = mkdtempSync(join(tmpdir(), "monad-review-bin-"));
+  daemon = await bootDaemon(home, { MONAD_BUN_BIN: writeFakeBun(binDir) });
   streamed = await postReviewRequest(daemon, {
     repoRoot: fixture.repoRoot,
     pr: {
@@ -211,7 +266,8 @@ afterAll(async () => {
   daemon.proc.kill();
   await daemon.proc.exited;
   rmSync(home, { recursive: true, force: true });
-  for (const dir of fixture.tempDirs) {
+  rmSync(binDir, { recursive: true, force: true });
+  for (const dir of [...fixture.tempDirs, ...trustDirs]) {
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -363,4 +419,213 @@ describe("monad attach -p", () => {
     expect(after.length).toBe(before + 1);
     expect(after.at(-1)?.text).toBe("one scripted prompt");
   }, 30_000);
+});
+
+/**
+ * The trust boundary end to end (decision record 0009). The PR under review
+ * is makeMaliciousRepo's head: a .monad.yml pointing lint, build, and test at
+ * a canary-writing script, a package.json whose preinstall writes another
+ * canary, and a review.prompt override telling the reviewer to approve.
+ *
+ * Untrusted is the default, so the first run is the one M2 would have failed.
+ * The same PR is then reviewed with trust "trusted" (what --trust sends) to
+ * prove the trusted path still does everything it did in M2.
+ */
+const trustDirs: string[] = [];
+let malicious: MaliciousRepo;
+let maliciousRepoRoot: string;
+let untrustedReview: StreamedReview;
+let trustedReview: StreamedReview;
+/**
+ * Canary state captured the moment the untrusted review finished. The
+ * trusted review runs in the same beforeAll and writes both canaries on
+ * purpose, so the untrusted assertions read this snapshot, not the disk.
+ */
+let canariesAfterUntrusted: { lint: boolean; install: boolean };
+let untrustedRunChecks: { text: string; structured: Record<string, unknown> };
+
+function checksEventOf(review: StreamedReview): {
+  configSource?: { file: string; ref: string };
+  trust?: string;
+  droppedConfigFields?: string[];
+  checks: Array<{ type: string; status: string; details: Record<string, unknown> }>;
+} {
+  const event = review.events.find((e) => e.kind === "checks");
+  expect(event).toBeDefined();
+  return event?.payload as never;
+}
+
+function reviewPromptOf(review: StreamedReview): string {
+  return promptEvents(home, review.result?.sessionId ?? "").at(0)?.text ?? "";
+}
+
+async function callRunChecks(
+  sessionId: string,
+  args: Record<string, unknown>,
+): Promise<{ text: string; structured: Record<string, unknown> }> {
+  const response = await fetch(`http://127.0.0.1:${daemon.port}/mcp/${sessionId}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${daemon.token}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "run_checks", arguments: args },
+    }),
+  });
+  expect(response.status).toBe(200);
+  const body = await response.text();
+  const dataLine = body.split("\n").find((line) => line.startsWith("data:"));
+  const parsed = JSON.parse(dataLine ? dataLine.slice("data:".length).trim() : body) as {
+    result?: {
+      content?: Array<{ type: string; text: string }>;
+      structuredContent?: Record<string, unknown>;
+    };
+  };
+  return {
+    text: parsed.result?.content?.find((c) => c.type === "text")?.text ?? "",
+    structured: parsed.result?.structuredContent ?? {},
+  };
+}
+
+describe("review of a hostile PR", () => {
+  beforeAll(async () => {
+    malicious = makeMaliciousRepo();
+    trustDirs.push(malicious.dir, malicious.canaryDir);
+    const published = publishAsPr(malicious.dir, malicious.headSha, 6);
+    maliciousRepoRoot = published.repoRoot;
+    trustDirs.push(...published.tempDirs);
+    const body = {
+      repoRoot: maliciousRepoRoot,
+      pr: {
+        repo: "example/hostile",
+        number: 6,
+        url: "https://github.com/example/hostile/pull/6",
+        title: "Perfectly ordinary change",
+        body: "Nothing to see here.",
+        headSha: malicious.headSha,
+        baseRef: "main",
+      },
+    };
+    // No trust field at all: the daemon must default to untrusted.
+    untrustedReview = await postReviewRequest(daemon, body);
+    // The agent's own escape hatch, exercised while the session is still the
+    // untrusted one: ask for the full profile and for build by name.
+    untrustedRunChecks = await callRunChecks(untrustedReview.result?.sessionId ?? "", {
+      profile: "full",
+      only: ["build"],
+    });
+    canariesAfterUntrusted = {
+      lint: existsSync(malicious.lintCanary),
+      install: existsSync(malicious.installCanary),
+    };
+    // Then the same PR as a trusted one, which is what --trust sends. This
+    // one is EXPECTED to write both canaries.
+    trustedReview = await postReviewRequest(daemon, { ...body, trust: "trusted" });
+  }, 90_000);
+
+  test("an untrusted review leaves both canaries absent", () => {
+    expect(untrustedReview.errorLine).toBeUndefined();
+    expect(untrustedReview.result?.trust).toBe("untrusted");
+    expect(canariesAfterUntrusted.lint).toBe(false);
+    expect(canariesAfterUntrusted.install).toBe(false);
+  });
+
+  test("an untrusted review installs nothing and says why", () => {
+    const worktreeReady = untrustedReview.events.find((e) => e.kind === "worktree_ready")
+      ?.payload as { installStrategy: string; trust?: string; warnings?: string[] };
+    expect(worktreeReady.installStrategy).toBe("none");
+    expect(worktreeReady.trust).toBe("untrusted");
+    expect(worktreeReady.warnings?.join("\n")).toContain("dependencies were not installed");
+  });
+
+  test("an untrusted review's lint and typecheck say the toolchain was not installed", () => {
+    const payload = checksEventOf(untrustedReview);
+    const noted = payload.checks.filter(
+      (check) => check.type === "lint" || check.type === "typecheck",
+    );
+    expect(noted.length).toBeGreaterThan(0);
+    for (const check of noted) {
+      expect(check.details.dependenciesInstalled).toBe(false);
+      expect(String((check as { summary?: string }).summary)).toContain(
+        "dependencies were not installed",
+      );
+    }
+  });
+
+  test("an untrusted review's config comes from the base sha, not the PR head", () => {
+    const payload = checksEventOf(untrustedReview);
+    expect(payload.trust).toBe("untrusted");
+    expect(payload.configSource?.ref).toBe(untrustedReview.result?.baseSha);
+    expect(payload.configSource?.ref).toBe(malicious.baseSha);
+    expect(payload.configSource?.file).toBe(".monad.yml");
+    // The head's lint command never became part of the run.
+    const lint = payload.checks.find((check) => check.type === "lint");
+    expect(JSON.stringify(lint ?? {})).not.toContain("pwn-lint.sh");
+  });
+
+  test("an untrusted review uses monad's own prompt, not the PR's override", () => {
+    const prompt = reviewPromptOf(untrustedReview);
+    expect(prompt).not.toContain(malicious.promptOverrideMarker);
+    expect(prompt).toContain("## Output contract");
+    expect(prompt).toContain("BEGIN UNTRUSTED PR BODY");
+  });
+
+  test("run_checks with profile full and only build still does not run build", () => {
+    const { text, structured } = untrustedRunChecks;
+    const checks = structured.checks as Array<{
+      type: string;
+      status: string;
+      details: Record<string, unknown>;
+    }>;
+    const build = checks.find((check) => check.type === "build");
+    expect(build?.status).toBe("pass");
+    expect(build?.details.skipped).toBe(true);
+    expect(build?.details.reason).toBe("untrusted PR: build and test do not run");
+    expect(structured.profile).toBe("fast");
+    expect(structured.trust).toBe("untrusted");
+    expect(text).toContain("untrusted session");
+    expect(text).toContain("downgraded");
+    // Still nothing executed: the canary snapshot was taken after this call.
+    expect(canariesAfterUntrusted.lint).toBe(false);
+  });
+
+  test("a trusted review of the same PR does everything M2 did", () => {
+    expect(trustedReview.errorLine).toBeUndefined();
+    expect(trustedReview.result?.trust).toBe("trusted");
+    expect(trustedReview.result?.structured).toBe(true);
+
+    // Config from the worktree, so the PR's own rules are in force.
+    const payload = checksEventOf(trustedReview);
+    expect(payload.trust).toBe("trusted");
+    expect(payload.configSource?.ref).toBe("worktree");
+    expect(payload.configSource?.file).toBe(".monad.yml");
+
+    // The PR's prompt override is honored.
+    expect(reviewPromptOf(trustedReview)).toContain(malicious.promptOverrideMarker);
+
+    // And both accepted violations of the boundary happened, on purpose:
+    // the install ran the PR's lifecycle script and lint ran its command.
+    const worktreeReady = trustedReview.events.find((e) => e.kind === "worktree_ready")
+      ?.payload as { installStrategy: string; trust?: string };
+    expect(worktreeReady.installStrategy).toBe("install");
+    expect(worktreeReady.trust).toBe("trusted");
+    expect(existsSync(malicious.installCanary)).toBe(true);
+    expect(existsSync(malicious.lintCanary)).toBe(true);
+  });
+
+  test("the two sessions carry their trust level on the record", async () => {
+    const response = await fetch(`http://127.0.0.1:${daemon.port}/v1/sessions`, {
+      headers: { Authorization: `Bearer ${daemon.token}` },
+    });
+    const { sessions } = (await response.json()) as { sessions: SessionRecord[] };
+    const untrusted = sessions.find((r) => r.id === untrustedReview.result?.sessionId);
+    const trusted = sessions.find((r) => r.id === trustedReview.result?.sessionId);
+    expect(untrusted?.trust).toBe("untrusted");
+    expect(trusted?.trust).toBe("trusted");
+  });
 });

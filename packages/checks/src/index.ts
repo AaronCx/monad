@@ -1,8 +1,15 @@
 // Public API
 export { runChecks, listChecks } from "./api";
 export type { RunChecksInput, CheckListing } from "./api";
-export { loadConfig, LASTGATE_RENAME_NOTICE } from "./config/loader";
-export type { LoadedConfig, ConfigSource } from "./config/loader";
+export {
+  loadConfig,
+  loadConfigAtRef,
+  sanitizeUntrustedConfig,
+  describeDroppedConfigFields,
+  UNTRUSTED_CONFIG_FIELDS,
+  LASTGATE_RENAME_NOTICE,
+} from "./config/loader";
+export type { LoadedConfig, ConfigSource, SanitizedConfig, TrustLevel } from "./config/loader";
 
 // Pipeline internals (steppers, meta)
 export {
@@ -13,6 +20,7 @@ export {
   formatMetaFooter,
   defaultProfileFor,
   CHECK_ORDER,
+  UNTRUSTED_SKIP_REASON,
 } from "./pipeline";
 export type { PipelineInput, PipelineOptions } from "./pipeline";
 export { ENGINE_VERSION } from "./version";

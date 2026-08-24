@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, rmdir, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import type { TrustLevel } from "@aaroncx/protocol";
 import { monadStateDir } from "./paths.ts";
 
 /**
@@ -77,6 +78,10 @@ export interface WorktreeReadyPayload {
   path: string;
   installStrategy: PerformedInstallStrategy;
   installMs: number;
+  /** The session's trust level, so the transcript says why install was skipped. */
+  trust?: TrustLevel;
+  /** Non-fatal notes from the install decision. */
+  warnings?: string[];
 }
 
 function git(args: string[], cwd: string): Promise<string> {
@@ -193,7 +198,28 @@ export interface InstallWorktreeDepsInput {
   /** From review.install config. Default "auto". */
   strategy?: InstallStrategy;
   env?: Record<string, string | undefined>;
+  /**
+   * Whose code the worktree holds (decision record 0009). Installing runs
+   * the tree's own lifecycle scripts, so an untrusted worktree is never
+   * installed unless a human asked for it. Absent means trusted, the M2
+   * behavior: this is a library entry point whose caller chose the path.
+   * Default deny lives at the session boundary, where the review playbook
+   * resolves an absent trust level to untrusted before calling in.
+   */
+  trust?: TrustLevel;
+  /** --install: a human overriding the untrusted default, knowingly. */
+  force?: boolean;
 }
+
+/** Printed when an untrusted worktree is left uninstalled. */
+export const UNTRUSTED_INSTALL_SKIPPED =
+  "untrusted PR: dependencies were not installed, so lint and typecheck are limited to what " +
+  "runs without node_modules";
+
+/** Printed when --install overrides that. */
+export const UNTRUSTED_INSTALL_FORCED =
+  "--install on an untrusted PR: bun install runs this PR's own lifecycle scripts " +
+  "(preinstall, postinstall) on this machine";
 
 /**
  * Applies the install strategy to a fresh worktree, per decision 0008:
@@ -204,12 +230,17 @@ export interface InstallWorktreeDepsInput {
  * - `symlink` (from config): warns citing decision 0008 and installs.
  * - `none`: skips; dependent checks report skipped.
  * - Non-JS repos (no package.json): none is implied.
+ * - An untrusted worktree (decision record 0009): none, whatever the
+ *   strategy says, unless `force` (the --install flag) is set. Installing
+ *   executes the tree's own lifecycle scripts, which is a code-execution
+ *   decision, not a performance one.
  * A frozen-install failure throws with the installer output; it must never
  * degrade into a lockfile-mutating install.
  */
 export async function installWorktreeDeps(input: InstallWorktreeDepsInput): Promise<InstallResult> {
   const env = input.env ?? process.env;
   const strategy = input.strategy ?? "auto";
+  const trust: TrustLevel = input.trust ?? "trusted";
   const warnings: string[] = [];
 
   if (!existsSync(join(input.path, "package.json"))) {
@@ -217,6 +248,12 @@ export async function installWorktreeDeps(input: InstallWorktreeDepsInput): Prom
   }
   if (strategy === "none") {
     return { installStrategy: "none", installMs: 0, warnings };
+  }
+  if (trust === "untrusted") {
+    if (!input.force) {
+      return { installStrategy: "none", installMs: 0, warnings: [UNTRUSTED_INSTALL_SKIPPED] };
+    }
+    warnings.push(UNTRUSTED_INSTALL_FORCED);
   }
   if (strategy === "symlink") {
     warnings.push(

@@ -15,6 +15,7 @@ import type {
   SessionMode,
   SessionPr,
   SessionRecord,
+  TrustLevel,
 } from "@aaroncx/protocol";
 import {
   ModeAwarePermissionPolicy,
@@ -126,6 +127,15 @@ export interface CreateSessionParams {
   id?: SessionId;
   cwd: string;
   mode?: SessionMode;
+  /**
+   * Decision record 0009. Interactive sessions from `monad run` are trusted
+   * (you own the repo you are sitting in); review sessions carry whatever
+   * the review playbook resolved, and a fix session is the same record, so
+   * it inherits that level. Absent means trusted for an interactive session
+   * and untrusted for a review or fix one, so a caller that forgets never
+   * gets the permissive answer on a PR.
+   */
+  trust?: TrustLevel;
   base?: string;
   head?: string;
   pr?: SessionPr;
@@ -208,6 +218,7 @@ export class SessionManager {
       backend: "claude-acp",
       mode: params.mode ?? "interactive",
       status: "idle",
+      trust: params.trust ?? ((params.mode ?? "interactive") === "interactive" ? "trusted" : "untrusted"),
       // Review sessions pin the checks diff to the PR's shas; interactive
       // sessions leave both unset.
       base: params.base,
@@ -243,6 +254,10 @@ export class SessionManager {
    * live backend (review => plan, fix/interactive => default). With no live
    * backend the mode is picked up when the next backend starts (the factory
    * reads the record fresh).
+   *
+   * Trust is deliberately NOT touched here: "fix it" on an untrusted review
+   * is the same session and the same worktree, so it keeps the same level
+   * (decision record 0009).
    */
   async setMode(id: SessionId, mode: SessionMode): Promise<SessionRecord> {
     this.mustGet(id);

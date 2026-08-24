@@ -1,8 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ReviewReport } from "@aaroncx/protocol";
 import { parseChecksFlags } from "../src/checks.ts";
 import { parseGcFlags, parseOlderThanDays } from "../src/gc.ts";
-import { ghBin, parsePrArg } from "../src/gh.ts";
+import { ghBin, parsePrArg, resolveTrust } from "../src/gh.ts";
 import { formatReviewReport, parseReviewFlags, reviewExitCode } from "../src/review.ts";
 
 /**
@@ -10,6 +13,13 @@ import { formatReviewReport, parseReviewFlags, reviewExitCode } from "../src/rev
  * decisions a user feels immediately (a typo'd flag, a wrong exit code in a
  * hook or in CI), so they are unit tested away from the daemon.
  */
+
+const ghDirs: string[] = [];
+afterAll(() => {
+  for (const dir of ghDirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe("parseReviewFlags", () => {
   test("takes a bare PR number with no flags", () => {
@@ -41,6 +51,16 @@ describe("parseReviewFlags", () => {
     expect(flags.backend).toBe("claude-acp");
   });
 
+  test("--trust and --no-trust set the level; --install opts into installing", () => {
+    expect(parseReviewFlags(["1"]).trust).toBeUndefined();
+    expect(parseReviewFlags(["1", "--trust"]).trust).toBe("trusted");
+    expect(parseReviewFlags(["1", "--no-trust"]).trust).toBe("untrusted");
+    expect(parseReviewFlags(["1", "--install"]).install).toBe(true);
+    expect(() => parseReviewFlags(["1", "--install", "--no-install"])).toThrow(
+      "mutually exclusive",
+    );
+  });
+
   test("rejects a missing PR, an unknown flag, a second PR, and another backend", () => {
     expect(() => parseReviewFlags([])).toThrow("needs a PR number or URL");
     expect(() => parseReviewFlags(["1", "--deep"])).toThrow("unknown flag --deep");
@@ -66,6 +86,78 @@ describe("parsePrArg", () => {
   test("rejects anything else", () => {
     expect(() => parsePrArg("main")).toThrow("cannot parse main");
     expect(() => parsePrArg("0")).toThrow("cannot parse 0");
+  });
+});
+
+describe("resolveTrust", () => {
+  /**
+   * Decision record 0009. The gh stand-in prints whatever permission the test
+   * asked for, so the decision itself is what is under test, not gh.
+   */
+  function fakeGh(permission: string, exitCode = 0): string {
+    const dir = mkdtempSync(join(tmpdir(), "monad-trust-gh-"));
+    ghDirs.push(dir);
+    const path = join(dir, "gh");
+    writeFileSync(path, ["#!/bin/sh", `echo '${permission}'`, `exit ${exitCode}`, ""].join("\n"), {
+      mode: 0o755,
+    });
+    return path;
+  }
+
+  const sameRepoPr = {
+    repo: "AaronCx/monad",
+    number: 7,
+    isCrossRepository: false,
+    authorLogin: "AaronCx",
+  };
+
+  test("a same-repo PR from a writer is trusted", async () => {
+    for (const permission of ["admin", "maintain", "write"]) {
+      const result = await resolveTrust(fakeGh(permission), sameRepoPr, process.cwd());
+      expect(result.trust).toBe("trusted");
+      expect(result.reason).toContain(permission);
+    }
+  });
+
+  test("a same-repo PR from a reader is untrusted", async () => {
+    const result = await resolveTrust(fakeGh("read"), sameRepoPr, process.cwd());
+    expect(result.trust).toBe("untrusted");
+    expect(result.reason).toContain("read");
+  });
+
+  test("a fork PR is untrusted without asking gh anything", async () => {
+    const result = await resolveTrust(
+      fakeGh("admin"),
+      { ...sameRepoPr, isCrossRepository: true },
+      process.cwd(),
+    );
+    expect(result.trust).toBe("untrusted");
+    expect(result.reason).toContain("fork");
+  });
+
+  test("an unknown origin, author, or failed permission lookup is untrusted", async () => {
+    // isCrossRepository absent: gh did not say, so monad does not assume.
+    expect(
+      (await resolveTrust(fakeGh("admin"), { ...sameRepoPr, isCrossRepository: undefined }, process.cwd()))
+        .trust,
+    ).toBe("untrusted");
+    expect(
+      (await resolveTrust(fakeGh("admin"), { ...sameRepoPr, authorLogin: undefined }, process.cwd()))
+        .trust,
+    ).toBe("untrusted");
+    expect(
+      (await resolveTrust(fakeGh("boom", 1), sameRepoPr, process.cwd())).trust,
+    ).toBe("untrusted");
+  });
+
+  test("an author login that is not a login is refused before it reaches argv", async () => {
+    const result = await resolveTrust(
+      fakeGh("admin"),
+      { ...sameRepoPr, authorLogin: "../../../etc/passwd" },
+      process.cwd(),
+    );
+    expect(result.trust).toBe("untrusted");
+    expect(result.reason).toContain("author could not be identified");
   });
 });
 
