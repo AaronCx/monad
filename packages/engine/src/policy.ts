@@ -223,6 +223,19 @@ export function permissionToolName(params: RequestPermissionRequest): string | u
 
 const MONAD_CHECKS_TOOL_PREFIX = "mcp__monad-checks__";
 
+/** The by-stamp for a decision a policy made in the given mode. */
+function byForMode(
+  mode: SessionMode,
+): "policy:interactive" | "policy:review" | "policy:fix" {
+  if (mode === "review") {
+    return "policy:review";
+  }
+  if (mode === "fix") {
+    return "policy:fix";
+  }
+  return "policy:interactive";
+}
+
 function isMonadChecksTool(params: RequestPermissionRequest): boolean {
   return permissionToolName(params)?.startsWith(MONAD_CHECKS_TOOL_PREFIX) ?? false;
 }
@@ -619,6 +632,13 @@ export class ModeAwarePermissionPolicy implements PermissionPolicy {
     this.hooks.persistRequested(sessionId, params);
     const context = this.resolveContext(sessionId);
     const mode = context?.mode ?? "interactive";
+    if (isMonadChecksTool(params)) {
+      // The checks plane is monad's own tool surface, so every policy allows
+      // it unconditionally. Interactive sessions included: without this, a
+      // plain "run the checks" needs a human keypress, and a scripted or
+      // detached session cancels the call outright.
+      return this.respond(sessionId, params, byForMode(mode), "allow_once");
+    }
     if (context && mode !== "interactive") {
       const verdict =
         mode === "review"
@@ -674,7 +694,7 @@ export class ModeAwarePermissionPolicy implements PermissionPolicy {
   private respond(
     sessionId: SessionId,
     params: RequestPermissionRequest,
-    by: "policy:review" | "policy:fix",
+    by: "policy:interactive" | "policy:review" | "policy:fix",
     want: "allow_once" | "reject_once",
     preferOptionId?: string,
     message?: string,

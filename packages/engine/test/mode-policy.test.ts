@@ -386,6 +386,36 @@ describe("ModeAwarePermissionPolicy", () => {
     expect(resolved.map((entry) => entry.meta.by)).toEqual(["policy:review", "policy:review"]);
   });
 
+  test("interactive: a monad-checks call is allowed without asking the human", async () => {
+    // Live M2 acceptance criterion 6 caught this: only review and fix
+    // auto-allowed the checks plane, so in a plain run session "run the
+    // checks" went out for a keypress. With no interactive stdin the call
+    // was cancelled outright and no checks ran.
+    const { policy, resolved } = makeModePolicy({ mode: "interactive", cwd: "/tmp" });
+    const askedClient: PermissionClient = {
+      requestPermission: () => Promise.reject(new Error("must not be asked")),
+    };
+    const checks = await policy.request(SESSION_ID, checksToolRequest(), askedClient);
+    expect(checks.outcome).toEqual({ outcome: "selected", optionId: "allow" });
+    expect(resolved[0]?.meta).toMatchObject({ by: "policy:interactive", optionId: "allow" });
+  });
+
+  test("interactive: a non-checks tool still goes to the human", async () => {
+    const { policy, resolved } = makeModePolicy({ mode: "interactive", cwd: "/tmp" });
+    let asked = 0;
+    const client: PermissionClient = {
+      requestPermission: () => {
+        asked += 1;
+        return Promise.resolve({
+          outcome: { outcome: "selected" as const, optionId: "allow" },
+        });
+      },
+    };
+    await policy.request(SESSION_ID, request({ kind: "edit" }), client);
+    expect(asked).toBe(1);
+    expect(resolved[0]?.meta.by).toBe("human");
+  });
+
   test("review: answers ExitPlanMode with the reject_once plan option", async () => {
     const { policy, resolved } = makeModePolicy({ mode: "review", cwd: "/tmp" });
     const response = await policy.request(SESSION_ID, exitPlanModeRequest(), undefined);

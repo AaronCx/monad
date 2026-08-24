@@ -53,12 +53,18 @@ export const EventRecordSchema = z.object({
 export type EventRecord = z.infer<typeof EventRecordSchema>;
 
 /**
- * Who resolved a permission request. Policies stamp policy:review or
+ * Who resolved a permission request. Policies stamp policy:interactive,
+ * policy:review or
  * policy:fix; anything a human answered (including forwarded fix-mode
  * executes) is stamped human. A policy never picks allow_always or
  * reject_always; only a human can.
  */
-export const PermissionResolvedBySchema = z.enum(["human", "policy:review", "policy:fix"]);
+export const PermissionResolvedBySchema = z.enum([
+  "human",
+  "policy:interactive",
+  "policy:review",
+  "policy:fix",
+]);
 export type PermissionResolvedBy = z.infer<typeof PermissionResolvedBySchema>;
 
 /**
