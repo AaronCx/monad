@@ -52,6 +52,32 @@ recomputes it from the worktree afterwards, and once the session has been grante
 `package.json` or a lockfile every execute forwards to a human whatever the frozen list says.
 Decision record 0009 has the reasoning.
 
+The GitHub App is a third boundary, and the thinnest one on purpose. After M3 the trigger is a
+stranger's push rather than a command Aaron typed, which is what makes everything above
+load-bearing rather than a safety net. The App is a trigger and a renderer: it verifies an HMAC
+signature over the raw body, narrows the payload to a named zod shape and refuses anything else,
+reads `trusted` or `untrusted` out of the fields GitHub signed, and turns a finished
+`CheckRunResults` and `ReviewReport` into GitHub's API shapes. It runs no check, holds no policy,
+and never decides what a session may execute. `packages/github` does not import from `apps/`, and
+a check or a policy added to it is in the wrong package.
+
+Trust for a webhook-triggered review is untrusted unless the signed payload proves otherwise, and
+the proof is two facts that must both hold: the head is a branch on the base repository itself,
+and the author's `author_association` is `OWNER`, `MEMBER`, or `COLLABORATOR`. There is no
+fallback lookup that could widen the answer. Two deliveries carry no pull request at all (a
+`check_run` rerequest and an `@monad review` comment); for those the App reads the pull request
+back through the installation token and resolves again, as an explicit second step in
+`apps/hook`, not as a fallback hidden inside the resolver. The daemon is told the level; it never
+re-derives it, because it holds no GitHub credentials and has no reason to.
+
+The App's permission set is the other half of that boundary. Checks read and write, Pull requests
+read and write, Contents READ, Metadata read, Issues read and write, and nothing else: no
+Contents write, no Workflows, no Administration, no Secrets. `@monad fix` runs unattended, and
+the M2 policy forwards a command it cannot decide (`git push` above all) to the attached human.
+`monad-hook` answers no permission request at all, so that request is held rather than answered
+by a program, and the token it holds could not push even if it were. Decision records 0010 and
+0011 have the rest.
+
 The vendor agent is a second boundary. It runs monad's prompt but it is a process monad does not
 control, and whatever monad puts in its `mcpServers` config is exposed by construction: the
 Agent SDK passes that config to the `claude` binary as a command line argument, so it sits in
@@ -77,10 +103,16 @@ disconnected client missed, so the daemon does.
 - `packages/engine` (`@aaroncx/engine`): sessions, event log, policy, transport adapter. The
   transport module is the only place allowed to import the SDK's experimental exports.
 - `packages/backends` (`@aaroncx/backends`): ACP client adapter (M1); native AI SDK loop (M2+).
-- `packages/checks` (`@aaroncx/checks`): placeholder in M1. The LastGate check engine port
-  lands here in M2.
-- `packages/github` (`@aaroncx/github`): placeholder in M1. The LastGate GitHub App port lands
-  here in M3.
+- `packages/checks` (`@aaroncx/checks`): the LastGate check engine port (M2). Also owns
+  `resolveTool`, the one place that decides where a check's binary comes from per trust level.
+- `packages/github` (`@aaroncx/github`): the GitHub side (M3). Signature verification, App auth
+  with a per-installation token cache, zod narrowing of webhook payloads, payload-derived trust,
+  Check Runs with annotation paging, and the shared review-post code the CLI and the App both
+  call. It must not import from `apps/`.
+- `apps/hook` (`@aaroncx/monad-hook`, binary `monad-hook`): the webhook receiver (M3). Separate
+  from the daemon because it is long running and network facing and a crash here must not take
+  live sessions down. It owns the `hook_deliveries` table in the daemon's database and nothing
+  else in it.
 
 ## Wire surface (M1)
 
@@ -91,6 +123,10 @@ every request:
   `initialize` (advertises `loadSession` and `sessionCapabilities.list`), `session/new`,
   `session/load`, `session/list`, `session/prompt`, `session/cancel`.
 - `/v1/sessions`, `/v1/status`: the control API, plain JSON.
+- `/v1/review`, `/v1/sessions/<id>/mode`, `/v1/sessions/<id>/cancel` (POST): opening a review,
+  switching a session's mode, and cancelling an in-flight turn. `cancel` exists for the App:
+  when a new commit supersedes a running review, the App cancels that session, and it has no ACP
+  connection with the session loaded to do it over.
 - `/mcp/<sessionId>` (M2): that session's monad-checks tools over Streamable HTTP. This is the
   one route the daemon token does NOT open. It takes only that session's derived mount token,
   `HMAC-SHA256(daemonToken, "mcp-mount:" + sessionId)`, because the credential is handed to the
@@ -115,8 +151,16 @@ plus the `_monad.sh/error` notification carrying appended error events (for exam
 vendor context restore) to live clients. Unknown notifications are dropped by SDK-based
 clients, so non-monad editors are unaffected.
 
+`monad-hook` is a second server, on 127.0.0.1 port 7332 by default, with two routes:
+`POST /webhook` and `GET /healthz`. It has no bearer token, because its authentication is the
+HMAC signature GitHub puts on the raw body, and whatever exposes it to the internet (a smee
+channel, a Tailscale funnel, a Cloudflare tunnel) terminates TLS somewhere that is not monad.
+That signature is the only thing between the internet and a review run. See `docs/github-app.md`.
+
 Environment overrides: `MONAD_HOME` moves the state directory, `MONAD_BACKEND_CMD` swaps the
 vendor agent command (integration tests run a fake ACP agent), `MONAD_DAEMON_BIN` tells the
-CLI what to spawn for `monad daemon start`.
+CLI what to spawn for `monad daemon start`. `monad-hook` reads `MONAD_GITHUB_APP_ID`,
+`MONAD_GITHUB_PRIVATE_KEY_PATH`, and `MONAD_WEBHOOK_SECRET` as overrides for
+`~/.monad/github.json`.
 
 This document grows as code lands. Decision records live in `docs/decisions/`.
