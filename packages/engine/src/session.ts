@@ -16,6 +16,7 @@ import type {
   SessionPr,
   SessionRecord,
   TrustLevel,
+  VendorToolsPayload,
 } from "@aaroncx/protocol";
 import {
   editedExecAllowlistInputs,
@@ -79,6 +80,11 @@ export interface BackendHooks {
    * session/load after a daemon restart (context not restored).
    */
   onError(payload: ErrorPayload): void;
+  /**
+   * Record what the vendor advertised for this session, once, at create time.
+   * A backend that advertises nothing simply never calls it.
+   */
+  onVendorTools(payload: VendorToolsPayload): void;
 }
 
 export type BackendFactory = (
@@ -551,6 +557,9 @@ export class SessionManager {
         },
         onError: (payload) => {
           this.appendAndPublish(id, "error", payload);
+        },
+        onVendorTools: (payload) => {
+          this.appendAndPublish(id, "vendor_tools", payload);
         },
       };
       session.backendStarting = Promise.resolve(this.createBackend(record, hooks));

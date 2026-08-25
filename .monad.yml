@@ -12,3 +12,6 @@ checks:
       - "packages/checks/test/**"
       - "packages/checks/src/scanners/regex-patterns.ts"
       - "packages/checks/src/config/extends.ts"
+      # Webhook and session fixtures: synthetic shas, urls, and placeholder
+      # secrets that exist to be scanned by the tests, not to be kept.
+      - "**/test/fixtures/**"

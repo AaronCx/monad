@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { runCommand } from "../exec";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { CheckResult, BuildCheckConfig } from "../types";
@@ -42,29 +42,10 @@ export async function checkBuild(config: BuildCheckConfig): Promise<CheckResult>
 
   const command = config.command ?? (hasPackageJson ? "bun run build" : "swift build");
 
-  const parts = command.split(/\s+/);
-  const [cmd = "", ...args] = parts;
-
   try {
-    const { exitCode, stdout, stderr } = await new Promise<{
-      exitCode: number;
-      stdout: string;
-      stderr: string;
-    }>((resolve) => {
-      const child = execFile(cmd, args, { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
-        if (error && "killed" in error && error.killed) {
-          resolve({ exitCode: -1, stdout: stdout || "", stderr: stderr || "" });
-          return;
-        }
-        resolve({
-          exitCode: error?.code ? Number(error.code) || 1 : child.exitCode ?? 0,
-          stdout: stdout || "",
-          stderr: stderr || "",
-        });
-      });
-    });
+    const { exitCode, stdout, stderr, timedOut } = await runCommand(command, { cwd, timeoutMs });
 
-    if (exitCode === -1) {
+    if (timedOut) {
       return {
         type: "build",
         status: "fail",

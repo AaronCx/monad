@@ -1,23 +1,5 @@
-import { execFile } from "node:child_process";
+import { runCommand } from "../exec";
 import type { ChangedFile, CheckResult, DependencyCheckConfig } from "../types";
-
-async function runCommand(command: string, cwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const parts = command.split(/\s+/);
-  const [cmd = "", ...args] = parts;
-
-  return new Promise((resolve) => {
-    const child = execFile(cmd, args, {
-      cwd: cwd ?? process.cwd(),
-      maxBuffer: 10 * 1024 * 1024,
-    }, (error, stdout, stderr) => {
-      resolve({
-        exitCode: error ? (child.exitCode ?? 1) : 0,
-        stdout: stdout || "",
-        stderr: stderr || "",
-      });
-    });
-  });
-}
 
 interface VulnerabilityFinding {
   package: string;
@@ -205,10 +187,10 @@ export async function checkDependencies(
       // bun's findings away and re-ran npm with a parser that can't read bun's
       // (or, on a bun-only repo, npm's) schema. Fall back to npm audit only when
       // bun produced no JSON at all (older bun / not installed).
-      const bunAudit = await runCommand("bun audit --json", cwd);
+      const bunAudit = await runCommand("bun audit --json", { cwd });
       auditFindings = parseBunAuditJson(bunAudit.stdout);
       if (auditFindings.length === 0 && !bunAudit.stdout.includes("{")) {
-        const npmAudit = await runCommand("npm audit --json", cwd);
+        const npmAudit = await runCommand("npm audit --json", { cwd });
         auditFindings = parseNpmAuditJson(npmAudit.stdout);
       }
     } catch {

@@ -14,7 +14,7 @@ import {
   type SessionNotification,
 } from "@agentclientprotocol/sdk";
 import type { BackendHooks, SessionBackend } from "@aaroncx/engine";
-import type { SessionId, SessionMode } from "@aaroncx/protocol";
+import type { SessionId, SessionMode, VendorToolsPayload } from "@aaroncx/protocol";
 
 /**
  * The vendor session mode each monad mode layers on (decision 0007): review
@@ -58,6 +58,14 @@ export interface AcpClientBackendOptions {
   cwd: string;
   /** monad's session id; every outbound event is rewritten to carry it. */
   monadSessionId: SessionId;
+  /**
+   * Which home the child was given: the real user home, or monad's minimal
+   * one for untrusted sessions. Recorded on the vendor_tools event so a short
+   * roster reads as isolation rather than as a broken vendor.
+   */
+  homeKind?: "user" | "vendor";
+  /** Why the home is not the one this session's trust level asked for. */
+  homeReason?: string;
   /** Engine callbacks: verbatim update append, permission policy, restore. */
   hooks: BackendHooks;
   /**
@@ -88,6 +96,10 @@ export class AcpClientBackend implements SessionBackend {
   private connection!: ClientConnection;
   private init!: InitializeResponse;
   private vendorSessionId?: string;
+  /** Names of the MCP servers monad injected, for the vendor_tools event. */
+  private mcpServerNames: string[] = [];
+  /** One vendor_tools event per session; the roster is advertised once. */
+  private vendorToolsEmitted = false;
   /**
    * True while a vendor session/load runs. The vendor replays its own history
    * as session/update notifications during load; monad's event log already
@@ -168,6 +180,7 @@ export class AcpClientBackend implements SessionBackend {
       mcpServers,
     });
     this.vendorSessionId = response.sessionId;
+    this.mcpServerNames = mcpServers.map((server) => server.name);
     this.options.hooks.setAgentSessionId(response.sessionId);
     return response.sessionId;
   }
@@ -187,6 +200,7 @@ export class AcpClientBackend implements SessionBackend {
         mcpServers,
       });
       this.vendorSessionId = agentSessionId;
+      this.mcpServerNames = mcpServers.map((server) => server.name);
     } finally {
       this.restoring = false;
     }
@@ -242,6 +256,10 @@ export class AcpClientBackend implements SessionBackend {
   }
 
   private handleUpdate(params: SessionNotification): void {
+    // Ahead of the restoring guard on purpose: the roster is monad's own
+    // bookkeeping rather than a session update to fan out, and a restored
+    // session should say what it was offered too.
+    this.captureVendorTools(params);
     if (this.restoring) {
       return;
     }
@@ -257,6 +275,51 @@ export class AcpClientBackend implements SessionBackend {
       ...params,
       sessionId: this.options.monadSessionId,
     });
+  }
+
+  /**
+   * The vendor advertises its slash command roster once, right after
+   * session/new (decision record 0005 fact 3). That roster is whatever the
+   * HOME it read holds: plugins, agents, and skills nobody chose for this
+   * session (record 0006 fact 8). Record it so a later tool rejection can be
+   * read against what was on offer.
+   *
+   * A vendor that never advertises produces no vendor_tools event, which is
+   * the honest answer rather than an invented empty one.
+   */
+  private captureVendorTools(params: SessionNotification): void {
+    if (this.vendorToolsEmitted) {
+      return;
+    }
+    const update = params.update as {
+      sessionUpdate?: string;
+      availableCommands?: Array<{ name?: unknown }>;
+    };
+    if (update?.sessionUpdate !== "available_commands_update") {
+      return;
+    }
+    const commands = (update.availableCommands ?? [])
+      .map((command) => (typeof command?.name === "string" ? command.name : undefined))
+      .filter((name): name is string => name !== undefined);
+    this.vendorToolsEmitted = true;
+    const agentInfo = this.init.agentInfo;
+    const payload: VendorToolsPayload = {
+      ...(agentInfo
+        ? {
+            agent: {
+              name: agentInfo.name,
+              ...(agentInfo.title ? { title: agentInfo.title } : {}),
+              version: agentInfo.version,
+            },
+          }
+        : {}),
+      commands,
+      commandCount: commands.length,
+      mcpServers: [...this.mcpServerNames],
+      home: this.options.homeKind ?? "user",
+      ...(this.options.homeReason ? { homeReason: this.options.homeReason } : {}),
+    };
+    this.options.hooks.onVendorTools(payload);
   }
 
   private requireVendorSessionId(): string {

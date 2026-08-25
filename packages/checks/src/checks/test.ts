@@ -1,40 +1,9 @@
-import { execFile } from "node:child_process";
+import { runCommand } from "../exec";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import type { CheckResult, TestCheckConfig } from "../types";
 
 const DEFAULT_TIMEOUT_SECONDS = 600;
-
-interface RunResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-}
-
-function runCommand(command: string, cwd: string, timeoutMs: number): Promise<RunResult> {
-  const parts = command.split(/\s+/);
-  const [cmd = "", ...args] = parts;
-  return new Promise((resolve) => {
-    const child = execFile(
-      cmd,
-      args,
-      { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error && "killed" in error && error.killed) {
-          resolve({ exitCode: -1, stdout: stdout || "", stderr: stderr || "", timedOut: true });
-          return;
-        }
-        resolve({
-          exitCode: error ? (Number(error.code) || child.exitCode || 1) : 0,
-          stdout: stdout || "",
-          stderr: stderr || "",
-          timedOut: false,
-        });
-      },
-    );
-  });
-}
 
 function isOnPath(binary: string): boolean {
   const pathVar = process.env.PATH ?? "";
@@ -172,7 +141,7 @@ export async function checkTest(config: TestCheckConfig): Promise<CheckResult> {
   }
 
   try {
-    const result = await runCommand(command, cwd, timeoutSeconds * 1000);
+    const result = await runCommand(command, { cwd, timeoutMs: timeoutSeconds * 1000 });
 
     if (result.timedOut) {
       return {

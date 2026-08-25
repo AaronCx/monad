@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { resolveTool, runCommand } from "../exec";
 import { existsSync, readFileSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import type { CheckResult, Finding, TypecheckCheckConfig } from "../types";
@@ -6,37 +6,6 @@ import type { TrustLevel } from "../config/loader";
 import { statusFromFindings } from "./status";
 
 const DEFAULT_TIMEOUT_SECONDS = 300;
-
-interface RunResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-}
-
-function runCommand(command: string, cwd: string, timeoutMs: number): Promise<RunResult> {
-  const parts = command.split(/\s+/);
-  const [cmd = "", ...args] = parts;
-  return new Promise((resolve) => {
-    const child = execFile(
-      cmd,
-      args,
-      { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error && "killed" in error && error.killed) {
-          resolve({ exitCode: -1, stdout: stdout || "", stderr: stderr || "", timedOut: true });
-          return;
-        }
-        resolve({
-          exitCode: error ? (Number(error.code) || child.exitCode || 1) : 0,
-          stdout: stdout || "",
-          stderr: stderr || "",
-          timedOut: false,
-        });
-      },
-    );
-  });
-}
 
 function isOnPath(binary: string): boolean {
   const pathVar = process.env.PATH ?? "";
@@ -69,10 +38,20 @@ function readScripts(cwd: string): Record<string, string> | undefined {
  * left is a fixed command line reading a configuration format that cannot
  * carry code: `tsc` against `tsconfig.json`, and `pyright`.
  */
+interface DetectedTypechecker {
+  kind: string;
+  /** Bare binary name. `resolveTool` decides where it may come from. */
+  tool: string;
+  /** The fixed arguments monad wrote, never the PR's. */
+  args: string[];
+  /** Trusted runs reach this one through bunx. */
+  viaBunx: boolean;
+}
+
 function detectTypechecker(
   cwd: string,
   trust: TrustLevel,
-): { command: string; kind: string } | { skip: string } {
+): DetectedTypechecker | { skip: string } {
   const untrusted = trust === "untrusted";
   const scripts = readScripts(cwd);
   if (scripts) {
@@ -81,22 +60,22 @@ function detectTypechecker(
         if (untrusted) {
           break; // The script body is written by the PR. Fall through to tsc.
         }
-        return { command: `bun run ${name}`, kind: `package.json ${name} script` };
+        return { kind: `package.json ${name} script`, tool: "bun", args: ["run", name], viaBunx: false };
       }
     }
   }
   if (existsSync(join(cwd, "tsconfig.json"))) {
-    return { command: "bunx tsc --noEmit -p tsconfig.json", kind: "tsc" };
+    return { kind: "tsc", tool: "tsc", args: ["--noEmit", "-p", "tsconfig.json"], viaBunx: true };
   }
   if (existsSync(join(cwd, "pyproject.toml"))) {
-    if (isOnPath("pyright")) return { command: "pyright", kind: "pyright" };
+    if (isOnPath("pyright")) return { kind: "pyright", tool: "pyright", args: [], viaBunx: false };
     if (isOnPath("mypy")) {
       if (untrusted) {
         return {
           skip: "untrusted PR: mypy is not run because it loads plugins from the PR's pyproject.toml",
         };
       }
-      return { command: "mypy .", kind: "mypy" };
+      return { kind: "mypy", tool: "mypy", args: ["."], viaBunx: false };
     }
     return { skip: "pyproject.toml found but neither pyright nor mypy is on PATH" };
   }
@@ -144,10 +123,14 @@ export async function checkTypecheck(config: TypecheckCheckConfig): Promise<Chec
   const trust: TrustLevel = context.trust === "trusted" ? "trusted" : "untrusted";
   const timeoutSeconds = config.timeout ?? DEFAULT_TIMEOUT_SECONDS;
 
+  // `invocation` is argv when monad built the command line; a config-supplied
+  // command stays a string and is split the way it always was.
+  let invocation: string | string[];
   let command: string;
   let kind: string;
   if (config.command) {
     command = config.command;
+    invocation = config.command;
     kind = "custom";
   } else {
     const detected = detectTypechecker(cwd, trust);
@@ -160,12 +143,27 @@ export async function checkTypecheck(config: TypecheckCheckConfig): Promise<Chec
         details: { skipped: true, reason: detected.skip },
       };
     }
-    command = detected.command;
+    // Detection chose the tool; resolution decides where the binary may come
+    // from. An untrusted run takes it from PATH or takes nothing, because
+    // `bunx tsc` would happily run a tsc the PR committed (record 0009).
+    const resolved = resolveTool(detected.tool, { trust, cwd, viaBunx: detected.viaBunx });
+    if (!resolved.ok) {
+      return {
+        type: "typecheck",
+        status: "pass",
+        title: "Type Check",
+        summary: `Type check skipped: ${detected.kind} could not be resolved`,
+        details: { skipped: true, reason: resolved.reason, typechecker: detected.kind },
+      };
+    }
+    const argv = [...resolved.argv, ...detected.args];
+    invocation = argv;
+    command = argv.join(" ");
     kind = detected.kind;
   }
 
   try {
-    const result = await runCommand(command, cwd, timeoutSeconds * 1000);
+    const result = await runCommand(invocation, { cwd, timeoutMs: timeoutSeconds * 1000 });
 
     if (result.timedOut) {
       return {

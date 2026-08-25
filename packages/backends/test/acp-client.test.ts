@@ -103,6 +103,9 @@ describe("AcpClientBackend against the fake agent", () => {
     const events = store.replay(record.id);
     expect(events.map((e) => e.kind)).toEqual([
       "session_created",
+      // The roster the vendor advertised, recorded once per session so a
+      // later tool rejection can be read against what was on offer.
+      "vendor_tools",
       "update",
       "prompt",
       "update",
@@ -110,6 +113,23 @@ describe("AcpClientBackend against the fake agent", () => {
       "update",
       "turn_ended",
     ]);
+
+    // The roster event carries names only: the full advertisement is already
+    // in the update event, and nothing about the vendor's config may become a
+    // second copy of a credential.
+    const roster = events.find((e) => e.kind === "vendor_tools")?.payload as {
+      commands: string[];
+      commandCount: number;
+      mcpServers: string[];
+      home: string;
+      agent?: { name?: string };
+    };
+    expect(roster.commands).toEqual(["compact"]);
+    expect(roster.commandCount).toBe(1);
+    expect(roster.mcpServers).toEqual([]);
+    // "vendor" on a machine with a file-based Claude login, "user" without
+    // one; both are correct and neither is asserted here.
+    expect(["user", "vendor"]).toContain(roster.home);
 
     const updates = updatePayloads(events);
     for (const update of updates) {
@@ -187,6 +207,7 @@ describe("AcpClientBackend against the fake agent", () => {
     const kinds = events.map((e) => e.kind);
     expect(kinds).toEqual([
       "session_created",
+      "vendor_tools",
       "update",
       "prompt",
       "update",
@@ -264,6 +285,7 @@ describe("AcpClientBackend against the fake agent", () => {
     expect(added.map((e) => e.kind)).toEqual([
       "prompt",
       "error",
+      "vendor_tools",
       "update",
       "update",
       "update",

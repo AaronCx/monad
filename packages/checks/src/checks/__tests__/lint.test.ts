@@ -54,11 +54,14 @@ describe("Lint & Type Checker", () => {
     }
   });
 
+  // Trusted, because an untrusted run only invokes a linter it can resolve
+  // from PATH (decision record 0009), so on a machine without biome installed
+  // the untrusted answer is a skip rather than an attempt.
   test("auto-detects biome.json", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "lint-test-"));
     try {
       writeFileSync(join(tmpDir, "biome.json"), '{}');
-      const config = { ...defaultConfig, cwd: tmpDir } as any;
+      const config = { ...defaultConfig, cwd: tmpDir, trust: "trusted" } as any;
       const files = [file("src/index.ts", "const x = 1;")];
       const result = await checkLint(files, config);
       // It will try to run biome, which may or may not be installed.
@@ -119,7 +122,7 @@ describe("Lint & Type Checker", () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "lint-test-"));
     try {
       writeFileSync(join(tmpDir, "pyproject.toml"), '[tool.ruff]\nline-length = 88');
-      const config = { ...defaultConfig, cwd: tmpDir } as any;
+      const config = { ...defaultConfig, cwd: tmpDir, trust: "trusted" } as any;
       const files = [file("src/main.py", "import os")];
       const result = await checkLint(files, config);
       expect(result.type).toBe("lint");

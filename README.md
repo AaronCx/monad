@@ -7,12 +7,15 @@ from the CLI, an editor, or (later) a phone; attach to it from anywhere else. Re
 open from GitHub pull requests, run diff-scoped checks, and are the same sessions you talk to
 when something fails.
 
-**Status: pre-alpha. Milestones 1 and 2 landed.** M1: `monadd` + `monad` (run, attach, ls,
+**Status: pre-alpha. Milestones 1, 2, and 3 landed.** M1: `monadd` + `monad` (run, attach, ls,
 acp-stdio), Claude via `claude-agent-acp`, sessions persisted in SQLite. M2: the deterministic
 check engine in `packages/checks`, served to every session as the `monad-checks` MCP server;
-git worktrees; `monad review <pr>` and `monad checks`. Interfaces and storage are still
-unstable, there are no packaged releases yet (build from source with `bun run build`), and
-everything past M2 on the roadmap does not exist. See `docs/architecture.md`.
+git worktrees; `monad review <pr>` and `monad checks`. M3: `packages/github` and `monad-hook`,
+the GitHub App trigger. The App exists and is tested end to end against a real daemon; it is not
+deployed anywhere, and registering one is a manual step documented in `docs/github-app.md`.
+Interfaces and storage are still unstable, there are no packaged releases yet (build from source
+with `bun run build`), and everything past M3 on the roadmap does not exist. See
+`docs/architecture.md`.
 
 ## How it works
 
@@ -79,8 +82,42 @@ worktrees of closed sessions; event logs are never deleted.
 `--post` is opt-in and posts exactly one `COMMENT` review through your own `gh` auth. Findings
 that anchor to an added or context line of the diff become inline comments; the rest go in the
 review body next to the summary and the checks table. Re-running against the same head sha
-posts nothing. monad never posts `APPROVE` or `REQUEST_CHANGES`; a review that carries a
-verdict for you belongs to the GitHub App in M3.
+posts nothing. monad never posts `APPROVE` or `REQUEST_CHANGES`. The anchoring, the body, the
+payload, and the same-head check all live in `packages/github`, shared with the App; the only
+difference is the transport, `gh` here and an installation token there.
+
+## The GitHub App
+
+M3 makes the review fire by itself. A GitHub App receives pull request webhooks, `monad-hook`
+verifies and queues each delivery, `monadd` runs the same review session `monad review` runs,
+and the result comes back as a Check Run named `monad` with annotations plus one `COMMENT`
+review with inline comments. Replying `@monad fix <instruction>` on the pull request is how you
+reach fix mode. Full setup, exposure choices, and troubleshooting are in `docs/github-app.md`.
+
+The App is a trigger and a renderer. It reads the payload GitHub signed, resolves trust from it,
+and renders a report the engine already produced. Every decision about what runs and what is
+permitted stays in `packages/engine` and `packages/checks` (decision records 0009, 0010, 0011).
+
+### The permission set
+
+Repository permissions: **Checks** read and write, **Pull requests** read and write,
+**Contents** READ, **Metadata** read, **Issues** read and write. Subscribed events: **Pull
+request**, **Issue comment**, **Check run**.
+
+Not requested: **Contents write, Workflows, Administration, Secrets.** Write access to code is
+the permission the product does not need and must not hold. Everything monad produces is
+commentary. `@monad fix` writes into a detached worktree on the machine running the daemon and
+commits there; it never pushes, and it cannot: the token has no scope for it, and `monad-hook`
+answers no permission request, so the fix policy's forwarded `git push` is held for whoever runs
+`monad attach <id>`.
+
+```
+monad-hook --smee https://smee.io/<channel>     # no inbound port, the default
+monad-hook --port 7332                          # behind a Tailscale funnel or a Cloudflare tunnel
+```
+
+Whatever exposes it terminates TLS somewhere that is not monad. The HMAC signature over the raw
+body is the only thing between the internet and a review run.
 
 ## Checks
 
@@ -127,7 +164,25 @@ session (interactive ones too), so "run the checks" is a tool call rather than a
   mypy. A Swift repo gets secrets, file patterns, dependency review, agent patterns, and
   swiftlint, and nothing else.
 - `--post` ties a review to your own GitHub identity. That is right for a local tool and wrong
-  for a shared one; the M3 App replaces it.
+  for a shared one; the App posts as the bot instead. Both are kept: `--post` works without the
+  App installed and it is the phone path.
+- The Mac Mini is the App's deployment. A tunnel plus a laptop-class machine reviewing public
+  pull requests is fine for your own repos and is not a hosted product; nothing here is
+  multi-tenant.
+- Reviews cost vendor tokens and every fork pull request is someone else spending them. There is
+  no rate limit in M3 beyond the concurrency cap of 2, and `@monad review` from a stranger is a
+  valid trigger. A per-repository daily cap is the fix the first time it matters.
+- Untrusted lint and typecheck resolve their binary from `PATH` only, never from the worktree,
+  because a pull request can commit `node_modules/.bin/biome`. On this machine none of `biome`,
+  `tsc`, `ruff`, `swiftlint`, or `pyright` is on `PATH` (they are all repo-local
+  devDependencies), so today an untrusted review here skips lint and typecheck entirely and says
+  so. A monad-owned toolchain directory on the daemon's `PATH` turns them back on.
+- Check Run annotations cap at 50 per request; monad pages them and stops at 200, saying so in
+  the summary. A very noisy diff is truncated.
+- Prompt injection through the diff is unchanged from M2. The App widens who can attempt it from
+  "pull requests you chose to review" to "anyone who can open a pull request". The containment is
+  the policy layer and the untrusted default, which is why the hardening in decision record 0009
+  had to land first.
 
 ## Roadmap
 
@@ -135,7 +190,11 @@ session (interactive ones too), so "run the checks" is a tool call rather than a
 2. M2 (landed): checks as tools (secrets, file patterns, lint, typecheck, dependencies, agent
    patterns, build, test), worktrees, `monad review <pr>` and `monad checks` run locally, opt-in
    `--post` COMMENT reviews
-3. M3: GitHub App trigger, Check Runs and review comments
+3. M3 (landed, not deployed): GitHub App trigger. `monad-hook` verifies deliveries, queues them
+   in SQLite with the delivery id as the idempotency key, supersedes in-flight reviews per PR,
+   and drives `monadd`; results come back as a Check Run with annotations plus one `COMMENT`
+   review with inline comments, with `@monad review`/`fix`/`status` gated on
+   `author_association`
 4. M4: Codex and Gemini backends, native loop for API-key and self-hosted models
 5. Later: desktop (Tauri sidecar), web, phone attach
 
@@ -143,8 +202,8 @@ session (interactive ones too), so "run the checks" is a tool call rather than a
 
 monad replaces [Forge](https://github.com/AaronCx/Forge) (its provider-neutral agent loop and
 test suite are the engine spec) and [LastGate](https://github.com/AaronCx/LastGate) (its check
-engine is ported into `packages/checks`; its GitHub App plumbing lands in M3). Both repos are
-archived.
+engine is ported into `packages/checks` and its GitHub App plumbing into `packages/github`). Both
+repos are archived.
 
 ## License
 

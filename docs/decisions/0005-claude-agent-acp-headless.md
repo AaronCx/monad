@@ -33,3 +33,53 @@ Probe: `Bun.spawn(["node_modules/.bin/claude-agent-acp"], { cwd: <throwaway git 
 6. Billing stays the vendor's business (see the brief's billing section); nothing in this spike required or touched a token.
 
 Throwaway probe code lived in the scratchpad and is not kept; this record is the artifact.
+
+## MONAD_VENDOR_HOME: an untrusted session gets a minimal home, and auth survives it
+
+Added 2026-08-24 as M3 pre-flight B, measured on the Mac Mini against adapter
+`claude-agent-acp` 0.70.0.
+
+The spike above proved HOME alone is enough, with HOME being the real user home. Record 0006
+fact 8 draws the consequence: the vendor session inherits the whole of `~/.claude`, which is
+plugins, agents, skills, and MCP servers, some of them holding write credentials to other
+systems. Under `monad review` that was your machine reviewing a PR you picked. Under M3 the
+trigger is a stranger's push, so an untrusted session should not be offered any of it.
+
+`resolveVendorHome(trust)` in `packages/backends/src/claude.ts` now decides the child's HOME.
+Trusted sessions keep the user home, unchanged. An untrusted session runs under
+`$MONAD_VENDOR_HOME`, default `<state dir>/vendor-home`, which holds exactly one thing: a
+SYMLINK at `.claude/.credentials.json` pointing at the real one. Linked and never copied, for
+two reasons: a copy is monad storing a vendor auth token, which the repo rule forbids, and a copy
+goes stale the moment the vendor refreshes it.
+
+Measured, both through monad's own `SessionManager` plus `createClaudeBackend` (not a probe
+harness), one real prompt each ("Reply with the single word: pong"):
+
+| | HOME | reply | advertised commands |
+|---|---|---|---|
+| trusted | `/Users/acx` | `pong` | 91 |
+| untrusted | `/Users/acx/.monad/vendor-home` | `pong` | 47 |
+
+So authentication survives the minimal home: the adapter picked up the Max login through the
+linked credential file with no `authenticate` round trip, exactly as it does under the real home.
+The 44 commands that disappear are this machine's plugins and skills (browserhitch, hookify,
+vercel, and the rest); what remains is Claude Code's own built-in set. The vendor also writes its
+transcripts and caches into that home, so an untrusted review no longer lands in the user's own
+`~/.claude/projects`.
+
+Authentication outranks this hardening, which is an M1 rule, so two cases keep the user home and
+say why rather than failing:
+
+- there is no `~/.claude/.credentials.json` to link at all. The login may live in the macOS
+  Keychain, where a different HOME is unproven, and every CI runner looks like this. Expected,
+  not an error event; the reason is recorded on the session's `vendor_tools` event.
+- something replaced the link with a real file. That file is a credential copy monad must
+  neither own nor delete, so the session falls back and an error event says so, once, with the
+  path. This is the case to watch: if the vendor ever refreshes its token by writing a new file
+  over the link rather than through it, the link is gone and the refreshed token is stranded in
+  the vendor home while the user home keeps the old one. Not observed in the runs above, and the
+  fallback is what makes it visible rather than silent.
+
+Honest limitation: a minimal home is not a sandbox. The vendor process still runs as the same
+user with the same filesystem access; what changed is which configuration it is handed. The
+containment for what it may DO is still the policy layer.

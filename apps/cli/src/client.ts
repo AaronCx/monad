@@ -1,58 +1,47 @@
 import * as readline from "node:readline";
 import {
-  type ClientConnection,
-  client,
-  type InitializeResponse,
   methods,
-  PROTOCOL_VERSION,
   RequestError,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
-import { createHttpStream } from "@aaroncx/engine/transport";
-import { PROMPT_IN_FLIGHT_ERROR_CODE } from "@aaroncx/engine";
-import { ERROR_NOTIFICATION_METHOD, MonadErrorNotificationSchema } from "@aaroncx/protocol";
-import type { DaemonHandle } from "./daemon.ts";
+import {
+  type AcpSession,
+  connectAcp as connectAcpToDaemon,
+  type DaemonHandle,
+  PROMPT_IN_FLIGHT_ERROR_CODE,
+} from "@aaroncx/engine";
 import type { Renderer } from "./render.ts";
 
 /** The SDK's RequestError.authRequired() code (vendor login missing). */
 const AUTH_REQUIRED_CODE = -32000;
 
-export interface AcpSession {
-  connection: ClientConnection;
-  init: InitializeResponse;
-}
+export type { AcpSession };
 
 export interface PermissionPrompter {
   ask(params: RequestPermissionRequest): Promise<RequestPermissionResponse>;
 }
 
 /**
- * Opens the CLI's own ACP connection to the daemon (one connection per
- * client is the transport's model: each SSE mailbox has a single receiver).
+ * The CLI's ACP connection: the shared client from @aaroncx/engine wired to
+ * the terminal renderer and to the human at the keyboard. Answering
+ * requestPermission is what makes this client the human the policy forwards
+ * to; apps/hook deliberately does not.
  */
 export async function connectAcp(
   handle: DaemonHandle,
   renderer: Renderer,
   permissions: PermissionPrompter,
 ): Promise<AcpSession> {
-  const stream = createHttpStream(`${handle.url}/acp`, {
-    headers: { Authorization: `Bearer ${handle.token}` },
-  });
-  const connection = client({ name: "monad-cli" })
-    .onNotification(methods.client.session.update, (ctx) => {
-      renderer.onUpdate(ctx.params);
-    })
-    .onNotification(ERROR_NOTIFICATION_METHOD, MonadErrorNotificationSchema, (ctx) => {
-      renderer.onError(ctx.params);
-    })
-    .onRequest(methods.client.session.requestPermission, (ctx) => permissions.ask(ctx.params))
-    .connect(stream);
-  const init = await connection.agent.request(methods.agent.initialize, {
-    protocolVersion: PROTOCOL_VERSION,
-    clientCapabilities: {},
-  });
-  return { connection, init };
+  return connectAcpToDaemon(
+    handle,
+    {
+      onUpdate: (params) => renderer.onUpdate(params),
+      onError: (params) => renderer.onError(params),
+      requestPermission: (params) => permissions.ask(params),
+    },
+    { name: "monad-cli" },
+  );
 }
 
 function isRequestError(error: unknown): error is RequestError {

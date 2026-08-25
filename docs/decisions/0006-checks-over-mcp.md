@@ -83,7 +83,11 @@ stdio fallback (`monad checks-mcp --session <id>`) is not needed and is not buil
    that flag rather than assuming it.
 8. The vendor session inherits the user's global `~/.claude` configuration (plugins, agents,
    deferred tool roster) because HOME is the real user home per decision 0005. Do not assume a
-   clean tool namespace.
+   clean tool namespace. Amended 2026-08-24 (M3 pre-flight B): this holds for TRUSTED sessions.
+   An untrusted session runs under a minimal home instead (`MONAD_VENDOR_HOME`, see record 0005),
+   which cut the advertised roster from 91 commands to 47 on the Mac Mini without breaking
+   authentication. Whichever home was used, the roster the vendor advertised is recorded once per
+   session as a `vendor_tools` event, so a tool rejection can be read against what was on offer.
 9. Bind the MCP endpoint to loopback and treat the bearer check as the only auth layer, same
    placement as the ACP transport's token check from decision 0004 (in front of the handler in
    the `node:http` request callback).
