@@ -15,6 +15,7 @@ import { FIX_MODE_PROMPT, type ReviewResultLine } from "@aaroncx/engine";
 import { connectAcp, InteractiveSession } from "./client.ts";
 import { type DaemonHandle, ensureDaemon, setSessionMode, streamReview } from "./daemon.ts";
 import { fetchPrMetadata, ghBin, resolveTrust } from "./gh.ts";
+import { stripTrailingNewlines } from "@aaroncx/github";
 import { postReview } from "./post.ts";
 import { Renderer } from "./render.ts";
 
@@ -140,7 +141,7 @@ function formatFinding(finding: ReviewFinding): string {
   }
   if (finding.suggestion !== undefined && finding.suggestion.length > 0) {
     lines.push("    suggestion:");
-    for (const line of finding.suggestion.replace(/\n+$/, "").split("\n")) {
+    for (const line of stripTrailingNewlines(finding.suggestion).split("\n")) {
       lines.push(`      ${line}`);
     }
   }

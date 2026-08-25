@@ -88,9 +88,28 @@ export interface PostPlan {
 
 const SEVERITY_ORDER: ReviewSeverity[] = ["critical", "high", "medium", "low", "nit"];
 
+/**
+ * Trailing newlines off a suggestion, without a regex.
+ *
+ * `/\n+$/` is what this used to be, and an anchored `+` is polynomial: on a
+ * suggestion that is thousands of newlines followed by one other character,
+ * the engine retries the run from every offset. The suggestion is written by
+ * a model that just read a stranger's diff, so it is exactly the input that
+ * must not be able to choose how long monad spends on it. A backwards walk is
+ * one pass over the tail and cannot backtrack at all.
+ */
+export function stripTrailingNewlines(text: string): string {
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 10) {
+    end -= 1;
+  }
+  return text.slice(0, end);
+}
+
 /** A single-line suggestion renders as a GitHub suggestion block. */
 function suggestionBlock(finding: ReviewFinding): string | undefined {
-  const suggestion = finding.suggestion?.replace(/\n+$/, "");
+  const raw = finding.suggestion;
+  const suggestion = raw === undefined ? undefined : stripTrailingNewlines(raw);
   if (suggestion === undefined || suggestion.length === 0 || suggestion.includes("\n")) {
     return undefined;
   }
@@ -111,7 +130,8 @@ export function formatComment(finding: ReviewFinding): string {
 function formatUnanchoredFinding(finding: ReviewFinding): string {
   const where = finding.line === undefined ? finding.path : `${finding.path}:${finding.line}`;
   const parts = [`- **${finding.title}** (${finding.severity}, ${where})`, finding.body];
-  const suggestion = finding.suggestion?.replace(/\n+$/, "");
+  const raw = finding.suggestion;
+  const suggestion = raw === undefined ? undefined : stripTrailingNewlines(raw);
   if (suggestion !== undefined && suggestion.length > 0) {
     parts.push(["```", suggestion, "```"].join("\n"));
   }

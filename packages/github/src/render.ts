@@ -116,9 +116,21 @@ function findingsOf(result: CheckResult): RawFinding[] {
   return Array.isArray(raw) ? (raw as RawFinding[]) : [];
 }
 
+/**
+ * One markdown table cell, built from a finding a model wrote after reading
+ * the pull request, so the content is not monad's.
+ *
+ * Backslashes are escaped first and pipes second, which is the order that
+ * matters. Escaping only the pipe leaves a backslash the input supplied
+ * sitting in front of monad's own escape, markdown reads that pair as one
+ * literal backslash, and the pipe behind it splits the row. Escaping the
+ * backslash first makes monad's escape the only one markdown can consume.
+ * Every replacement here is a single character class with no quantifier, so
+ * there is nothing to backtrack on either.
+ */
 function cell(value: string | undefined): string {
   const text = value === undefined || value.length === 0 ? "-" : value;
-  return text.replace(/\|/g, "\\|").replace(/\n+/g, " ");
+  return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, " ");
 }
 
 /**

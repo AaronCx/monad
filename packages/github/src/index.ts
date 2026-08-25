@@ -122,6 +122,7 @@ export {
   postReview,
   reviewMarker,
   REVIEW_MARKER_PREFIX,
+  stripTrailingNewlines,
 } from "./review-post.ts";
 export type {
   BuildPayloadInput,

@@ -9,6 +9,7 @@ import {
   planReviewPost,
   postReview,
   reviewMarker,
+  stripTrailingNewlines,
 } from "../src/review-post.ts";
 import { fakeOctokit } from "./fixtures/fake-octokit.ts";
 
@@ -250,5 +251,25 @@ describe("postReview through the App's transport", () => {
     );
     expect(outcome.posted).toBe(true);
     expect(posted).toHaveLength(1);
+  });
+});
+
+describe("stripTrailingNewlines", () => {
+  test("removes only the trailing run, and only newlines", () => {
+    expect(stripTrailingNewlines("a\n\n\n")).toBe("a");
+    expect(stripTrailingNewlines("a\nb\n")).toBe("a\nb");
+    expect(stripTrailingNewlines("")).toBe("");
+    expect(stripTrailingNewlines("\n\n")).toBe("");
+    expect(stripTrailingNewlines("a  ")).toBe("a  ");
+  });
+
+  test("a suggestion that is all newlines and one character is linear, not polynomial", () => {
+    // The regex this replaced (/\n+$/) backtracks from every offset on this
+    // shape. The suggestion is written by a model that just read a
+    // stranger's diff, so its length must not decide monad's runtime.
+    const hostile = `${"\n".repeat(200_000)}x`;
+    const started = performance.now();
+    expect(stripTrailingNewlines(hostile)).toBe(hostile);
+    expect(performance.now() - started).toBeLessThan(200);
   });
 });

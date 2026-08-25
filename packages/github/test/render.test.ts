@@ -257,6 +257,28 @@ describe("secrets findings", () => {
     expect(text).toContain("| a.ts:1 | r | a \\| b c |");
     expect(text.split("\n").filter((line) => line.startsWith("| a.ts"))).toHaveLength(1);
   });
+
+  test("a backslash in front of a pipe cannot break the table either", () => {
+    // Escaping the pipe alone leaves the input's own backslash in front of
+    // monad's, markdown eats the pair, and the bare pipe splits the row.
+    // Backslashes are escaped first, so this stays one cell.
+    const sneaky = results({
+      checks: [
+        {
+          type: "lint",
+          status: "warn",
+          title: "1 problem",
+          details: {
+            findings: [{ file: "a.ts", line: 1, rule: "r", message: "a \\| b | c" }],
+          },
+        },
+      ],
+    });
+    const text = formatCheckFindings(sneaky);
+    const row = text.split("\n").filter((line) => line.startsWith("| a.ts"));
+    expect(row).toHaveLength(1);
+    expect(row[0]).toBe("| a.ts:1 | r | a \\\\\\| b \\| c |");
+  });
 });
 
 describe("renderCompletedCheckRun", () => {
