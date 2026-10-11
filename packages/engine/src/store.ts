@@ -46,6 +46,13 @@ export interface SessionStoreOptions {
  */
 export const INDEX_GENERATION = 2;
 
+/**
+ * Event kinds that do not move a session's updated_at: they record something
+ * ABOUT the session (another session reading it, a handoff or summary of
+ * it), not something it did.
+ */
+const PASSIVE_KINDS: ReadonlySet<EventKind> = new Set<EventKind>(["access", "handoff", "summary"]);
+
 /** Events per transaction while backfilling, so a huge log never holds the write lock for long. */
 const BACKFILL_BATCH = 500;
 
@@ -371,8 +378,11 @@ export class SessionStore {
       }
       // updated_at means "last activity", and Link lists sessions by it. An
       // access event records that someone ELSE looked at this session, which
-      // is not this session doing anything (decision record 0012).
-      if (kind !== "access") {
+      // is not this session doing anything (decision record 0012). A handoff
+      // or summary describes activity rather than being some: counting it
+      // would make every idle session look freshly active ten minutes after
+      // its last turn, and reorder `monad ls` by when monad wrote about it.
+      if (!PASSIVE_KINDS.has(kind)) {
         this.touch(sessionId);
       }
       const appended: EventRecord = { seq: row.seq, sessionId, ts, kind, payload: payload ?? null };
@@ -728,6 +738,43 @@ export class SessionStore {
       )
       .get({ sessionId, kind });
     return row ? rowToEvent(row) : undefined;
+  }
+
+  /** A session's newest event of any of these kinds, if it has one. */
+  lastEventOfKinds(sessionId: SessionId, kinds: EventKind[]): EventRecord | undefined {
+    if (kinds.length === 0) {
+      return undefined;
+    }
+    const params: Record<string, string> = { sessionId };
+    const placeholders = kinds.map((kind, index) => {
+      params[`kind${index}`] = kind;
+      return `$kind${index}`;
+    });
+    const row = this.db
+      .query<EventRow, Record<string, string>>(
+        `SELECT seq, session_id, ts, kind, payload FROM events
+         WHERE session_id = $sessionId AND kind IN (${placeholders.join(", ")})
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(params);
+    return row ? rowToEvent(row) : undefined;
+  }
+
+  /**
+   * A session's newest events of one kind, at most `limit`, returned oldest
+   * first. Handoffs use it for the last few asks and errors without
+   * replaying the whole log.
+   */
+  lastEventsOfKind(sessionId: SessionId, kind: EventKind, limit: number): EventRecord[] {
+    return this.db
+      .query<EventRow, { sessionId: string; kind: string; limit: number }>(
+        `SELECT seq, session_id, ts, kind, payload FROM events
+         WHERE session_id = $sessionId AND kind = $kind
+         ORDER BY seq DESC LIMIT $limit`,
+      )
+      .all({ sessionId, kind, limit: Math.max(0, Math.trunc(limit)) })
+      .map(rowToEvent)
+      .reverse();
   }
 
   /** Checkpoints the WAL and closes the database. */

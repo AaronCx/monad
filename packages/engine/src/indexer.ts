@@ -310,6 +310,10 @@ function redactedRow(row: AgentRowText, after = ""): string {
  *   only when either is present. Tool output is never indexed.
  * - error: closes the open agent row, then one `error` row of its message.
  * - turn_ended, closed: close the open agent row.
+ * - handoff, summary (Link phase 3): one row of the handoff's or summary's
+ *   text. Neither touches the open agent row: a handoff is written between
+ *   turns (or just before closed), and a summary is appended to the target
+ *   by another session, possibly mid-turn.
  *
  * Every text written goes through the redactor first, so the index never
  * holds a token the secrets patterns know, a split agent row included.
@@ -390,6 +394,21 @@ export function planIndex(event: EventRecord, context: IndexContext): IndexPlan 
     case "closed": {
       if (context.open) {
         ops.push({ type: "close" });
+      }
+      return plan;
+    }
+    case "handoff":
+    case "summary": {
+      const text = asRecord(event.payload)?.text;
+      if (typeof text === "string" && text.trim().length > 0) {
+        ops.push({
+          type: "insert",
+          kind: event.kind,
+          text: redacted(text.trim()),
+          firstSeq: seq,
+          lastSeq: seq,
+          ts,
+        });
       }
       return plan;
     }

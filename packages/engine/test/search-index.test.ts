@@ -747,6 +747,41 @@ describe("backfill", () => {
   });
 });
 
+describe("handoffs and summaries (Link phase 3)", () => {
+  test("both are indexed under their own kinds, redacted, and leave an open agent row open", () => {
+    const dir = tempDir("monad-handoff-index-");
+    const store = openStore(join(dir, "monad.db"));
+    const record = store.create(makeRecord());
+    const first = store.append(record.id, "update", chunk(record.id, "streaming the walrus "));
+    // A summary can land mid-turn (another session asked for it); it must
+    // not split the turn's agent text into two rows.
+    const summary = store.append(record.id, "summary", {
+      text: `Summary: the walrus migration is half done; token ${TOKEN}`,
+      summarizerSessionId: Bun.randomUUIDv7(),
+      fromSeq: first.seq,
+      toSeq: first.seq,
+    });
+    const last = store.append(record.id, "update", chunk(record.id, "answer continues"));
+    store.append(record.id, "turn_ended", { stopReason: "end_turn" });
+    const handoff = store.append(record.id, "handoff", {
+      reason: "idle",
+      text: "idle: asked about the walrus migration\n\n## Last asks\n- walrus",
+    });
+
+    const agent = store.search("walrus", { kinds: ["agent"] });
+    expect(agent).toHaveLength(1);
+    expect(agent[0]).toMatchObject({ firstSeq: first.seq, lastSeq: last.seq });
+    const handoffs = store.search("walrus", { kinds: ["handoff"] });
+    expect(handoffs).toHaveLength(1);
+    expect(handoffs[0]).toMatchObject({ kind: "handoff", firstSeq: handoff.seq, lastSeq: handoff.seq });
+    const summaries = store.search("walrus migration", { kinds: ["summary"] });
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({ kind: "summary", firstSeq: summary.seq });
+    expect(summaries[0]!.snippet).not.toContain(TOKEN);
+    expect(store.search(TOKEN)).toEqual([]);
+  });
+});
+
 describe("session ordering", () => {
   test("list orders by created_at then id, so imported v4 ids sort by time", () => {
     const dir = tempDir("monad-order-");

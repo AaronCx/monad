@@ -126,6 +126,15 @@ export type SessionChangeListener = (id: SessionId) => void;
  */
 export type PeerTurnGate = (record: SessionRecord) => boolean;
 
+/**
+ * Runs when a session is about to close, before anything is torn down: the
+ * backend is still up, held permissions are still held, and `closed` has not
+ * been logged. Link installs one to write the session's closing handoff, so
+ * the handoff is the last thing in the log before `closed` and still sees
+ * what the session was waiting on. A hook that throws never stops the close.
+ */
+export type BeforeCloseHook = (id: SessionId) => Promise<void>;
+
 interface LiveSession {
   id: SessionId;
   backend?: SessionBackend;
@@ -222,6 +231,7 @@ export class SessionManager {
   /** Sessions whose queued message the peer turn gate held back; retried as slots free. */
   private readonly gatedQueues = new Set<SessionId>();
   private peerTurnGate?: PeerTurnGate;
+  private beforeClose?: BeforeCloseHook;
 
   constructor(options: SessionManagerOptions) {
     this.store = options.store;
@@ -504,6 +514,20 @@ export class SessionManager {
   }
 
   /**
+   * The permission requests the session is holding for a human, oldest
+   * first. Read-only: Link's handoff lists them, and nothing reached through
+   * this can answer one (only a client's requestPermission answer does).
+   */
+  pendingPermissions(id: SessionId): RequestPermissionRequest[] {
+    return this.policy.pendingRequests(id);
+  }
+
+  /** Installs the hook close() awaits before tearing a session down (Link's closing handoff). */
+  setBeforeClose(hook: BeforeCloseHook | undefined): void {
+    this.beforeClose = hook;
+  }
+
+  /**
    * Installs the gate that decides whether a peer message may start a turn
    * on an otherwise ready session (Link's spawned-session concurrency cap).
    * Direct prompts (a human attached with `monad attach`) are not gated.
@@ -616,8 +640,21 @@ export class SessionManager {
     this.schedulePeerDrain(id);
   }
 
-  /** Closes a session for good: backend down, closed event, status closed. */
+  /**
+   * Closes a session for good: backend down, closed event, status closed.
+   * The before-close hook (Link's closing handoff) runs first, while the
+   * session is still whole, and only for a session that is not already
+   * closed, so closing twice does not write two handoffs.
+   */
   async close(id: SessionId): Promise<void> {
+    const record = this.store.get(id);
+    if (this.beforeClose && record && record.status !== "closed" && record.status !== "imported") {
+      try {
+        await this.beforeClose(id);
+      } catch {
+        // A failed handoff must never keep a session open.
+      }
+    }
     const session = this.live.get(id);
     this.policy.cancel(id);
     if (session?.backend) {

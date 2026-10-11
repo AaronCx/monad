@@ -188,6 +188,36 @@ describe("SessionStore Link bookkeeping", () => {
     expect(store.get(record.id)?.updatedAt).not.toBe("2026-01-01T00:00:00.000Z");
   });
 
+  test("handoff and summary events are logged but do not move updatedAt either", () => {
+    // Link phase 3: an idle session's handoff is written ten minutes after
+    // its last turn. If that counted as activity, every handoff would make
+    // the session look freshly active and reorder `monad ls` by when monad
+    // wrote about it.
+    const store = openStore();
+    const record = store.create(makeRecord({ updatedAt: "2026-01-01T00:00:00.000Z" }));
+    store.append(record.id, "handoff", { reason: "idle", text: "idle: nothing new" });
+    store.append(record.id, "summary", { text: "a summary" });
+    expect(store.get(record.id)?.updatedAt).toBe("2026-01-01T00:00:00.000Z");
+    expect(store.replay(record.id).map((e) => e.kind)).toEqual(["handoff", "summary"]);
+  });
+
+  test("lastEventOfKinds and lastEventsOfKind read the newest events without a full replay", () => {
+    const store = openStore();
+    const record = store.create(makeRecord());
+    const asks = ["one", "two", "three", "four"].map((text) =>
+      store.append(record.id, "prompt", { prompt: [{ type: "text", text }] }),
+    );
+    const ended = store.append(record.id, "turn_ended", { stopReason: "end_turn" });
+    store.append(record.id, "access", { op: "read", by: "human", role: "target" });
+    expect(store.lastEventOfKinds(record.id, ["prompt", "turn_ended", "error"])).toEqual(ended);
+    expect(store.lastEventOfKinds(record.id, ["error"])).toBeUndefined();
+    expect(store.lastEventOfKinds(record.id, [])).toBeUndefined();
+    expect(store.lastEventsOfKind(record.id, "prompt", 3).map((e) => e.seq)).toEqual(
+      asks.slice(1).map((e) => e.seq),
+    );
+    expect(store.lastEventsOfKind(record.id, "error", 3)).toEqual([]);
+  });
+
   test("childrenOf returns the sessions a parent spawned, oldest first", () => {
     const store = openStore();
     const parent = store.create(makeRecord({ spawnDepth: 0 }));
