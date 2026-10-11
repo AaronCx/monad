@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commandPaths, expandHome, RepoResolver, toolCallPaths } from "../src/repos.ts";
@@ -154,6 +154,36 @@ describe("RepoResolver", () => {
     git(proj, "init", "-q", "-b", "main");
     expect(resolver.resolve(join(proj, "src", "index.ts"))).toBe(proj);
     expect(resolver.resolve(join(proj, "package.json"))).toBe(proj);
+  });
+
+  test("a repo reached through a symlink resolves to its canonical root", () => {
+    // Fixtures are realpath'd everywhere else, so this is the one test of
+    // the canonicalization: on macOS /tmp and /var are symlinks, and agents
+    // spell the same file both ways.
+    const real = tempDir("monad-repos-");
+    const repo = makeRepo(real, "alpha");
+    const links = tempDir("monad-links-");
+    const link = join(links, "via-link");
+    symlinkSync(real, link);
+    const resolver = new RepoResolver();
+    expect(resolver.resolve(join(link, "alpha", "src", "a.ts"))).toBe(repo);
+    expect(resolver.resolve(join(link, "alpha"))).toBe(repo);
+    // A symlink that IS the repo directory resolves the same way.
+    const direct = join(links, "alpha-link");
+    symlinkSync(repo, direct);
+    expect(new RepoResolver().resolve(join(direct, "src", "a.ts"))).toBe(repo);
+  });
+
+  test("a linked worktree reached through a symlink folds into the canonical main root", () => {
+    const real = tempDir("monad-repos-");
+    const main = makeRepo(real, "main-repo");
+    const worktrees = tempDir("monad-worktrees-");
+    const worktree = join(worktrees, "review-3");
+    git(main, "worktree", "add", "-q", "--detach", worktree, "HEAD");
+    const links = tempDir("monad-links-");
+    const link = join(links, "wt");
+    symlinkSync(worktrees, link);
+    expect(new RepoResolver().resolve(join(link, "review-3", "src", "a.ts"))).toBe(main);
   });
 
   test("the cache is bounded", () => {

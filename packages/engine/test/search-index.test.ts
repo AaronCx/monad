@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EventKind, SessionRecord } from "@aaroncx/protocol";
@@ -465,6 +465,27 @@ describe("repos touched", () => {
     const other = store.create(makeRecord());
     store.append(other.id, "update", tool(other.id, { title: "Read", locations: [{ path: join(proj, "package.json") }] }));
     expect(store.sessionsForRepo(proj).sort()).toEqual([record.id, other.id].sort());
+  });
+
+  test("two sessions that spell one repo two ways are tagged with the same root", () => {
+    const parent = tempDir("monad-repos-");
+    const repo = makeRepo(parent, "alpha");
+    const links = tempDir("monad-links-");
+    const link = join(links, "parent-link");
+    symlinkSync(parent, link);
+    const store = openStore(join(parent, "monad.db"));
+    const direct = store.create(makeRecord());
+    const viaLink = store.create(makeRecord());
+    store.append(direct.id, "update", tool(direct.id, { title: "Edit", locations: [{ path: join(repo, "src", "main.ts") }] }));
+    store.append(
+      viaLink.id,
+      "update",
+      tool(viaLink.id, { title: "Edit", locations: [{ path: join(link, "alpha", "src", "main.ts") }] }),
+    );
+    expect(store.reposFor(viaLink.id).map((r) => r.repoRoot)).toEqual([repo]);
+    expect(store.sessionsForRepo(repo).sort()).toEqual([direct.id, viaLink.id].sort());
+    store.append(viaLink.id, "prompt", prompt(viaLink.id, "symlinked scroll"));
+    expect(store.search("symlinked", { repo }).map((h) => h.sessionId)).toEqual([viaLink.id]);
   });
 
   test("sessionsForRepo lists the most recently touching session first", () => {
