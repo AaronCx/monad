@@ -1,10 +1,10 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RequestPermissionRequest } from "@agentclientprotocol/sdk";
-import type { HandoffPayload, SessionId } from "@aaroncx/protocol";
+import type { EventKind, HandoffPayload, SessionId } from "@aaroncx/protocol";
 import { HandoffScheduler, handoffIdleMs } from "../src/handoff.ts";
 import { type Harness, makeHarness, PLANTED_TOKEN, userPrompt, waitFor } from "./helpers.ts";
 
@@ -283,21 +283,61 @@ describe("catch-up at daemon start", () => {
     const stale = await h.session();
     const recent = await h.session();
     const done = await h.session();
-    // The previous daemon: turns ran, nobody scheduled anything.
-    await turn(h, stale.id, "old work");
-    await turn(h, done.id, "already handed off");
-    await h.link.writeHandoff(done.id, "idle");
-    await Bun.sleep(300);
-    await turn(h, recent.id, "fresh work");
+    const minute = 60_000;
+    const base = Date.parse("2026-10-11T08:00:00.000Z");
+    const ended = (id: SessionId, text: string): Array<[EventKind, unknown]> => [
+      ["prompt", userPrompt(id, text)],
+      ["turn_ended", { stopReason: "end_turn" }],
+    ];
+    // The previous daemon, on a pinned clock: turns ended at known times and
+    // nobody scheduled anything. stale ended 25 minutes before the new
+    // daemon starts, recent 5, and done was handed off already.
+    try {
+      setSystemTime(new Date(base));
+      h.history(stale.id, ended(stale.id, "old work"));
+      h.history(done.id, ended(done.id, "already handed off"));
+      setSystemTime(new Date(base + minute));
+      await h.link.writeHandoff(done.id, "idle");
+      setSystemTime(new Date(base + 20 * minute));
+      h.history(recent.id, ended(recent.id, "fresh work"));
+    } finally {
+      setSystemTime();
+    }
 
-    const s = scheduler(h, 250);
-    s.start();
+    // The new daemon starts at base + 25 minutes with the real ten-minute
+    // window: stale is 15 minutes past it, recent has 5 minutes left.
+    const first = new HandoffScheduler({
+      manager: h.manager,
+      store: h.store,
+      write: (id, reason, stillValid) => h.link.writeHandoff(id, reason, stillValid),
+      idleMs: 10 * minute,
+      now: () => base + 25 * minute,
+    });
+    schedulers.push(first);
+    first.start();
+    // "At once": far inside the window, which never elapses in this test.
     await waitFor(() => handoffs(h, stale.id).length === 1, "the stale session's catch-up handoff", 1_000);
+    expect(handoffs(h, stale.id)[0]?.reason).toBe("idle");
     expect(handoffs(h, recent.id)).toEqual([]);
-    expect(s.armed()).toContain(recent.id);
+    expect(first.armed()).toEqual([recent.id]);
     expect(handoffs(h, done.id)).toHaveLength(1);
-    await waitFor(() => handoffs(h, recent.id).length === 1, "the recent session's handoff, later", 2_000);
+    first.stop();
+
+    // A daemon starting after recent's window passed hands it off at once,
+    // and still leaves stale and done alone.
+    const second = new HandoffScheduler({
+      manager: h.manager,
+      store: h.store,
+      write: (id, reason, stillValid) => h.link.writeHandoff(id, reason, stillValid),
+      idleMs: 10 * minute,
+      now: () => base + 31 * minute,
+    });
+    schedulers.push(second);
+    second.start();
+    await waitFor(() => handoffs(h, recent.id).length === 1, "the recent session's handoff", 1_000);
+    expect(handoffs(h, stale.id)).toHaveLength(1);
     expect(handoffs(h, done.id)).toHaveLength(1);
+    expect(second.armed()).toEqual([]);
   });
 });
 
