@@ -64,8 +64,9 @@ exfiltration path if the boundary were left to prompts. It is the daemon's: only
 session is handed the monad-sessions mount (an untrusted one has no entry at all), review and
 fix sessions get read-only tools, everything returned is redacted and fenced as quoted history,
 a peer message is only ever a prompt (it can never answer a permission or change a mode), and
-every cross-session access is an event on both sessions' logs. Decision record 0012 has the
-trust table and the peer rules.
+every cross-session access is an event on both sessions' logs. The on-demand summary is written
+by a separate session that is untrusted (so it has no Link mount) and read-only. Decision record
+0012 has the trust table and the peer rules.
 
 ## Persistence
 
@@ -84,6 +85,13 @@ from the log: `index_state` records how far each session is indexed, and a datab
 behind (or older than the index generation in `PRAGMA user_version`) is caught up at open
 through the same code path.
 
+Sessions also leave a `handoff` event behind (Link phase 3): a deterministic, model-free account
+of where the session stands (last asks, files and repos touched with their git state, held
+permissions, errors, spawned children), written ten minutes into every idle stretch, just before
+close, and on request; the daemon catches up missed ones at start. A `summary` event, written by
+a model, exists only when someone asks for one. Repo notes are JSONL files under
+`~/.monad/notes`, one per repository, never in a worktree. Decision record 0012 has the rules.
+
 ## Layout
 
 - `apps/daemon` (`@aaroncx/monadd`, binary `monadd`): owns sessions, the event log, the
@@ -97,8 +105,9 @@ through the same code path.
 - `packages/backends` (`@aaroncx/backends`): ACP client adapter for claude-agent-acp and
   codex-acp, and the one builder of the mcpServers array each vendor session is handed.
 - `packages/link` (`@aaroncx/link`): monad Link. LinkService (list, search, read, message, spawn,
-  wait), the normalized transcript, quoting and redaction of results, the link.json loader, and
-  the monad-sessions MCP server (decision record 0012).
+  wait, summarize, repo notes, handoffs), the handoff builder and its idle/close scheduler, the
+  notes store, the normalized transcript, quoting and redaction of results, the link.json loader,
+  and the monad-sessions MCP server (decision record 0012).
 - `packages/checks` (`@aaroncx/checks`): placeholder in M1. The LastGate check engine port
   lands here in M2.
 - `packages/github` (`@aaroncx/github`): placeholder in M1. The LastGate GitHub App port lands
@@ -121,24 +130,30 @@ every request:
   `HMAC-SHA256(daemonToken, "mcp-mount:" + sessionId)`, because the credential is handed to the
   vendor agent and must not be monad's master one (decision record 0009).
 - `/mcp-sessions/<sessionId>` (Link): that session's monad-sessions tools (sessions_list,
-  sessions_search, sessions_read, sessions_message, sessions_spawn, sessions_wait) over
-  Streamable HTTP, offered per the trust table in decision record 0012. Its own derived token,
+  sessions_search, sessions_read, sessions_message, sessions_spawn, sessions_wait,
+  sessions_summarize, notes_read, notes_append) over Streamable HTTP, offered per the trust table
+  in decision record 0012. Its own derived token,
   `HMAC-SHA256(daemonToken, "sessions-mount:" + sessionId)`: the daemon token, the checks mount
   token and other sessions' tokens are all 401. A session Link may not reach (untrusted, Link
   disabled, out of link.json's scope) is 403 even with the right token; a closed or imported one
   is 404.
 - `GET /v1/sessions?repo=&status=&since=&limit=&imported=` (Link): with any of these filters,
   the sessions that match, most recently active first, plus the repos each touched; with none,
-  every session oldest first as before.
+  every session oldest first as before. Either way `handoffs` maps each session to its last
+  handoff's first line.
 - `GET /v1/search?q=&repo=&since=&limit=` (Link): full-text hits with session id, seq range and
   a redacted snippet.
 - `GET /v1/sessions/<id>/transcript?from=&limit=` (Link): one page of the normalized, redacted
   transcript and where the next page starts.
 - `POST /v1/sessions/<id>/messages` (Link): `{ "text": "..." }` sends a peer message from the
   human; it starts the session's next turn, or is queued for its next turn boundary.
+- `POST /v1/sessions/<id>/handoff` (Link): `{}` writes a deterministic handoff now and returns
+  it; `{ "summarize": true }` also runs the model-written summary and waits for it.
+- `GET /v1/notes?repo=P`, `POST /v1/notes { "repo": P, "text": "..." }` (Link): a repository's
+  notes, oldest first, or one more, written as the human.
 
-  The four Link routes run the same LinkService the MCP server does, with the human as the
-  caller, and every read they make is an access event on the session read.
+  The Link routes run the same LinkService the MCP server does, with the human as the caller,
+  and every read they make is an access event on the session read.
 
 Attach semantics: `session/load` replays the log to the calling connection in seq order
 (`update` events verbatim, `prompt` events as `user_message_chunk` updates), then the
@@ -165,7 +180,8 @@ clients, so non-monad editors are unaffected.
 Environment overrides: `MONAD_HOME` moves the state directory, `MONAD_BACKEND_CMD` swaps the
 vendor agent command (integration tests run a fake ACP agent), `MONAD_CODEX_CMD` names the
 codex-acp command line for Link spawns that ask for it, `MONAD_DAEMON_BIN` tells the CLI what
-to spawn for `monad daemon start`. `~/.monad/link.json` scopes Link (enabled, a repo allowlist,
+to spawn for `monad daemon start`, `MONAD_HANDOFF_IDLE_MS` replaces the ten-minute idle window
+before a session's handoff (tests). `~/.monad/link.json` scopes Link (enabled, a repo allowlist,
 limits); absent means every trusted session on this daemon.
 
 This document grows as code lands. Decision records live in `docs/decisions/`.

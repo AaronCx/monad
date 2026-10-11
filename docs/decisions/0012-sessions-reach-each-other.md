@@ -1,7 +1,7 @@
 # 0012: Sessions reach each other (monad Link)
 
 Date: 2026-10-11
-Status: accepted (phase 2 of Link; phases 3 and 4 extend it)
+Status: accepted (phases 2 and 3 of Link; phase 4 extends it)
 
 ## Context
 
@@ -14,7 +14,9 @@ monad already holds the fix in its event log: every session it runs is an append
 SQLite. Link phase 1 indexed that log (full text, repos touched, titles). Phase 2, recorded here,
 lets sessions use it: a per-session MCP server through which an agent lists, searches and reads
 other sessions, messages them, spawns children and waits on them, plus the same reach for the
-human at the CLI.
+human at the CLI. Phase 3, also recorded here, makes sessions leave something behind for whoever
+picks the work up: a deterministic handoff on idle and close, a model-written summary on demand,
+and repo notes.
 
 That turns every session into a reader of every other session. Prompt injection becomes an
 exfiltration path unless the daemon, not the prompt, enforces the boundary. Everything below is
@@ -23,7 +25,7 @@ about where that boundary sits.
 ## One service, two front doors
 
 `packages/link` holds `LinkService`, the only implementation of list, search, read, message,
-spawn and wait. Its caller is either a monad session (over that session's MCP mount) or the human
+spawn, wait, summarize, the repo notes and manual handoffs. Its caller is either a monad session (over that session's MCP mount) or the human
 (over the control API, which already authenticated them with the daemon token). The MCP server and
 the `/v1/*` routes are thin adapters over it, so a rule enforced in the service holds for both and
 cannot drift between them.
@@ -62,9 +64,13 @@ the sessions route and the sessions token on the checks route.
 | session | mount | tools offered |
 |---|---|---|
 | untrusted (any mode) | absent | none |
-| trusted review or fix | yes | sessions_list, sessions_search, sessions_read |
-| trusted interactive | yes | all six: list, search, read, message, spawn, wait |
+| trusted review or fix | yes | sessions_list, sessions_search, sessions_read, notes_read |
+| trusted interactive | yes | all nine: list, search, read, message, spawn, wait, summarize, notes_read, notes_append |
 | imported (phase 4) | never runs | n/a |
+
+The read-only set is reading: history and repo notes. Everything that reaches another session's
+turn (message, spawn, wait), spends vendor tokens (summarize) or writes anything (notes_append)
+is interactive only.
 
 It is enforced at five places, each independently, each from the record as it is now:
 
@@ -83,15 +89,14 @@ It is enforced at five places, each independently, each from the record as it is
    plane (MCP call kind, the vendor's own tool name with the `mcp__monad-sessions__` prefix, a
    suffix the server actually serves), plus one more condition: the session is trusted, because
    only a trusted session is ever handed the mount. Interactive sessions get every Link tool
-   without a keypress (`policy:interactive`); review and fix get the read-only three and a message
-   or spawn is rejected with the reason. In an untrusted session a call by that name is not monad's
+   without a keypress (`policy:interactive`); review and fix get the read-only four (list,
+   search, read, notes_read) and anything else is rejected with the reason. In an untrusted session a call by that name is not monad's
    (it could only be a same-named server from the user's own vendor config, record 0006 fact 8) and
    falls through to the mode's policy like any unknown tool.
 
-The tool names live in `packages/protocol` (`LINK_TOOL_NAMES`), shared by the server and the
-policy, so the policy never auto-allows a name the server does not serve. The phase 3 names
-(`sessions_summarize`, `notes_read`, `notes_append`) are reserved there and neither served nor
-recognized until their phase lands.
+The tool names live in `packages/protocol` (`LINK_TOOL_NAMES`, `LINK_READ_ONLY_TOOL_NAMES`),
+shared by the server and the policy, so the policy never auto-allows a name the server does not
+serve. Phase 3's three tools joined the list in the same change that started serving them.
 
 ## What comes back is data
 
@@ -208,17 +213,110 @@ and nothing queued), closed, or waiting_for_permission, driven by the SessionMan
 listener (status flips and turn boundaries), never by polling. A session that closes ends every
 wait. The timeout is capped at ten minutes.
 
+## Handoffs: deterministic, free, always on
+
+A handoff answers "where does this session stand?" for whoever picks the work up next. It is a
+`handoff` event on the session's own log (`HandoffPayload`), built with no model from what monad
+already holds: the last three user asks, the files the session's tool calls touched (most recent
+40), every repository it touched with that checkout's branch, HEAD and `git status --porcelain`
+(the session's own cwd when it is a checkout of that repository, so a worktree reports its own
+branch), the permissions it is holding for a human, its last three errors, and the children it
+spawned with their status. Its `text` is markdown whose first line is a one-line summary
+(`idle: last asked "..."; repos monad (feat/x, 3 changed); 1 pending permission`), and that line
+is what `sessions_list`, `GET /v1/sessions` and `monad ls` show as the session's last handoff.
+Every string in it is redacted: it quotes the session's asks and errors, and other sessions read
+it. It is indexed for search (kind `handoff`).
+
+When one is written:
+
+- **Idle.** An idle stretch is everything after a session's last prompt. Ten minutes after the
+  stretch's last turn boundary (`MONAD_HANDOFF_IDLE_MS` overrides, for tests), if the session is
+  still idle with no turn in flight, one handoff is written, and never a second for the same
+  stretch: whether the stretch has one is read from the log (a handoff after its prompt), not
+  kept in memory. A new prompt ends the stretch. `HandoffScheduler` drives this from the
+  SessionManager's change listener, the same one `sessions_wait` uses. A session holding a
+  permission is not idle, so it is handed off when it closes or when someone asks.
+- **Close.** The manager runs a before-close hook ahead of teardown, and the scheduler writes the
+  closing handoff there, so it still sees what the session was holding; only close's own teardown
+  (held requests resolved as cancelled, then `closed`) follows it. A hook that fails never keeps
+  a session open.
+- **Catch-up.** At daemon start, after interrupted turns are recovered, every idle session is
+  considered once: one whose window passed under the previous daemon gets its handoff at once,
+  one that went idle recently gets the rest of its window. Because "already handed off" is in the
+  log, a restart neither repeats nor misses one.
+- **By hand.** `monad handoff <id>` (`POST /v1/sessions/<id>/handoff`) writes one now (reason
+  `manual`) and prints it.
+
+A session nobody prompted gets no automatic handoff. Handoffs, summaries and access events do not
+move a session's `updated_at` (they describe it, they are not it doing anything), and appending
+one is not a status change or turn boundary, so a handoff can never schedule another and an idle
+session does not look freshly active ten minutes after its last turn.
+
+Git runs read-only, three commands per repository, each with a timeout, with
+`core.fsmonitor=false` and `GIT_OPTIONAL_LOCKS=0`. A session's tool calls can reach any checkout
+on disk, including a hostile clone, and a repository's own config can name an fsmonitor hook that
+`git status` would run; that is the one way a status or rev-parse executes repository-chosen code.
+A git failure (a deleted repository, an unborn HEAD) is recorded on that repository's entry and
+never thrown.
+
+## Summaries: model-written, on demand only
+
+`monad handoff <id> --summarize` and the `sessions_summarize` tool ask for a model-written
+summary. It spends Aaron's vendor tokens, so nothing automatic reaches it: not the idle timer,
+not close, not catch-up (a test asserts no summarizer session is ever created by them).
+
+The summary is written by a separate session that can do nothing but read the prompt and answer:
+
+- mode **review** (the read-only policy and vendor plan mode) and trust **untrusted**, so it has
+  no monad-sessions mount at all (its vendor's `mcpServers` carries only the checks entry every
+  session gets, measured in `apps/daemon/test/handoff.test.ts`) and cannot reach any session,
+  whatever the transcript tells it;
+- in an empty directory, `$MONAD_HOME/summaries/<target id>`, emptied before each run;
+- one prompt: fixed instructions, then the target's normalized transcript (access events left
+  out), redacted and fenced by `quoteHistory` like every other cross-session text, keeping whole
+  entries from the end up to 150 KiB, with a line saying what was left out.
+
+Its final agent text (the last run of text after any tool call) is redacted and appended to the
+TARGET's log as a `summary` event (`SummaryPayload`: text, summarizer id, the seq range it was
+shown), indexed for search (kind `summary`), and the summarizer session is closed. One summary
+per target runs at a time, a session caller's summaries share the message and spawn rate bucket,
+and a turn that runs past ten minutes is cancelled. Summarizer sessions are recognized by their
+directory, so they never get handoffs of their own, across restarts too.
+
+## Repo notes: memory that only a person or an explicit call writes
+
+`notes_read(repo)` and `notes_append(repo, text)` (and `monad notes <repo> [--append text]`,
+`GET`/`POST /v1/notes`) keep notes per repository: conventions, traps, decisions someone chose to
+record. monad never infers a note, summarizes into one, or writes one in the background; memory
+that writes itself is memory nobody can audit.
+
+- **Where.** `$MONAD_HOME/notes/<first 16 hex of sha256(repo root)>.jsonl`, one JSON object per
+  line, `{ ts, by, repo, text }`, the writer and time stamped by the daemon. 0600 files in a
+  0700 directory. Never in the repository or a worktree (record 0009): a worktree is
+  attacker-controlled content, and a note planted there would be read back by every later session
+  as if a human had written it.
+- **Which repo.** Any path inside it; it resolves to the repository root, and a linked worktree
+  folds into its main repository, so notes follow the repository, not one checkout. A path in no
+  git repository is refused, and a session is refused a repository outside link.json's scope (the
+  human is not scoped).
+- **Redacted both ways.** On write, so the file never holds a token; on read, so a line written
+  by hand or before a pattern existed cannot carry one into a session.
+- **Who.** notes_read is read-only and offered to trusted review and fix sessions; notes_append
+  is interactive only.
+
 ## Nothing reads a session silently
 
-Every list, search, read, message, spawn and wait appends an `access` event to the caller's log
-and to every target it touched (for search, each session that produced a returned hit, with the
+Every list, search, read, message, spawn, wait and summarize appends an `access` event to the
+caller's log and to every target it touched (for search, each session that produced a returned hit, with the
 query, redacted; for list, each session the listing returned, since a listing shows titles taken
 from first prompts). Refusals are recorded on the caller's log with the reason. The human at the
 CLI has no log of their own, so a human access is recorded on the targets with `by: "human"`,
 with one exception: a human list is not recorded anywhere. The unfiltered `GET /v1/sessions`
 (the M1 contract `monad attach` and `monad gc` use) has always returned every record to the
 human unlogged, so logging only the filtered form would record nothing real and put a line in
-every transcript per `monad ls`. Access
+every transcript per `monad ls`. A manual handoff is recorded on the
+target (`op: "handoff"`, by the human); notes_read and notes_append are recorded on the calling
+session's log with the repository, since a note belongs to a repository, not a session. Access
 events are not indexed and do not move a session's `updatedAt`: they record someone else looking,
 not the session doing anything. `monad show` displays them.
 
@@ -263,11 +361,18 @@ lifetime), and reading it buys that one session's Link reach and nothing else: n
   direction).
 - Rate buckets live in memory and reset on restart.
 - link.json is read at start; a change needs a daemon restart.
-- `sessions_wait` holds an MCP request open for up to ten minutes; a vendor MCP client with a
-  shorter request timeout will give up first.
+- `sessions_wait` and `sessions_summarize` hold an MCP request open for up to ten minutes; a
+  vendor MCP client with a shorter request timeout will give up first.
+- The summarizer runs in review mode, whose policy allows reads. A transcript that talks it into
+  reading a file elsewhere on disk can get that file's text into the summary; redaction removes
+  known secrets, and the summary is only ever readable by the sessions Link already lets read the
+  target, but the summarizer is not sandboxed from the filesystem.
+- A session waiting on a permission is not idle, so it gets no idle handoff however long it
+  waits; it gets one when it closes or when someone asks.
+- Repo notes are not in the full-text index; `notes_read` and `monad notes` are how they are read.
 
 ## Revisit when
 
-Phase 3 lands handoffs and notes (their tools join the trust table), phase 4 lands importers (the
-read-only section above is completed), codex-acp is installed and measured, or a vendor starts
+Phase 4 lands importers (the read-only section above is completed), notes need search or
+expiry, codex-acp is installed and measured, or a vendor starts
 passing MCP config some way other than argv.
