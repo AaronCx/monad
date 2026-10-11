@@ -62,6 +62,18 @@
         "zod": "^4",
       },
     },
+    "packages/link": {
+      "name": "@aaroncx/link",
+      "version": "0.0.0",
+      "dependencies": {
+        "@aaroncx/checks": "workspace:*",
+        "@aaroncx/engine": "workspace:*",
+        "@aaroncx/protocol": "workspace:*",
+        "@agentclientprotocol/sdk": "^1.4.0",
+        "@modelcontextprotocol/sdk": "^1.30.0",
+        "zod": "^4",
+      },
+    },
     "packages/protocol": {
       "name": "@aaroncx/protocol",
       "version": "0.0.0",
@@ -76,6 +88,8 @@
     "@aaroncx/checks": ["@aaroncx/checks@workspace:packages/checks"],
 
     "@aaroncx/engine": ["@aaroncx/engine@workspace:packages/engine"],
+
+    "@aaroncx/link": ["@aaroncx/link@workspace:packages/link"],
 
     "@aaroncx/monad": ["@aaroncx/monad@workspace:apps/cli"],
 

@@ -1,0 +1,20 @@
+{
+  "name": "@aaroncx/link",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aaroncx/checks": "workspace:*",
+    "@aaroncx/engine": "workspace:*",
+    "@aaroncx/protocol": "workspace:*",
+    "@agentclientprotocol/sdk": "^1.4.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4"
+  }
+}
