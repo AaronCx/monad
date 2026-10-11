@@ -358,6 +358,46 @@ describe("sessions_spawn", () => {
     expect(accessEvents(h.store, child.sessionId)[0]).toMatchObject({ op: "spawn", role: "target", by: parent.id });
   });
 
+  test("a message that reaches a child while its backend starts queues behind the parent's task", async () => {
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let gateChildren = false;
+    const h = harness({ backendStartup: () => (gateChildren ? started : undefined) });
+    const parent = await h.session();
+    gateChildren = true;
+    const spawning = h.link.spawn({ kind: "session", id: parent.id }, { cwd: h.dir, prompt: "CHILD TASK" });
+    // The child is listed (and reachable) while its vendor adapter starts.
+    const child = h.store.childrenOf(parent.id)[0];
+    expect(child).toBeDefined();
+    const childId = child?.id as string;
+    expect(h.store.get(childId)?.status).toBe("running");
+    expect(h.link.message({ kind: "human" }, childId, "human hello").delivery).toBe("queued");
+    release();
+    const result = await spawning;
+    expect(result.sessionId).toBe(childId);
+
+    const backend = h.backends.get(childId);
+    await waitFor(() => (backend?.prompts.length ?? 0) === 1, "the first turn");
+    expect(promptText(backend?.prompts[0])).toEndWith("\n\nCHILD TASK");
+    backend?.endTurn();
+    await waitFor(() => backend?.prompts.length === 2, "the queued human message");
+    expect(promptText(backend?.prompts[1])).toEndWith("\n\nhuman hello");
+    expect(h.store.replayKinds(childId, ["error"])).toEqual([]);
+  });
+
+  test("a review child gets its first turn too", async () => {
+    const h = harness();
+    const parent = await h.session();
+    const child = await h.link.spawn(
+      { kind: "session", id: parent.id },
+      { cwd: h.dir, prompt: "read only please", mode: "review" },
+    );
+    await waitFor(() => (h.backends.get(child.sessionId)?.prompts.length ?? 0) === 1, "the review child's turn");
+    expect(promptText(h.backends.get(child.sessionId)?.prompts[0])).toEndWith("\n\nread only please");
+  });
+
   test("spawn depth 3 is refused", async () => {
     const h = harness({ config: { limits: { maxConcurrentSpawned: 10 } } });
     const root = await h.session();

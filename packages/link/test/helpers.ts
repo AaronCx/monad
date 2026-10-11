@@ -87,6 +87,8 @@ export interface HarnessOptions {
   config?: Partial<Omit<LinkConfig, "limits">> & { limits?: Partial<LinkLimits> };
   link?: Partial<LinkServiceOptions>;
   home?: string;
+  /** Awaited before a session's fake backend exists, as a real vendor adapter's startup is. */
+  backendStartup?: (record: SessionRecord) => Promise<void> | undefined;
 }
 
 export function makeHarness(options: HarnessOptions = {}): Harness {
@@ -96,7 +98,8 @@ export function makeHarness(options: HarnessOptions = {}): Harness {
   const backends = new Map<string, FakeBackend>();
   const manager = new SessionManager({
     store,
-    createBackend: (record, hooks) => {
+    createBackend: async (record, hooks) => {
+      await options.backendStartup?.(record);
       const backend = new FakeBackend(hooks);
       backends.set(record.id, backend);
       return backend;

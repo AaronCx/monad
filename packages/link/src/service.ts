@@ -531,8 +531,36 @@ export class LinkService {
         ...(parent ? { parentId: parent.id } : {}),
         spawnDepth,
       });
+      // The first prompt is a peer turn from the parent: same provenance
+      // header, and the spawn counts as a hop. It starts inside activate,
+      // right after session_created and BEFORE the vendor backend starts:
+      // createRecord, session_created and this run in one synchronous step,
+      // so nothing else can have reached the child yet, and prompt() takes
+      // the lock and logs the prompt before its first await. A message (or
+      // a human prompt) that reaches the child while its adapter is still
+      // starting then finds it running and queues behind the parent's task
+      // instead of taking the turn and dropping it.
       try {
-        await this.manager.activate(id);
+        await this.manager.activate(id, {
+          afterCreated: () => {
+            this.logTarget(caller, id, { op: "spawn", ...(parent ? { peer: parent.id } : {}) });
+            if (this.manager.isTurnInFlight(id)) {
+              // Unreachable by the reasoning above; refuse loudly, never drop.
+              throw new Error("the child already has a turn in flight");
+            }
+            const first: PeerMessagePayload = {
+              messageId: crypto.randomUUID(),
+              ...this.senderInfo(caller),
+              to: id,
+              text: redact(options.prompt),
+              hop,
+              delivery: "turn",
+            };
+            // A failed first turn is an error event on the child's log, and
+            // a backend that fails to start also fails activate below.
+            this.manager.prompt(id, peerPromptRequest(id, first)).catch(() => {});
+          },
+        });
       } catch (error) {
         await this.manager.close(id).catch(() => {});
         throw this.refuse(
@@ -544,20 +572,6 @@ export class LinkService {
         );
       }
       this.logCaller(caller, { op: "spawn", target: id, peer: id, backend, mode, worktree: options.worktree === true });
-      this.logTarget(caller, id, { op: "spawn", ...(parent ? { peer: parent.id } : {}) });
-      // The first prompt is a peer turn from the parent: same provenance
-      // header, and the spawn counts as a hop.
-      const first: PeerMessagePayload = {
-        messageId: crypto.randomUUID(),
-        ...this.senderInfo(caller),
-        to: id,
-        text: redact(options.prompt),
-        hop,
-        delivery: "turn",
-      };
-      // prompt() takes the lock and sets the child running before its first
-      // await, so a sessions_wait right after this returns sees it busy.
-      this.manager.prompt(id, peerPromptRequest(id, first)).catch(() => {});
       return {
         sessionId: id,
         cwd: childCwd,

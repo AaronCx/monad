@@ -312,8 +312,15 @@ export class SessionManager {
     return record;
   }
 
-  /** Appends session_created and starts the backend (spawn failures surface). */
-  async activate(id: SessionId): Promise<SessionRecord> {
+  /**
+   * Appends session_created and starts the backend (spawn failures surface).
+   * options.afterCreated runs synchronously right after session_created is
+   * logged and before the backend starts: Link's spawn starts the child's
+   * first turn there, so it holds the prompt lock before anyone else can
+   * reach the child, and a message that arrives while the vendor adapter is
+   * still starting queues behind it instead of racing it.
+   */
+  async activate(id: SessionId, options?: { afterCreated?: () => void }): Promise<SessionRecord> {
     const record = this.mustGet(id);
     if (record.mode === "fix") {
       // A session created directly in fix mode never passes through setMode,
@@ -321,6 +328,7 @@ export class SessionManager {
       await this.freezeExecAllowlist(id);
     }
     this.appendAndPublish(record.id, "session_created", this.mustGet(record.id));
+    options?.afterCreated?.();
     await this.ensureBackend(record.id);
     return this.mustGet(record.id);
   }
