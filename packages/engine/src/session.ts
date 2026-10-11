@@ -118,6 +118,14 @@ class PromptLock {
  */
 export type SessionChangeListener = (id: SessionId) => void;
 
+/**
+ * Decides whether a queued or incoming peer message may start a turn on an
+ * otherwise ready session now. Link installs one to hold spawned sessions to
+ * the daemon's concurrency cap (decision record 0012); a refused message
+ * stays queued and is retried whenever a session's turn ends or it closes.
+ */
+export type PeerTurnGate = (record: SessionRecord) => boolean;
+
 interface LiveSession {
   id: SessionId;
   backend?: SessionBackend;
@@ -211,6 +219,9 @@ export class SessionManager {
   private stopping = false;
   /** Sessions with a peer drain already scheduled, so a burst schedules one. */
   private readonly drainsScheduled = new Set<SessionId>();
+  /** Sessions whose queued message the peer turn gate held back; retried as slots free. */
+  private readonly gatedQueues = new Set<SessionId>();
+  private peerTurnGate?: PeerTurnGate;
 
   constructor(options: SessionManagerOptions) {
     this.store = options.store;
@@ -485,6 +496,15 @@ export class SessionManager {
   }
 
   /**
+   * Installs the gate that decides whether a peer message may start a turn
+   * on an otherwise ready session (Link's spawned-session concurrency cap).
+   * Direct prompts (a human attached with `monad attach`) are not gated.
+   */
+  setPeerTurnGate(gate: PeerTurnGate | undefined): void {
+    this.peerTurnGate = gate;
+  }
+
+  /**
    * Subscribes to session changes (status flips and turn boundaries). Link's
    * sessions_wait uses this instead of polling. Returns the unsubscribe.
    */
@@ -684,10 +704,21 @@ export class SessionManager {
     return edited;
   }
 
-  /** Persists a status and tells change listeners. */
+  /**
+   * Persists a status and tells change listeners. A session leaving running
+   * or waiting_for_permission may free a spawned-session slot, so messages
+   * the peer turn gate held back are retried.
+   */
   private setStatus(id: SessionId, status: SessionStatus): void {
     this.store.setStatus(id, status);
     this.notifyChange(id);
+    if ((status === "idle" || status === "closed") && this.gatedQueues.size > 0) {
+      for (const gated of this.gatedQueues) {
+        if (gated !== id) {
+          this.schedulePeerDrain(gated);
+        }
+      }
+    }
   }
 
   private notifyChange(id: SessionId): void {
@@ -703,13 +734,18 @@ export class SessionManager {
   /**
    * Whether a peer message may start a turn right now: the session is idle,
    * no turn holds its lock, no permission is held, nothing is queued ahead
-   * of it, and it is an interactive session. A session switched to review or
-   * fix after a message was queued keeps the message queued until it is
+   * of it, it is an interactive session, and the peer turn gate (Link's
+   * spawned-session cap) lets it run. A session switched to review or fix
+   * after a message was queued keeps the message queued until it is
    * interactive again (setMode then drains it): peers only ever reach
    * interactive sessions.
    */
   private readyForPeerTurn(record: SessionRecord): boolean {
-    return this.canTakePeerTurn(record) && this.queuedPeerMessages(record.id).length === 0;
+    return (
+      this.canTakePeerTurn(record) &&
+      this.queuedPeerMessages(record.id).length === 0 &&
+      this.gateAllows(record)
+    );
   }
 
   /** The session-side half of readiness: idle, interactive, unlocked, holding nothing. */
@@ -720,6 +756,17 @@ export class SessionManager {
       !this.isTurnInFlight(record.id) &&
       this.pendingPermissionCount(record.id) === 0
     );
+  }
+
+  private gateAllows(record: SessionRecord): boolean {
+    if (!this.peerTurnGate) {
+      return true;
+    }
+    try {
+      return this.peerTurnGate(record);
+    } catch {
+      return false; // A broken gate holds messages; it never lets one through.
+    }
   }
 
   /**
@@ -756,13 +803,24 @@ export class SessionManager {
     } catch {
       return; // The store is gone (daemon shutting down).
     }
-    if (!record || !this.canTakePeerTurn(record)) {
+    if (!record || record.status === "closed" || record.status === "imported") {
+      this.gatedQueues.delete(id);
+      return;
+    }
+    if (!this.canTakePeerTurn(record)) {
       return;
     }
     const next = this.queuedPeerMessages(id)[0];
-    if (next) {
-      this.startPeerTurn(id, next);
+    if (!next) {
+      this.gatedQueues.delete(id);
+      return;
     }
+    if (!this.gateAllows(record)) {
+      this.gatedQueues.add(id);
+      return;
+    }
+    this.gatedQueues.delete(id);
+    this.startPeerTurn(id, next);
   }
 
   private appendAndPublish(id: SessionId, kind: EventRecord["kind"], payload: unknown): EventRecord {

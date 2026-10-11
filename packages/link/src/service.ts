@@ -211,8 +211,8 @@ export class LinkService {
   private readonly rate: RateLimiter;
   /** Canonical roots of link.json's repo allowlist; undefined means everything. */
   private readonly scopeRoots?: Set<string>;
-  /** Spawns between their checks and their child's first turn. */
-  private spawning = 0;
+  /** Children of spawns between their checks and their first turn, by id. */
+  private readonly spawning = new Set<SessionId>();
 
   constructor(options: LinkServiceOptions) {
     this.manager = options.manager;
@@ -231,6 +231,11 @@ export class LinkService {
     if (options.config.repos !== null) {
       this.scopeRoots = new Set(options.config.repos.map((repo) => this.canonicalRepo(repo)));
     }
+    // The spawned-session cap holds for every turn a peer message starts,
+    // not only at spawn: a message to an idle child waits in its queue
+    // while N spawned sessions are already running, and the manager retries
+    // it as soon as one of them goes idle or closes.
+    this.manager.setPeerTurnGate((record) => this.spawnSlotFree(record));
   }
 
   // ---------------------------------------------------------------- trust
@@ -483,19 +488,13 @@ export class LinkService {
         `dropped: the spawn would be hop ${hop}, past the limit of ${this.config.limits.maxHops}`,
       );
     }
-    const running = this.store
-      .list()
-      .filter(
-        (record) =>
-          record.parentId !== undefined &&
-          (record.status === "running" || record.status === "waiting_for_permission"),
-      ).length;
-    if (running + this.spawning >= this.config.limits.maxConcurrentSpawned) {
+    const running = this.runningSpawned();
+    if (running >= this.config.limits.maxConcurrentSpawned) {
       throw this.refuse(
         caller,
         "spawn",
         "refused",
-        `${running + this.spawning} spawned sessions are already running; the limit is ${this.config.limits.maxConcurrentSpawned}`,
+        `${running} spawned sessions are already running; the limit is ${this.config.limits.maxConcurrentSpawned}`,
       );
     }
     const unavailable = this.backendUnavailable(backend);
@@ -507,9 +506,9 @@ export class LinkService {
     }
     this.takeRate(caller, "spawn");
 
-    this.spawning += 1;
+    const id = Bun.randomUUIDv7();
+    this.spawning.add(id);
     try {
-      const id = Bun.randomUUIDv7();
       let childCwd = cwd;
       if (options.worktree === true && this.createWorktree) {
         try {
@@ -569,7 +568,7 @@ export class LinkService {
         spawnDepth,
       };
     } finally {
-      this.spawning -= 1;
+      this.spawning.delete(id);
     }
   }
 
@@ -664,6 +663,43 @@ export class LinkService {
   }
 
   // ----------------------------------------------------------------- helpers
+
+  /**
+   * Spawned sessions running a turn or holding a permission right now, plus
+   * spawns still starting (their slot is reserved), optionally not counting
+   * one. The cap is daemon-wide: every spawned session counts, whoever
+   * spawned it. A child that is both starting and running counts once.
+   */
+  private runningSpawned(except?: SessionId): number {
+    const ids = new Set<SessionId>();
+    for (const record of this.store.list()) {
+      if (
+        record.parentId !== undefined &&
+        (record.status === "running" || record.status === "waiting_for_permission")
+      ) {
+        ids.add(record.id);
+      }
+    }
+    for (const id of this.spawning) {
+      ids.add(id);
+    }
+    if (except !== undefined) {
+      ids.delete(except);
+    }
+    return ids.size;
+  }
+
+  /**
+   * The manager's peer turn gate: a spawned session may start a peer turn
+   * only while fewer than maxConcurrentSpawned OTHER spawned sessions are
+   * running or starting.
+   */
+  private spawnSlotFree(record: SessionRecord): boolean {
+    if (record.parentId === undefined) {
+      return true;
+    }
+    return this.runningSpawned(record.id) < this.config.limits.maxConcurrentSpawned;
+  }
 
   private summarize(record: SessionRecord): LinkSessionSummary {
     return {

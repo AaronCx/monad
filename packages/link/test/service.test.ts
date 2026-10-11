@@ -385,6 +385,83 @@ describe("sessions_spawn", () => {
     expect((await h.link.spawn(caller, { cwd: h.dir, prompt: "c" })).sessionId).toBeString();
   });
 
+  test("parallel spawns cannot all slip under the cap while earlier ones are starting", async () => {
+    const h = harness({ config: { limits: { maxConcurrentSpawned: 2 } } });
+    const parent = await h.session();
+    const caller = { kind: "session" as const, id: parent.id };
+    const results = await Promise.allSettled([
+      h.link.spawn(caller, { cwd: h.dir, prompt: "a" }),
+      h.link.spawn(caller, { cwd: h.dir, prompt: "b" }),
+      h.link.spawn(caller, { cwd: h.dir, prompt: "c" }),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled", "rejected"]);
+    const rejected = results[2] as PromiseRejectedResult;
+    expect(rejected.reason).toBeInstanceOf(LinkError);
+    expect((rejected.reason as LinkError).message).toContain("already running");
+    expect(h.store.childrenOf(parent.id)).toHaveLength(2);
+  });
+
+  test("messages to idle children cannot run more spawned sessions than the cap", async () => {
+    let now = 1_000_000;
+    const h = harness({ link: { now: () => now }, config: { limits: { maxConcurrentSpawned: 2 } } });
+    const parent = await h.session();
+    const caller = { kind: "session" as const, id: parent.id };
+    // Spawn four children two at a time, letting each pair go idle.
+    const children: string[] = [];
+    for (const round of [0, 1]) {
+      for (const name of ["a", "b"]) {
+        const child = await h.link.spawn(caller, { cwd: h.dir, prompt: `${name}${round}` });
+        children.push(child.sessionId);
+      }
+      for (const id of children.slice(round * 2)) {
+        h.backends.get(id)?.endTurn();
+        await waitFor(() => h.store.get(id)?.status === "idle" && !h.manager.isTurnInFlight(id), `${id} idle`);
+      }
+      now += 60_000;
+    }
+    const runningSpawned = () =>
+      h.store.list().filter((r) => r.parentId !== undefined && r.status === "running").length;
+    expect(runningSpawned()).toBe(0);
+
+    // The parent messages all four, and the human sends one more: two run, the rest wait.
+    const deliveries = children.map((id) => h.link.message(caller, id, "go again").delivery);
+    deliveries.push(h.link.message({ kind: "human" }, children[0] as string, "and this").delivery);
+    expect(deliveries).toEqual(["turn", "turn", "queued", "queued", "queued"]);
+    await Bun.sleep(20);
+    expect(runningSpawned()).toBe(2);
+
+    // Each slot that frees lets exactly one waiting child run; never more than two at once.
+    const turnsOf = (id: string) => h.backends.get(id)?.prompts.length ?? 0;
+    let peak = runningSpawned();
+    for (let step = 0; step < 3; step += 1) {
+      const busy = children.find((id) => h.store.get(id)?.status === "running");
+      expect(busy).toBeDefined();
+      h.backends.get(busy as string)?.endTurn();
+      await Bun.sleep(20);
+      peak = Math.max(peak, runningSpawned());
+    }
+    expect(peak).toBe(2);
+    // Every message was delivered in the end, none dropped.
+    for (const id of children) {
+      expect(h.manager.queuedPeerMessages(id)).toEqual([]);
+    }
+    expect(turnsOf(children[0] as string)).toBe(3);
+  });
+
+  test("children a crashed daemon left running stop counting once recovered", async () => {
+    const h = harness({ config: { limits: { maxConcurrentSpawned: 1 } } });
+    const parent = await h.session();
+    const caller = { kind: "session" as const, id: parent.id };
+    const child = await h.link.spawn(caller, { cwd: h.dir, prompt: "a" });
+    h.backends.get(child.sessionId)?.endTurn();
+    await waitFor(() => !h.manager.isTurnInFlight(child.sessionId), "the child turn");
+    // As a SIGKILL mid-turn leaves it: the record says running, nothing runs.
+    h.store.setStatus(child.sessionId, "running");
+    await expectLinkError(h.link.spawn(caller, { cwd: h.dir, prompt: "b" }), "refused", "already running");
+    expect(h.manager.recoverInterruptedTurns()).toEqual([child.sessionId]);
+    expect((await h.link.spawn(caller, { cwd: h.dir, prompt: "b" })).sessionId).toBeString();
+  });
+
   test("codex-acp names what is missing when it is not installed", async () => {
     const h = harness({
       link: {
