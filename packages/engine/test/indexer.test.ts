@@ -189,6 +189,31 @@ describe("titles", () => {
       "use [REDACTED:github-personal-access-token] please",
     );
   });
+
+  test("a token straddling the 80-character cut is redacted before the cut, not after", () => {
+    // Every cut point through the token: whatever prefix the cut would have
+    // kept, no character of the token's body may reach the title.
+    for (let lead = 40; lead <= 80; lead += 1) {
+      const line = `${"x".repeat(lead - 1)} ${TOKEN} thanks`;
+      const title = planIndex(event("prompt", prompt(line)), { titled: false }).title ?? "";
+      expect(Array.from(title).length).toBeLessThanOrEqual(80);
+      for (let start = 4; start + 6 <= TOKEN.length; start += 1) {
+        expect(title).not.toContain(TOKEN.slice(start, start + 6));
+      }
+      expect(title).not.toContain("ghp_");
+    }
+  });
+
+  test("a cut inside a redaction placeholder drops the partial placeholder", () => {
+    const title = deriveTitle(prompt(`${"y".repeat(70)} ${TOKEN}`));
+    expect(title).toBe("y".repeat(70));
+  });
+
+  test("a secret spanning lines is redacted before the first line is taken", () => {
+    const key = ["-----BEGIN PRIVATE", " KEY-----"].join("");
+    const title = deriveTitle(prompt(`${key}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----\nmore`));
+    expect(title).toBe("[REDACTED:private-key]");
+  });
 });
 
 describe("toFtsQuery", () => {

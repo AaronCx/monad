@@ -95,23 +95,56 @@ export function promptTexts(payload: unknown): string[] {
  */
 const PROVENANCE_HEADER = /^\[message from (?:monad session |the human\b)/;
 
+/** The start of a redaction placeholder, as redactSecrets writes it. */
+const PLACEHOLDER_START = "[REDACTED:";
+
+/**
+ * Cuts a title to MAX_DERIVED_TITLE_LENGTH code points, nothing appended. A
+ * cut that lands inside a redaction placeholder drops the partial
+ * placeholder, so a title never ends in half of one.
+ */
+function cutTitle(line: string): string {
+  const points = Array.from(line);
+  if (points.length <= MAX_DERIVED_TITLE_LENGTH) {
+    return line;
+  }
+  const cut = points.slice(0, MAX_DERIVED_TITLE_LENGTH).join("");
+  // `cut` is a prefix of `line`, so an index into one is an index into both.
+  const open = cut.lastIndexOf("[");
+  if (open !== -1 && !cut.includes("]", open) && line.startsWith(PLACEHOLDER_START, open)) {
+    return cut.slice(0, open).trimEnd();
+  }
+  return cut;
+}
+
 /**
  * A session title from its first prompt: the first text block's first
  * non-empty line (after any provenance header), whitespace collapsed, cut to
  * 80 characters on a code point boundary with nothing appended. Undefined
  * when the prompt has no usable text, so the next prompt gets a turn.
+ *
+ * The whole first text block is redacted BEFORE the line is picked and cut.
+ * Cutting first would leave a token's prefix, which no longer matches its
+ * pattern (a ghp_ token needs all 36 characters) and so survives redaction;
+ * redacting the whole block also catches a secret that spans lines, such as
+ * a private key block or a quoted multi-line password. A title is shown to
+ * other sessions and on the phone, so it gets the same redaction as the
+ * index.
  */
 export function deriveTitle(payload: unknown): string | undefined {
   const first = promptTexts(payload)[0];
   if (first === undefined) {
     return undefined;
   }
-  for (const line of first.split(/\r?\n/)) {
+  for (const line of redactSecrets(first).text.split(/\r?\n/)) {
     const collapsed = line.replace(/\s+/g, " ").trim();
     if (collapsed.length === 0 || PROVENANCE_HEADER.test(collapsed)) {
       continue;
     }
-    return Array.from(collapsed).slice(0, MAX_DERIVED_TITLE_LENGTH).join("");
+    const title = cutTitle(collapsed);
+    if (title.length > 0) {
+      return title;
+    }
   }
   return undefined;
 }
@@ -169,11 +202,10 @@ export function planIndex(event: EventRecord, context: IndexContext): IndexPlan 
         ops.push({ type: "insert", kind: "prompt", text: redacted(text), firstSeq: seq, lastSeq: seq, ts });
       }
       if (!context.titled) {
+        // deriveTitle redacts before it cuts (see there).
         const title = deriveTitle(event.payload);
         if (title !== undefined) {
-          // A title is shown to other sessions and on the phone; it gets the
-          // same redaction as the index.
-          plan.title = redacted(title);
+          plan.title = title;
         }
       }
       return plan;
