@@ -433,11 +433,17 @@ export function handoffFirstLine(event: EventRecord | undefined): string | undef
   return first ? first : undefined;
 }
 
+export type HandoffWriter = (id: SessionId, reason: HandoffReason, stillValid?: () => boolean) => Promise<unknown>;
+
 export interface HandoffSchedulerOptions {
   manager: SessionManager;
   store: SessionStore;
-  /** Writes one handoff (LinkService.writeHandoff). */
-  write: (id: SessionId, reason: HandoffReason) => Promise<unknown>;
+  /**
+   * Writes one handoff (LinkService.writeHandoff). For an idle handoff the
+   * scheduler passes `stillValid`, which the writer must call synchronously
+   * right before it appends and drop the handoff when it says no.
+   */
+  write: HandoffWriter;
   /** The idle window. Default handoffIdleMs() (MONAD_HANDOFF_IDLE_MS, else ten minutes). */
   idleMs?: number;
   /** Sessions that never get an automatic handoff (the summarizer sessions). */
@@ -481,7 +487,7 @@ interface ArmedTimer {
 export class HandoffScheduler {
   private readonly manager: SessionManager;
   private readonly store: SessionStore;
-  private readonly write: (id: SessionId, reason: HandoffReason) => Promise<unknown>;
+  private readonly write: HandoffWriter;
   private readonly idleMs: number;
   private readonly skip: (record: SessionRecord) => boolean;
   private readonly now: () => number;
@@ -597,17 +603,29 @@ export class HandoffScheduler {
       this.timers.delete(id);
     }
     try {
-      const record = this.store.get(id);
-      if (!record || record.status !== "idle" || this.manager.isTurnInFlight(id) || this.skip(record)) {
+      if (!this.stillIdle(id, stretch)) {
         return;
       }
-      if (this.openStretch(id)?.stretch !== stretch) {
-        return; // A new prompt, or a handoff someone else wrote, ended this stretch.
-      }
-      await this.write(id, "idle");
+      // Asked again by the writer right before it appends: building the
+      // handoff awaits git, and a prompt or a close that lands meanwhile
+      // ends this stretch. A late idle handoff would describe the old
+      // stretch, and its seq (past the new prompt) would mark the NEXT
+      // stretch as handed off before it began.
+      await this.write(id, "idle", () => this.stillIdle(id, stretch));
     } catch (error) {
       this.onError(id, error);
     }
+  }
+
+  /** The session is idle, not closing or closed, and still in this stretch with no handoff. */
+  private stillIdle(id: SessionId, stretch: number): boolean {
+    const record = this.store.get(id);
+    if (!record || record.status !== "idle" || this.manager.isTurnInFlight(id) || this.skip(record)) {
+      return false;
+    }
+    // A new prompt, or a handoff someone else wrote (the closing one
+    // included), ended this stretch.
+    return this.openStretch(id)?.stretch === stretch;
   }
 
   private async closing(id: SessionId): Promise<void> {

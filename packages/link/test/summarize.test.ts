@@ -197,7 +197,7 @@ describe("sessions_summarize", () => {
     const scheduler = new HandoffScheduler({
       manager: h.manager,
       store: h.store,
-      write: (id, reason) => h.link.writeHandoff(id, reason),
+      write: (id, reason, stillValid) => h.link.writeHandoff(id, reason, stillValid),
       idleMs: 60_000,
       skip: (record) => h.link.isSummarizer(record),
     });

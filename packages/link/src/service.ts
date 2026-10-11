@@ -769,15 +769,25 @@ export class LinkService {
    * Writes one deterministic handoff event on the session's log (no model,
    * no access event: an automatic handoff is the session's own record).
    * Undefined when there is nothing to hand off (an automatic handoff of a
-   * session that was never prompted).
+   * session that was never prompted), or when `stillValid` says no.
+   *
+   * Building a handoff awaits git, up to a few seconds per repository, and
+   * the session moves on meanwhile: a prompt can arrive, or the session can
+   * close. `stillValid` is asked synchronously right before the append, so
+   * nothing can land between that answer and the event (the scheduler uses
+   * it so an idle handoff never lands after a new prompt or a close).
    */
-  async writeHandoff(sessionId: SessionId, reason: HandoffReason): Promise<EventRecord | undefined> {
+  async writeHandoff(
+    sessionId: SessionId,
+    reason: HandoffReason,
+    stillValid?: () => boolean,
+  ): Promise<EventRecord | undefined> {
     const payload = await buildHandoff(
       { manager: this.manager, store: this.store, repos: this.repos, gitTimeoutMs: this.gitTimeoutMs },
       sessionId,
       reason,
     );
-    if (!payload || !this.store.get(sessionId)) {
+    if (!payload || !this.store.get(sessionId) || (stillValid !== undefined && !stillValid())) {
       return undefined;
     }
     return this.manager.appendEvent(sessionId, "handoff", payload);

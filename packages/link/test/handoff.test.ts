@@ -44,7 +44,7 @@ function scheduler(h: Harness, idleMs: number): HandoffScheduler {
   const s = new HandoffScheduler({
     manager: h.manager,
     store: h.store,
-    write: (id, reason) => h.link.writeHandoff(id, reason),
+    write: (id, reason, stillValid) => h.link.writeHandoff(id, reason, stillValid),
     idleMs,
     skip: (record) => h.link.isSummarizer(record),
   });
@@ -178,6 +178,67 @@ describe("idle handoffs", () => {
     await Bun.sleep(250);
     expect(handoffs(h, s.id).map((handoff) => handoff.reason)).toEqual(["manual"]);
     expect(sched.armed()).toEqual([]);
+  });
+
+  test("a prompt that lands while the idle handoff is being built drops it; the next stretch gets its own", async () => {
+    const h = harness();
+    const s = await h.session();
+    let injected = false;
+    const sched = new HandoffScheduler({
+      manager: h.manager,
+      store: h.store,
+      idleMs: 40,
+      write: (id, reason, stillValid) => {
+        // writeHandoff runs to its first await (building the handoff), and
+        // a new prompt arrives before it can append.
+        const written = h.link.writeHandoff(id, reason, stillValid);
+        if (!injected && reason === "idle") {
+          injected = true;
+          void h.manager.prompt(id, userPrompt(id, "second ask"));
+        }
+        return written;
+      },
+    });
+    schedulers.push(sched);
+    sched.start();
+
+    await turn(h, s.id, "first ask");
+    await waitFor(() => h.backends.get(s.id)?.prompts.length === 2, "the second turn");
+    await Bun.sleep(100);
+    // The first stretch's handoff was dropped, not appended after the prompt.
+    expect(handoffs(h, s.id)).toEqual([]);
+    h.backends.get(s.id)?.endTurn();
+
+    await waitFor(() => handoffs(h, s.id).length === 1, "the second stretch's handoff");
+    const kinds = h.store.replay(s.id).map((event) => event.kind);
+    expect(kinds.filter((kind) => kind !== "update")).toEqual(["session_created", "prompt", "turn_ended", "prompt", "turn_ended", "handoff"]);
+    expect(handoffs(h, s.id)[0]?.lastAsks).toEqual(["first ask", "second ask"]);
+  });
+
+  test("an idle handoff whose session closed while it was being built is dropped", async () => {
+    const h = harness();
+    const s = await h.session();
+    const sched = new HandoffScheduler({
+      manager: h.manager,
+      store: h.store,
+      idleMs: 40,
+      write: async (id, reason, stillValid) => {
+        if (reason === "idle") {
+          // The close (with its own handoff) completes before this one is
+          // appended, as it can while the idle one waits on git.
+          await h.manager.close(id);
+        }
+        return await h.link.writeHandoff(id, reason, stillValid);
+      },
+    });
+    schedulers.push(sched);
+    sched.start();
+    await turn(h, s.id, "work");
+    await waitFor(() => h.store.get(s.id)?.status === "closed", "the close");
+    await Bun.sleep(50);
+    const kinds = h.store.replay(s.id).map((event) => event.kind);
+    expect(kinds.at(-1)).toBe("closed");
+    expect(handoffs(h, s.id).map((handoff) => handoff.reason)).toEqual(["closed"]);
   });
 
   test("a session nobody prompted gets no automatic handoff", async () => {

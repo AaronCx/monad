@@ -203,7 +203,7 @@ manager.resumePeerQueues();
 const handoffs = new HandoffScheduler({
   manager,
   store,
-  write: (id, reason) => link.writeHandoff(id, reason),
+  write: (id, reason, stillValid) => link.writeHandoff(id, reason, stillValid),
   idleMs: handoffIdleMs(),
   skip: (record) => link.isSummarizer(record),
   onError: (id, error) => {
