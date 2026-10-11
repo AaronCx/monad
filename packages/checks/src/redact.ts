@@ -18,6 +18,10 @@ import { SECRET_PATTERNS } from "./scanners/regex-patterns";
  * runs, no nested quantifiers (CodeQL flagged polynomial regexes in this repo
  * before). The one multi-line pattern, a whole private key block, is anchored
  * on its literal BEGIN header and stops at the first END line.
+ *
+ * Every pattern runs over the ORIGINAL text and the matches merge into spans
+ * (findSecretSpans), so a caller can redact one window of a longer text with
+ * the text around it as context (redactSecretsInWindow).
  */
 
 export interface RedactionResult {
@@ -88,34 +92,88 @@ function looksRandom(token: string): boolean {
   return calculateEntropy(token) >= entropyFloor(token.length);
 }
 
+/** One secret-shaped span of a text, in the text's own coordinates. */
+export interface SecretSpan {
+  start: number;
+  end: number;
+  /** The pattern id that names it (`high-entropy` for the entropy pass). */
+  id: string;
+}
+
+/**
+ * Every secret-shaped span of `text`, sorted and non-overlapping. Each
+ * pattern runs over the original text; spans that overlap or touch merge into
+ * one, named by the span that starts first (on a tie, the earlier pattern,
+ * so a named pattern beats the entropy pass).
+ */
+export function findSecretSpans(text: string): SecretSpan[] {
+  const found: Array<SecretSpan & { order: number }> = [];
+  REDACTION_PATTERNS.forEach(({ id, pattern }, order) => {
+    pattern.lastIndex = 0;
+    for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
+      if (match[0].length === 0) {
+        pattern.lastIndex += 1;
+        continue;
+      }
+      found.push({ start: match.index, end: match.index + match[0].length, id, order });
+    }
+  });
+  const entropyOrder = REDACTION_PATTERNS.length;
+  ENTROPY_CANDIDATE.lastIndex = 0;
+  for (let match = ENTROPY_CANDIDATE.exec(text); match !== null; match = ENTROPY_CANDIDATE.exec(text)) {
+    if (looksRandom(match[0])) {
+      found.push({ start: match.index, end: match.index + match[0].length, id: "high-entropy", order: entropyOrder });
+    }
+  }
+  found.sort((a, b) => a.start - b.start || a.order - b.order);
+  const spans: SecretSpan[] = [];
+  for (const span of found) {
+    const last = spans[spans.length - 1];
+    if (last !== undefined && span.start <= last.end) {
+      last.end = Math.max(last.end, span.end);
+      continue;
+    }
+    spans.push({ start: span.start, end: span.end, id: span.id });
+  }
+  return spans;
+}
+
 /**
  * Replaces every secret-shaped span in `text` with `[REDACTED:<id>]`.
  *
- * Regex patterns run first, then a conservative entropy pass for keys no
- * pattern names (`[REDACTED:high-entropy]`). Prose, paths, uuids, git shas
- * and ordinary identifiers come back unchanged.
+ * Regex patterns name what they find, and a conservative entropy pass
+ * catches keys no pattern names (`[REDACTED:high-entropy]`). Prose, paths,
+ * uuids, git shas and ordinary identifiers come back unchanged.
  */
 export function redactSecrets(text: string): RedactionResult {
-  let out = text;
+  return redactSecretsInWindow(text, 0, text.length);
+}
+
+/**
+ * Redacts the window `text[start, end)` with the REST of `text` as context:
+ * patterns run over the whole text, and only the window is returned. A span
+ * that crosses an edge of the window becomes its placeholder at that edge,
+ * so a secret cut by the window is redacted whole, never half.
+ *
+ * This is what lets a caller split a long text into pieces (the session
+ * index splits a long agent turn into rows) without a piece holding half a
+ * token: redacted alone, neither half of a split token matches a pattern.
+ */
+export function redactSecretsInWindow(text: string, start: number, end: number = text.length): RedactionResult {
+  const from = Math.max(0, Math.min(start, text.length));
+  const to = Math.max(from, Math.min(end, text.length));
+  let out = "";
+  let cursor = from;
   let redactions = 0;
-  for (const { id, pattern } of REDACTION_PATTERNS) {
-    pattern.lastIndex = 0;
-    if (!pattern.test(out)) {
+  for (const span of findSecretSpans(text)) {
+    if (span.end <= from || span.start >= to) {
       continue;
     }
-    pattern.lastIndex = 0;
-    out = out.replace(pattern, () => {
-      redactions += 1;
-      return `[REDACTED:${id}]`;
-    });
-  }
-  ENTROPY_CANDIDATE.lastIndex = 0;
-  out = out.replace(ENTROPY_CANDIDATE, (token) => {
-    if (!looksRandom(token)) {
-      return token;
-    }
+    out += text.slice(cursor, Math.max(cursor, span.start));
+    out += `[REDACTED:${span.id}]`;
     redactions += 1;
-    return "[REDACTED:high-entropy]";
-  });
+    cursor = Math.min(span.end, to);
+  }
+  out += text.slice(cursor, to);
   return { text: out, redactions };
 }

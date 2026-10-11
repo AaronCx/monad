@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { redactSecrets } from "../src/index";
+import { findSecretSpans, redactSecrets, redactSecretsInWindow } from "../src/index";
 
 /**
  * redactSecrets feeds the session search index and every monad Link result
@@ -94,5 +94,45 @@ describe("redactSecrets", () => {
     const started = performance.now();
     redactSecrets(nearMiss);
     expect(performance.now() - started).toBeLessThan(2_000);
+  });
+});
+
+describe("redactSecretsInWindow", () => {
+  test("a window that cuts a token in two redacts each half to the placeholder", () => {
+    const text = `push with ${GITHUB_TOKEN} now`;
+    const cut = text.indexOf(GITHUB_TOKEN) + 18;
+    const head = redactSecretsInWindow(text, 0, cut).text;
+    const tail = redactSecretsInWindow(text, cut).text;
+    expect(head).toBe("push with [REDACTED:github-personal-access-token]");
+    expect(tail).toBe("[REDACTED:github-personal-access-token] now");
+    // Redacted alone, each half would have survived.
+    expect(redactSecrets(text.slice(0, cut)).text).toContain(GITHUB_TOKEN.slice(4, 18));
+  });
+
+  test("a key body whose BEGIN header is outside the window is still redacted", () => {
+    const text = `prose\n${PRIVATE_KEY}\nafter`;
+    const body = text.indexOf("MzEf");
+    expect(redactSecretsInWindow(text, body).text).toBe("[REDACTED:private-key]\nafter");
+  });
+
+  test("an assignment whose name is outside the window is still redacted", () => {
+    const value = j("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY");
+    const text = `aws_secret_access_key = ${value} end`;
+    const window = redactSecretsInWindow(text, text.indexOf(value)).text;
+    expect(window).toBe("[REDACTED:aws-secret-access-key] end");
+  });
+
+  test("the whole text as the window is exactly redactSecrets", () => {
+    const text = `a ${GITHUB_TOKEN} b ${PRIVATE_KEY} c ${RANDOM_KEY} d`;
+    expect(redactSecretsInWindow(text, 0)).toEqual(redactSecrets(text));
+    expect(redactSecretsInWindow(text, 2, 2).text).toBe("");
+  });
+
+  test("spans are sorted, non-overlapping and name the pattern that found them", () => {
+    const text = `x ${GITHUB_TOKEN} y ${RANDOM_KEY}`;
+    const spans = findSecretSpans(text);
+    expect(spans.map((span) => span.id)).toEqual(["github-personal-access-token", "high-entropy"]);
+    expect(text.slice(spans[0]!.start, spans[0]!.end)).toBe(GITHUB_TOKEN);
+    expect(spans[0]!.end).toBeLessThan(spans[1]!.start);
   });
 });

@@ -71,8 +71,8 @@ export {
 } from "./render";
 
 // Secret redaction for text handed beyond the secrets check (monad Link)
-export { redactSecrets } from "./redact";
-export type { RedactionResult } from "./redact";
+export { findSecretSpans, redactSecrets, redactSecretsInWindow } from "./redact";
+export type { RedactionResult, SecretSpan } from "./redact";
 
 // Checks
 export { statusFromFindings } from "./checks/status";
