@@ -393,7 +393,7 @@ describe("full-text index fed on append", () => {
     }
   });
 
-  test("filters: repo, since, kinds, session ids, limit", () => {
+  test("filters: repo, since, kinds, session ids, excluded session ids, limit", () => {
     const parent = tempDir("monad-filters-");
     const repo = makeRepo(parent, "alpha");
     const store = openStore(join(parent, "monad.db"));
@@ -406,6 +406,11 @@ describe("full-text index fed on append", () => {
     expect(store.search("scroll", { repo }).map((h) => h.sessionId)).toEqual([inRepo.id]);
     expect(store.search("scroll", { sessionIds: [elsewhere.id] }).map((h) => h.sessionId)).toEqual([elsewhere.id]);
     expect(store.search("scroll", { sessionIds: [] })).toEqual([]);
+    // An exclusion applies before the limit: the excluded hit never crowds out another.
+    expect(store.search("scroll", { excludeSessionIds: [inRepo.id], limit: 1 }).map((h) => h.sessionId)).toEqual([
+      elsewhere.id,
+    ]);
+    expect(store.search("scroll", { excludeSessionIds: [] })).toHaveLength(2);
     expect(store.search("scroll", { kinds: ["agent"] })).toEqual([]);
     expect(store.search("scroll", { since: "2999-01-01T00:00:00.000Z" })).toEqual([]);
     expect(store.search("scroll", { limit: 1 })).toHaveLength(1);

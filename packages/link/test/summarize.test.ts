@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readdirSync } from "node:fs";
+import { mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionId, SessionRecord, SummaryPayload } from "@aaroncx/protocol";
 import { HandoffScheduler } from "../src/handoff.ts";
-import { LinkError } from "../src/service.ts";
+import { LinkError, LinkService } from "../src/service.ts";
 import {
   accessEvents,
   agentChunk,
@@ -227,5 +227,99 @@ describe("sessions_summarize", () => {
     await expect(h.link.handoff({ kind: "session", id: caller.id }, target.id)).rejects.toThrow(
       "only the human at the CLI",
     );
+  });
+});
+
+describe("a summarizer session is not a way around the target's log", () => {
+  /** Summarizes the target as `caller` and returns the closed summarizer. */
+  async function summarized(h: Harness, caller: { kind: "human" } | { kind: "session"; id: SessionId }, target: SessionId) {
+    const before = h.store.list().map((record) => record.id);
+    const pending = h.link.summarize(caller, target);
+    const summarizer = await summarizerOf(h, before);
+    h.backends.get(summarizer.id)?.hooks.onUpdate(agentChunk(summarizer.id, "A short summary."));
+    h.backends.get(summarizer.id)?.endTurn();
+    await pending;
+    return summarizer;
+  }
+
+  test("another session cannot find, list, read or wait on it, and a search hits only the target", async () => {
+    const h = harness();
+    const asker = await h.session();
+    const reader = await h.session();
+    const target = await h.session();
+    h.history(target.id, [
+      ["prompt", userPrompt(target.id, "the zebra quokka plan: rotate zebra-quokka-42 tonight")],
+      ["turn_ended", { stopReason: "end_turn" }],
+    ]);
+    const summarizer = await summarized(h, { kind: "session", id: asker.id }, target.id);
+    const as = { kind: "session" as const, id: reader.id };
+    const targetAccess = () => accessEvents(h.store, target.id).length;
+
+    // The copy of the transcript is in the summarizer's log, and search
+    // never returns it: every hit is on the target, so the access lands there.
+    const before = targetAccess();
+    const hits = h.link.search(as, "zebra quokka");
+    expect(hits.length).toBeGreaterThan(0);
+    expect(new Set(hits.map((hit) => hit.sessionId))).toEqual(new Set([target.id]));
+    expect(targetAccess()).toBe(before + 1);
+    expect(h.link.search({ kind: "human" }, "zebra quokka").map((hit) => hit.sessionId)).not.toContain(summarizer.id);
+
+    expect(h.link.list(as).map((s) => s.id)).not.toContain(summarizer.id);
+    expect(h.link.list({ kind: "human" }).map((s) => s.id)).not.toContain(summarizer.id);
+    expect(() => h.link.read(as, summarizer.id)).toThrow(`no session ${summarizer.id}`);
+    await expect(h.link.wait(as, summarizer.id, "closed", 10)).rejects.toThrow(`no session ${summarizer.id}`);
+    await expect(h.link.summarize(as, summarizer.id)).rejects.toThrow(`no session ${summarizer.id}`);
+    expect(accessEvents(h.store, summarizer.id).filter((access) => access.by === reader.id)).toEqual([]);
+  });
+
+  test("the human may read one, and the target's log records that read", async () => {
+    const h = harness();
+    const target = await targetWithHistory(h);
+    const summarizer = await summarized(h, { kind: "human" }, target.id);
+    const page = h.link.read({ kind: "human" }, summarizer.id);
+    expect(page.text).toContain("Clamped the status row in build 72.");
+    expect(accessEvents(h.store, target.id).at(-1)).toMatchObject({
+      op: "read",
+      role: "target",
+      by: "human",
+      via: summarizer.id,
+    });
+  });
+
+  test("touching an allowlisted repo does not make it visible to a scoped session", async () => {
+    const h = harness();
+    const target = await targetWithHistory(h);
+    const summarizer = await summarized(h, { kind: "human" }, target.id);
+    // A scoped daemon (link.json repos) sharing this store: the summarizer's
+    // log names a path in the allowlisted repo, which tags it with that repo.
+    const repo = join(h.dir, "repo");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    h.history(summarizer.id, [
+      [
+        "update",
+        {
+          sessionId: summarizer.id,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "t1",
+            title: "Read",
+            kind: "read",
+            locations: [{ path: join(repo, "README.md") }],
+          },
+        },
+      ],
+    ]);
+    expect(h.store.reposFor(summarizer.id).map((r) => r.repoRoot)).toContain(realpathSync(repo));
+    const scoped = new LinkService({
+      manager: h.manager,
+      store: h.store,
+      config: { ...h.config, repos: [repo] },
+      stateDir: h.dir,
+    });
+    const reader = await h.session(repo);
+    const as = { kind: "session" as const, id: reader.id };
+    expect(scoped.list(as).map((s) => s.id)).not.toContain(summarizer.id);
+    expect(() => scoped.read(as, summarizer.id)).toThrow(`no session ${summarizer.id}`);
+    expect(scoped.search(as, "Clamped").map((hit) => hit.sessionId)).not.toContain(summarizer.id);
   });
 });

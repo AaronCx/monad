@@ -355,7 +355,11 @@ export class LinkService {
   list(caller: LinkCaller, options: ListOptions = {}): LinkSessionSummary[] {
     this.authorize(caller, "sessions_list", "list");
     const since = this.normalizeSince(caller, "list", options.since);
-    let records = this.store.list().filter((record) => this.visibleTo(caller, record.id));
+    // Summarizer sessions are tool runs whose one prompt is another
+    // session's transcript; no caller is shown them (see visibleTo).
+    let records = this.store
+      .list()
+      .filter((record) => !this.isSummarizer(record) && this.visibleTo(caller, record));
     if (options.repo !== undefined) {
       const ids = new Set(this.store.sessionsForRepo(this.canonicalRepo(options.repo)));
       records = records.filter((record) => ids.has(record.id));
@@ -400,6 +404,11 @@ export class LinkService {
       since,
       limit: options.limit,
       sessionIds,
+      // A summarizer's prompt is a quoted copy of its target's transcript:
+      // a hit there would be a read of the target that lands on the wrong
+      // log, and a duplicate of a hit on the target itself (whose summary
+      // is indexed on its own log).
+      excludeSessionIds: this.summarizerIds(),
     });
     const titles = new Map<string, string | undefined>();
     const results: LinkSearchHit[] = hits.map((hit) => {
@@ -462,6 +471,12 @@ export class LinkService {
     };
     this.logCaller(caller, { op: "read", target: target.id, ...range });
     this.logTarget(caller, target.id, { op: "read", ...range });
+    // Only the human can read a summarizer (visibleTo), and what it reads
+    // there is the summarized session's history: that session's log says so.
+    const summarized = this.summarizedTarget(target);
+    if (summarized !== undefined) {
+      this.logTarget(caller, summarized, { op: "read", via: target.id });
+    }
     return redacted;
   }
 
@@ -801,6 +816,23 @@ export class LinkService {
    */
   isSummarizer(record: SessionRecord): boolean {
     return isInside(resolvePath(record.cwd), this.summariesRoot);
+  }
+
+  /** Every summarizer session's id, for search's exclusion. */
+  private summarizerIds(): SessionId[] {
+    return this.store
+      .list()
+      .filter((record) => this.isSummarizer(record))
+      .map((record) => record.id);
+  }
+
+  /** The session a summarizer summarized (its cwd is summaries/<id>), when that session exists. */
+  private summarizedTarget(record: SessionRecord): SessionId | undefined {
+    if (!this.isSummarizer(record)) {
+      return undefined;
+    }
+    const [first] = relative(this.summariesRoot, resolvePath(record.cwd)).split(sep);
+    return first && first !== record.id && this.store.get(first) ? first : undefined;
   }
 
   /**
@@ -1163,12 +1195,28 @@ export class LinkService {
     return [...ids];
   }
 
-  private visibleTo(caller: LinkCaller, sessionId: SessionId): boolean {
-    if (caller.kind === "human" || this.scopeRoots === undefined) {
+  /**
+   * Whether a caller may see a session at all. A summarizer session is never
+   * visible to a session caller: its one prompt is a full quoted copy of the
+   * target's transcript, so reading or waiting on it would reach the
+   * target's history while the access event landed on the summarizer, and
+   * whatever repos its own tool calls touched would let it slip a target
+   * past the repo scope. It is a tool run, not work; the summary itself is
+   * on the target's log. The human may still read one (`monad show`), and
+   * that read is logged on the target too.
+   */
+  private visibleTo(caller: LinkCaller, record: SessionRecord): boolean {
+    if (caller.kind === "human") {
+      return true;
+    }
+    if (this.isSummarizer(record)) {
+      return false;
+    }
+    if (this.scopeRoots === undefined) {
       return true;
     }
     const roots = this.scopeRoots;
-    return this.store.reposFor(sessionId).some((repo) => roots.has(repo.repoRoot));
+    return this.store.reposFor(record.id).some((repo) => roots.has(repo.repoRoot));
   }
 
   /**
@@ -1194,7 +1242,7 @@ export class LinkService {
 
   private requireVisible(caller: LinkCaller, op: AccessOp, targetId: string): SessionRecord {
     const target = typeof targetId === "string" ? this.store.get(targetId) : undefined;
-    if (!target || !this.visibleTo(caller, target.id)) {
+    if (!target || !this.visibleTo(caller, target)) {
       // One answer for "absent" and "out of scope", so scope is not an oracle.
       throw this.refuse(caller, op, "not_found", `no session ${String(targetId)}`);
     }

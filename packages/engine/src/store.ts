@@ -65,6 +65,8 @@ export interface SearchOptions {
   limit?: number;
   /** Only these sessions. An empty list matches nothing. */
   sessionIds?: SessionId[];
+  /** Never these sessions (applied before the limit, so they do not crowd out other hits). */
+  excludeSessionIds?: SessionId[];
   /** Only these row kinds. An empty list matches nothing. */
   kinds?: SearchKind[];
 }
@@ -645,6 +647,13 @@ export class SessionStore {
         return `$session${index}`;
       });
       where.push(`session_id IN (${names.join(", ")})`);
+    }
+    if (options.excludeSessionIds !== undefined && options.excludeSessionIds.length > 0) {
+      const names = options.excludeSessionIds.map((sessionId, index) => {
+        params[`excluded${index}`] = sessionId;
+        return `$excluded${index}`;
+      });
+      where.push(`session_id NOT IN (${names.join(", ")})`);
     }
     if (options.kinds !== undefined) {
       const names = options.kinds.map((kind, index) => {
