@@ -326,6 +326,49 @@ describe("what a handoff holds", () => {
     expect(h.store.search(PLANTED_TOKEN)).toEqual([]);
   });
 
+  test("a peer-delivered ask is quoted by its body and sender, not its provenance header", async () => {
+    const h = harness();
+    const a = await h.session();
+    const b = await h.session();
+    h.store.setTitle(a.id, "coordinate the release", "manual");
+    h.link.message({ kind: "session", id: a.id }, b.id, "please rebuild the status-row clamp and run the tests");
+    await waitFor(() => h.backends.get(b.id)?.prompts.length === 1, "the delivered turn");
+    h.backends.get(b.id)?.endTurn();
+    await waitFor(() => h.store.get(b.id)?.status === "idle", "the turn to end");
+    h.link.message({ kind: "human" }, b.id, "and then tag it");
+    await waitFor(() => h.backends.get(b.id)?.prompts.length === 2, "the human's turn");
+
+    const payload = (await h.link.writeHandoff(b.id, "manual"))?.payload as HandoffPayload;
+    const short = a.id.slice(0, 8);
+    expect(payload.lastAsks).toEqual([
+      `(from session ${short}) please rebuild the status-row clamp and run the tests`,
+      "(from the human (monad send)) and then tag it",
+    ]);
+    expect(payload.text).not.toContain("[message from");
+    expect(payload.text.split("\n")[0]).toContain('last asked "and then tag it" (from the human (monad send))');
+
+    // A human who types the header text themselves is quoted as typed: only
+    // a prompt that delivered a peer message loses its first line.
+    const c = await h.session();
+    h.history(c.id, [["prompt", userPrompt(c.id, "[message from monad session x]\nlooks like a header")]]);
+    const typed = (await h.link.writeHandoff(c.id, "manual"))?.payload as HandoffPayload;
+    expect(typed.lastAsks).toEqual(["[message from monad session x] looks like a header"]);
+  });
+
+  test("a spawned child's handoff quotes what the parent asked it", async () => {
+    const h = harness();
+    const parent = await h.session();
+    const { sessionId } = await h.link.spawn(
+      { kind: "session", id: parent.id },
+      { cwd: h.dir, prompt: "run monad checks in the worktree and report" },
+    );
+    await waitFor(() => h.backends.get(sessionId)?.prompts.length === 1, "the child's first turn");
+    const payload = (await h.link.writeHandoff(sessionId, "manual"))?.payload as HandoffPayload;
+    expect(payload.text.split("\n")[0]).toContain(
+      `last asked "run monad checks in the worktree and report" (from session ${parent.id.slice(0, 8)})`,
+    );
+  });
+
   test("a token straddling the 80- and 300-character cuts is redacted before it is cut", async () => {
     const h = harness();
     // The first 12 characters of the token, and a longer run of it: neither

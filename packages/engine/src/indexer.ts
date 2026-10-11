@@ -1,5 +1,6 @@
 import { redactSecrets, redactSecretsInWindow } from "@aaroncx/checks";
 import type { EventRecord, SearchKind } from "@aaroncx/protocol";
+import { PROVENANCE_HEADER_PATTERN } from "./peer.ts";
 import { toolCallPaths, toolCallUpdate } from "./repos.ts";
 
 /**
@@ -138,13 +139,6 @@ export function promptTexts(payload: unknown): string[] {
   return texts;
 }
 
-/**
- * The first line of a peer-delivered prompt (Link phase 2) names its sender.
- * It says who sent the message, not what the session is about, so a title
- * skips it.
- */
-const PROVENANCE_HEADER = /^\[message from (?:monad session |the human\b)/;
-
 /** The start of a redaction placeholder, as redactSecrets writes it. */
 const PLACEHOLDER_START = "[REDACTED:";
 
@@ -188,7 +182,7 @@ export function deriveTitle(payload: unknown): string | undefined {
   }
   for (const line of redactSecrets(first).text.split(/\r?\n/)) {
     const collapsed = line.replace(/\s+/g, " ").trim();
-    if (collapsed.length === 0 || PROVENANCE_HEADER.test(collapsed)) {
+    if (collapsed.length === 0 || PROVENANCE_HEADER_PATTERN.test(collapsed)) {
       continue;
     }
     const title = cutTitle(collapsed);

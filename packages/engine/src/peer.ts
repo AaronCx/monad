@@ -16,6 +16,13 @@ import {
  * path from here to a permission answer, a mode switch or a policy.
  */
 
+/**
+ * Matches a provenance header line (provenanceHeader, HUMAN_PROVENANCE_HEADER).
+ * It says who sent a message, not what was asked, so a derived title
+ * (indexer.ts) and a handoff's quoted asks (Link) skip it.
+ */
+export const PROVENANCE_HEADER_PATTERN = /^\[message from (?:monad session |the human\b)/;
+
 /** The header of a message the human sent from the monad CLI. */
 export const HUMAN_PROVENANCE_HEADER = "[message from the human at the monad CLI]";
 

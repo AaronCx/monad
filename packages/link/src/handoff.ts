@@ -3,6 +3,8 @@ import { statSync } from "node:fs";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import { redactSecrets } from "@aaroncx/checks";
 import {
+  PROVENANCE_HEADER_PATTERN,
+  peerMetaOf,
   promptTexts,
   type RepoResolver,
   type SessionManager,
@@ -201,9 +203,42 @@ function touchedFiles(store: SessionStore, record: SessionRecord): string[] {
   return [...seen.keys()].slice(-MAX_FILES);
 }
 
-/** One ask as a handoff quotes it: every text block, on one line. */
-function askText(event: EventRecord): string {
-  return redactedLine(promptTexts(event.payload).join(" "), MAX_LINE);
+/** One ask: what was asked, and who asked when a peer or a spawn delivered it. */
+interface Ask {
+  /** Every text block on one line, redacted, without a provenance header. */
+  text: string;
+  /** "session <short id>" or "the human (monad send)" for a delivered message. */
+  from?: string;
+}
+
+/**
+ * One ask as a handoff quotes it. A peer-delivered or spawned turn's prompt
+ * opens with the daemon's provenance header (`[message from monad session
+ * <id> "<title>", repo <x>]`), which alone is longer than the summary line's
+ * quote, so it is replaced by a short sender and the ask is the body. Only a
+ * prompt whose _meta says it delivered a peer message loses its first line,
+ * so a human typing that text keeps it.
+ */
+function askOf(event: EventRecord): Ask {
+  const meta = peerMetaOf(event.payload);
+  let text = redactSecrets(promptTexts(event.payload).join("\n")).text;
+  if (meta !== undefined) {
+    const lines = text.split(/\r?\n/);
+    const first = lines.findIndex((line) => line.trim().length > 0);
+    if (first !== -1 && PROVENANCE_HEADER_PATTERN.test(lines[first]?.trim() ?? "")) {
+      text = lines.slice(first + 1).join("\n");
+    }
+  }
+  const ask: Ask = { text: oneLine(text, MAX_LINE) };
+  if (meta !== undefined) {
+    ask.from = meta.from === "human" ? "the human (monad send)" : `session ${meta.from.slice(0, 8)}`;
+  }
+  return ask;
+}
+
+/** An ask as lastAsks holds it: the sender first, so a cut never drops it. */
+function askLine(ask: Ask): string {
+  return ask.from === undefined ? ask.text : `(from ${ask.from}) ${ask.text}`;
 }
 
 function errorText(event: EventRecord): string {
@@ -234,11 +269,16 @@ function repoLabel(repo: HandoffRepo): string {
 function summaryLine(
   reason: HandoffReason,
   payload: HandoffBody,
+  lastAsk: Ask | undefined,
   turnErrors: number,
 ): string {
   const parts: string[] = [];
-  const lastAsk = payload.lastAsks.at(-1);
-  parts.push(lastAsk === undefined ? "no asks yet" : `last asked ${JSON.stringify(oneLine(lastAsk, 80))}`);
+  if (lastAsk === undefined) {
+    parts.push("no asks yet");
+  } else {
+    const from = lastAsk.from === undefined ? "" : ` (from ${lastAsk.from})`;
+    parts.push(`last asked ${JSON.stringify(oneLine(lastAsk.text, 80))}${from}`);
+  }
   if (payload.repos.length > 0) {
     parts.push(`repos ${payload.repos.map(repoLabel).join(", ")}`);
   }
@@ -259,8 +299,14 @@ function summaryLine(
   return redactedLine(`${label}: ${parts.join("; ")}`, MAX_SUMMARY_LINE);
 }
 
-function renderText(reason: HandoffReason, record: SessionRecord, payload: HandoffBody, turnErrors: number): string {
-  const lines: string[] = [summaryLine(reason, payload, turnErrors), ""];
+function renderText(
+  reason: HandoffReason,
+  record: SessionRecord,
+  payload: HandoffBody,
+  lastAsk: Ask | undefined,
+  turnErrors: number,
+): string {
+  const lines: string[] = [summaryLine(reason, payload, lastAsk, turnErrors), ""];
   lines.push(`Session ${record.id} ${JSON.stringify(record.title ?? "untitled")}: ${record.status}, ${record.mode}, cwd ${record.cwd}`);
   lines.push("", "## Last asks");
   if (payload.lastAsks.length === 0) {
@@ -350,8 +396,9 @@ export async function buildHandoff(
       ),
   );
   const firstSeq = deps.store.replay(id, 0, 1)[0]?.seq ?? 0;
+  const askList = asks.map(askOf);
   const body: HandoffBody = {
-    lastAsks: asks.map(askText),
+    lastAsks: askList.map(askLine),
     files: touchedFiles(deps.store, record),
     repos,
     pendingPermissions: deps.manager.pendingPermissions(id).map((request, index) => ({
@@ -368,7 +415,7 @@ export async function buildHandoff(
     toSeq: lastSeq(deps.store, id),
   };
   const turnErrors = errors.filter((event) => event.seq > lastAskSeq).length;
-  const payload: HandoffPayload = { reason, text: renderText(reason, record, body, turnErrors), ...body };
+  const payload: HandoffPayload = { reason, text: renderText(reason, record, body, askList.at(-1), turnErrors), ...body };
   // Asks, errors, titles, paths and branch names are all session-supplied
   // text, and other sessions read handoffs: redact every string. The cut
   // strings were redacted before their cut (redactedLine); this pass covers
