@@ -283,6 +283,7 @@ export class LinkService {
 
   list(caller: LinkCaller, options: ListOptions = {}): LinkSessionSummary[] {
     this.authorize(caller, "sessions_list", "list");
+    const since = this.normalizeSince(caller, "list", options.since);
     let records = this.store.list().filter((record) => this.visibleTo(caller, record.id));
     if (options.repo !== undefined) {
       const ids = new Set(this.store.sessionsForRepo(this.canonicalRepo(options.repo)));
@@ -291,8 +292,7 @@ export class LinkService {
     if (options.status !== undefined) {
       records = records.filter((record) => record.status === options.status);
     }
-    if (options.since !== undefined) {
-      const since = options.since;
+    if (since !== undefined) {
       records = records.filter((record) => record.updatedAt >= since);
     }
     if (options.includeImported === false) {
@@ -310,10 +310,11 @@ export class LinkService {
     if (typeof query !== "string" || query.trim().length === 0) {
       throw this.refuse(caller, "search", "invalid", "query must be a non-empty string");
     }
+    const since = this.normalizeSince(caller, "search", options.since);
     const sessionIds = this.scopedSessionIds(caller);
     const hits = this.store.search(query, {
       repo: options.repo === undefined ? undefined : this.canonicalRepo(options.repo),
-      since: options.since,
+      since,
       limit: options.limit,
       sessionIds,
     });
@@ -695,6 +696,24 @@ export class LinkService {
   }
 
   // ----------------------------------------------------------------- helpers
+
+  /**
+   * A since filter as the store compares it: a UTC ISO string. Stored
+   * timestamps are `...Z` strings compared as text, so an offset timestamp
+   * passed through raw would filter the wrong set, and a duration like
+   * "7d" would silently match nothing. Anything Date cannot parse is
+   * refused instead.
+   */
+  private normalizeSince(caller: LinkCaller, op: AccessOp, since: string | undefined): string | undefined {
+    if (since === undefined) {
+      return undefined;
+    }
+    const ms = typeof since === "string" && since.trim() !== "" ? Date.parse(since) : Number.NaN;
+    if (!Number.isFinite(ms)) {
+      throw this.refuse(caller, op, "invalid", `since must be an ISO timestamp, not ${JSON.stringify(since)}`);
+    }
+    return new Date(ms).toISOString();
+  }
 
   /**
    * Why a directory may hold untrusted content, or undefined when it does

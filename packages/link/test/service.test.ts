@@ -758,6 +758,28 @@ describe("sessions_read and sessions_search", () => {
     expect(JSON.stringify(accessEvents(h.store, reader.id))).not.toContain(PLANTED_TOKEN);
   });
 
+  test("since is compared as an instant, not as text, and junk is refused", async () => {
+    const h = harness();
+    const reader = { kind: "session" as const, id: (await h.session()).id };
+    const target = await h.session();
+    h.history(target.id, [["prompt", userPrompt(target.id, "zanzibar clamp")]]);
+    // 13:00Z is before the cutoff 12:00-04:00 (16:00Z) although it sorts after it as text.
+    h.store.setStatus(target.id, "idle");
+    const db = (h.store as unknown as { db: { run: (sql: string, ...args: unknown[]) => void } }).db;
+    db.run("UPDATE sessions SET updated_at = ? WHERE id = ?", "2026-10-11T13:00:00.000Z", target.id);
+    db.run("UPDATE search_fts SET ts = ? WHERE session_id = ?", "2026-10-11T13:00:00.000Z", target.id);
+    const cutoff = "2026-10-11T12:00:00-04:00";
+    expect(h.link.list(reader, { since: cutoff }).map((s) => s.id)).not.toContain(target.id);
+    expect(h.link.search(reader, "zanzibar", { since: cutoff })).toEqual([]);
+    const earlier = "2026-10-11T08:00:00-04:00"; // 12:00Z
+    expect(h.link.list(reader, { since: earlier }).map((s) => s.id)).toContain(target.id);
+    expect(h.link.search(reader, "zanzibar", { since: earlier }).map((hit) => hit.sessionId)).toEqual([target.id]);
+    for (const junk of ["7d", "", "yesterday"]) {
+      await expectLinkError(() => h.link.list(reader, { since: junk }), "invalid", "ISO timestamp");
+      await expectLinkError(() => h.link.search(reader, "zanzibar", { since: junk }), "invalid", "ISO timestamp");
+    }
+  });
+
   test("list returns repos and parent links, most recently active first", async () => {
     const repo = tempRepo("monad-link-list-");
     const h = harness();
