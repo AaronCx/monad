@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EventKind, SessionRecord } from "@aaroncx/protocol";
-import { AGENT_ROW_SOFT_LIMIT } from "../src/indexer.ts";
+import { AGENT_ROW_HARD_LIMIT, AGENT_ROW_SOFT_LIMIT } from "../src/indexer.ts";
 import { RepoResolver } from "../src/repos.ts";
 import { INDEX_GENERATION, SessionStore } from "../src/store.ts";
 
@@ -231,6 +231,104 @@ describe("full-text index fed on append", () => {
     // Nor can it be found by searching for it.
     expect(store.search(TOKEN)).toEqual([]);
     expect(store.search(TOKEN.slice(0, 12))).toEqual([]);
+  });
+
+  /** Every search_fts text of the database, read straight from the file. */
+  function ftsTexts(dbPath: string): string[] {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return db.query<{ text: string }, []>("SELECT text FROM search_fts").all().map((row) => row.text);
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Fails if any text holds 8 or more consecutive characters of `secret`. */
+  function expectNoFragment(texts: string[], secret: string): void {
+    for (const text of texts) {
+      for (let start = 0; start + 8 <= secret.length; start += 1) {
+        expect(text).not.toContain(secret.slice(start, start + 8));
+      }
+    }
+  }
+
+  /**
+   * Realistic deltas: words with the space INSIDE the chunk, so no chunk
+   * starts or ends in whitespace and the soft limit never splits the row.
+   */
+  function streamWithoutEdgeWhitespace(store: SessionStore, id: string, total: number): void {
+    for (let written = 0; written < total; written += 12) {
+      store.append(id, "update", chunk(id, "status, row,"));
+    }
+  }
+
+  test("a token cut where a long turn splits at the hard cap is in no row", () => {
+    const dir = tempDir("monad-fts-");
+    const dbPath = join(dir, "monad.db");
+    const store = openStore(dbPath);
+    const record = store.create(makeRecord());
+    store.append(record.id, "prompt", prompt(record.id, "go"));
+    // Just under the hard cap, so the token's head carries the row past it.
+    streamWithoutEdgeWhitespace(store, record.id, AGENT_ROW_HARD_LIMIT - 24);
+    store.append(record.id, "update", chunk(record.id, `then the token ${TOKEN.slice(0, 18)}`));
+    store.append(record.id, "update", chunk(record.id, `${TOKEN.slice(18)} was used.`));
+    store.append(record.id, "turn_ended", { stopReason: "end_turn" });
+
+    const texts = ftsTexts(dbPath);
+    expect(texts).toHaveLength(3);
+    expectNoFragment(texts, TOKEN.slice(4));
+    expect(store.search(TOKEN.slice(0, 22))).toEqual([]);
+    expect(store.search(TOKEN.slice(18))).toEqual([]);
+    expect(texts.filter((text) => text.includes("[REDACTED:github-personal-access-token]"))).toHaveLength(2);
+    // Rows still split only between chunks: contiguous seq ranges.
+    const before = store.search("status", { kinds: ["agent"] });
+    const after = store.search("used", { kinds: ["agent"] });
+    expect(before).toHaveLength(1);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.firstSeq).toBe(before[0]!.lastSeq + 1);
+  });
+
+  test("an assignment cut where a long turn splits at the soft limit is in no row", () => {
+    const dir = tempDir("monad-fts-");
+    const dbPath = join(dir, "monad.db");
+    const store = openStore(dbPath);
+    const record = store.create(makeRecord());
+    const value = ["wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY"].join("");
+    store.append(record.id, "prompt", prompt(record.id, "go"));
+    streamWithoutEdgeWhitespace(store, record.id, AGENT_ROW_SOFT_LIMIT);
+    // Ends in whitespace past 8 KiB: the next chunk starts a new row.
+    store.append(record.id, "update", chunk(record.id, "export aws_secret_access_key = "));
+    store.append(record.id, "update", chunk(record.id, `${value} and done.`));
+    store.append(record.id, "turn_ended", { stopReason: "end_turn" });
+
+    const texts = ftsTexts(dbPath);
+    expect(texts).toHaveLength(3);
+    expectNoFragment(texts, value);
+    expect(store.search("bPxRfiCYEXAMPLEKEY")).toEqual([]);
+  });
+
+  test("a row still settling after a split survives a restart", () => {
+    const dir = tempDir("monad-fts-");
+    const dbPath = join(dir, "monad.db");
+    const first = openStore(dbPath);
+    const record = first.create(makeRecord());
+    first.append(record.id, "prompt", prompt(record.id, "go"));
+    streamWithoutEdgeWhitespace(first, record.id, AGENT_ROW_HARD_LIMIT - 24);
+    first.append(record.id, "update", chunk(record.id, `then the token ${TOKEN.slice(0, 18)}`));
+    // This chunk splits the row off; the token is still incomplete (and too
+    // short for even the entropy pass to catch).
+    first.append(record.id, "update", chunk(record.id, TOKEN.slice(18, 22)));
+    first.close();
+
+    // The rest of the token arrives after a restart. The split-off row must
+    // still be rewritten with it, or it keeps the token's head.
+    const second = openStore(dbPath);
+    second.append(record.id, "update", chunk(record.id, `${TOKEN.slice(22)} was used.`));
+    second.append(record.id, "turn_ended", { stopReason: "end_turn" });
+    const texts = ftsTexts(dbPath);
+    expect(texts).toHaveLength(3);
+    expectNoFragment(texts, TOKEN.slice(4));
+    expect(second.search(TOKEN.slice(0, 22))).toEqual([]);
   });
 
   test("an open agent row survives a restart: the next chunk extends it, redaction intact", () => {
@@ -531,6 +629,38 @@ describe("backfill", () => {
     const check = new Database(dbPath, { readonly: true });
     expect(check.query("PRAGMA user_version").get()).toEqual({ user_version: INDEX_GENERATION });
     check.close();
+  });
+
+  test("a generation 1 database gets the new index_state columns and loses its old rows", () => {
+    const home = tempDir("monad-backfill-");
+    const dbPath = join(home, "monad.db");
+    const store = openStore(dbPath, home);
+    const record = store.create(makeRecord());
+    store.append(record.id, "prompt", prompt(record.id, "rebuild me"));
+    store.close();
+
+    // Generation 1's index_state had no settling_rowid, and its rows may hold
+    // part of a token.
+    const db = new Database(dbPath);
+    db.exec(`
+      DROP TABLE index_state;
+      CREATE TABLE index_state (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+        last_indexed_seq INTEGER NOT NULL DEFAULT 0,
+        open_rowid INTEGER,
+        open_bytes INTEGER NOT NULL DEFAULT 0
+      );
+      PRAGMA user_version = 1;
+    `);
+    db.query(
+      "INSERT INTO search_fts (text, session_id, kind, first_seq, last_seq, ts) VALUES ('leaked fragment', $id, 'agent', 1, 1, 'x')",
+    ).run({ id: record.id });
+    db.close();
+
+    const reopened = openStore(dbPath, home);
+    expect(reopened.search("leaked")).toEqual([]);
+    reopened.append(record.id, "update", chunk(record.id, "still indexing"));
+    expect(reopened.search("indexing")).toHaveLength(1);
   });
 });
 

@@ -7,6 +7,9 @@ import {
   type IndexOp,
   type OpenAgentRow,
   planIndex,
+  REDACTION_OVERLAP,
+  replayAgentRows,
+  type SettlingAgentRow,
   toFtsQuery,
 } from "../src/indexer.ts";
 
@@ -42,14 +45,64 @@ function opTypes(ops: IndexOp[]): string[] {
 // Built at runtime from short pieces so the secrets check never flags this file.
 const TOKEN = ["ghp_", "aB3dE5fG7hJ9", "kL1mN3pQ5rS7", "tU9vW1xY3zA5"].join("");
 
+function openRow(raw: string, rowid = 1, context = ""): OpenAgentRow {
+  return { rowid, firstSeq: 1, context, raw };
+}
+
+/**
+ * Applies agent chunk plans the way SessionStore does, in memory: each row's
+ * final text by row index, plus the rows still open or settling.
+ */
+function streamChunks(chunks: string[]) {
+  const rows: Array<{ text: string; firstSeq: number; lastSeq: number }> = [];
+  let open: OpenAgentRow | undefined;
+  let settling: SettlingAgentRow | undefined;
+  chunks.forEach((text, index) => {
+    const seq = index + 1;
+    for (const op of planIndex(event("update", chunk(text), seq), { open, settling, titled: true }).ops) {
+      switch (op.type) {
+        case "split":
+          settling = { rowid: open!.rowid, context: open!.context, raw: open!.raw };
+          open = undefined;
+          break;
+        case "open":
+          rows.push({ text: op.text, firstSeq: op.firstSeq, lastSeq: op.lastSeq });
+          open = { rowid: rows.length - 1, firstSeq: op.firstSeq, context: op.context, raw: op.raw };
+          break;
+        case "extend":
+          rows[open!.rowid] = { ...rows[open!.rowid]!, text: op.text, lastSeq: op.lastSeq };
+          open = { ...open!, raw: op.raw };
+          break;
+        case "settle":
+          rows[settling!.rowid] = { ...rows[settling!.rowid]!, text: op.text };
+          if (op.done) {
+            settling = undefined;
+          }
+          break;
+        default:
+          throw new Error(`unexpected op ${op.type}`);
+      }
+    }
+  });
+  return { rows, open, settling };
+}
+
+/** Fails if any row holds 8 or more consecutive characters of `secret`. */
+function expectNoFragment(rows: Array<{ text: string }>, secret: string): void {
+  for (const row of rows) {
+    for (let start = 0; start + 8 <= secret.length; start += 1) {
+      expect(row.text).not.toContain(secret.slice(start, start + 8));
+    }
+  }
+}
+
 describe("planIndex: agent text", () => {
   test("the first chunk opens a row, later chunks extend it with the whole text", () => {
     const first = planIndex(event("update", chunk("The scroll ")), { titled: true });
     expect(first.ops).toEqual([
-      expect.objectContaining({ type: "open", text: "The scroll ", raw: "The scroll " }),
+      expect.objectContaining({ type: "open", text: "The scroll ", raw: "The scroll ", context: "" }),
     ]);
-    const open: OpenAgentRow = { rowid: 1, firstSeq: 1, raw: "The scroll " };
-    const second = planIndex(event("update", chunk("clamp is fixed.")), { open, titled: true });
+    const second = planIndex(event("update", chunk("clamp is fixed.")), { open: openRow("The scroll "), titled: true });
     expect(second.ops).toEqual([
       expect.objectContaining({ type: "extend", text: "The scroll clamp is fixed." }),
     ]);
@@ -61,7 +114,7 @@ describe("planIndex: agent text", () => {
   });
 
   test("prompt, turn_ended, error and closed close the open row; a tool call does not", () => {
-    const open: OpenAgentRow = { rowid: 7, firstSeq: 1, raw: "text" };
+    const open = openRow("text", 7);
     expect(opTypes(planIndex(event("turn_ended", { stopReason: "end_turn" }), { open, titled: true }).ops)).toEqual(["close"]);
     expect(opTypes(planIndex(event("closed", null), { open, titled: true }).ops)).toEqual(["close"]);
     expect(opTypes(planIndex(event("error", { message: "boom" }), { open, titled: true }).ops)).toEqual(["close", "insert"]);
@@ -69,27 +122,132 @@ describe("planIndex: agent text", () => {
     expect(opTypes(planIndex(event("update", toolCall({ title: "Read file" })), { open, titled: true }).ops)).toEqual(["insert"]);
   });
 
-  test("a row past 8 KiB closes on a chunk ending in whitespace, not mid-word", () => {
-    const open: OpenAgentRow = { rowid: 1, firstSeq: 1, raw: "a".repeat(AGENT_ROW_SOFT_LIMIT) };
-    expect(opTypes(planIndex(event("update", chunk("word")), { open, titled: true }).ops)).toEqual(["extend"]);
-    expect(opTypes(planIndex(event("update", chunk("word ")), { open, titled: true }).ops)).toEqual(["extend", "close"]);
+  test("past 8 KiB a row splits at a chunk boundary with whitespace on either side, not mid-word", () => {
+    const long = "a".repeat(AGENT_ROW_SOFT_LIMIT);
+    expect(opTypes(planIndex(event("update", chunk("word")), { open: openRow(long), titled: true }).ops)).toEqual(["extend"]);
+    // Vendor deltas usually carry a LEADING space, so that counts too.
+    expect(opTypes(planIndex(event("update", chunk(" word")), { open: openRow(long), titled: true }).ops)).toEqual([
+      "split",
+      "open",
+      "settle",
+    ]);
+    expect(opTypes(planIndex(event("update", chunk("word")), { open: openRow(`${long} `), titled: true }).ops)).toEqual([
+      "split",
+      "open",
+      "settle",
+    ]);
   });
 
-  test("a row closes at the hard cap even mid-word", () => {
-    const open: OpenAgentRow = { rowid: 1, firstSeq: 1, raw: "a".repeat(AGENT_ROW_HARD_LIMIT - 1) };
-    expect(opTypes(planIndex(event("update", chunk("bc")), { open, titled: true }).ops)).toEqual(["extend", "close"]);
+  test("at the hard cap a row splits at the next chunk boundary even mid-word", () => {
+    const open = openRow("a".repeat(AGENT_ROW_HARD_LIMIT));
+    const plan = planIndex(event("update", chunk("bc")), { open, titled: true });
+    expect(opTypes(plan.ops)).toEqual(["split", "open", "settle"]);
+    // The new row is redacted with the end of the old one as context, and
+    // holds only its own text.
+    expect(plan.ops[1]).toEqual(
+      expect.objectContaining({ type: "open", text: "bc", raw: "bc", context: "a".repeat(REDACTION_OVERLAP) }),
+    );
   });
 
   test("a token streamed across two chunks is redacted in the accumulated row", () => {
     const head = TOKEN.slice(0, 20);
     const tail = TOKEN.slice(20);
-    const first = planIndex(event("update", chunk(`token is ${head}`)), { titled: true });
-    const opened = first.ops[0] as Extract<IndexOp, { type: "open" }>;
-    const open: OpenAgentRow = { rowid: 1, firstSeq: 1, raw: opened.raw };
-    const second = planIndex(event("update", chunk(`${tail} done`)), { open, titled: true });
-    const extended = second.ops[0] as Extract<IndexOp, { type: "extend" }>;
-    expect(extended.text).toBe("token is [REDACTED:github-personal-access-token] done");
-    expect(extended.text).not.toContain(tail);
+    const { rows } = streamChunks([`token is ${head}`, `${tail} done`]);
+    expect(rows.map((row) => row.text)).toEqual(["token is [REDACTED:github-personal-access-token] done"]);
+  });
+
+  test("a token cut by a hard-cap split is redacted whole in both rows", () => {
+    // No chunk ends or starts with whitespace, so the soft limit never fires
+    // and the row splits at the hard cap, right inside the token. The token's
+    // tail arrives over two chunks after the split.
+    const filler = Array.from({ length: Math.ceil(AGENT_ROW_HARD_LIMIT / 100) }, () => "x".repeat(100));
+    const { rows, settling } = streamChunks([
+      ...filler.slice(0, -1),
+      `${filler.at(-1)} token ${TOKEN.slice(0, 18)}`,
+      TOKEN.slice(18, 28),
+      `${TOKEN.slice(28)}.end`,
+    ]);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.text.endsWith("[REDACTED:github-personal-access-token]")).toBe(true);
+    expect(rows[1]!.text).toBe("[REDACTED:github-personal-access-token].end");
+    expectNoFragment(rows, TOKEN.slice(4));
+    // Seq ranges stay exact and contiguous: rows split only between chunks.
+    expect(rows[1]!.firstSeq).toBe(rows[0]!.lastSeq + 1);
+    // Still settling: the new row holds less than REDACTION_OVERLAP so far.
+    expect(settling).toBeDefined();
+  });
+
+  test("a private key block cut by a soft split leaves no key material in either row", () => {
+    const body = [
+      ["MIIEvQIBADANBgkq", "hkiG9w0BAQEFAASC", "BKcwggSjAgEAAoIB", "AQC7VJTUt9Us8cKj"].join(""),
+      ["MzEfYyjiWA4R4/M2", "bS1GB4t7NXp98C3S", "C6dVMvDuictGeurT", "8jNbvJZHtCSuYEvu"].join(""),
+    ];
+    const begin = ["-----BEGIN RSA", " PRIVATE KEY-----"].join("");
+    const end = ["-----END RSA", " PRIVATE KEY-----"].join("");
+    // The row passes 8 KiB with the header line, which ends in a newline: the
+    // next chunk splits it off right after the header.
+    const { rows } = streamChunks([
+      "z".repeat(AGENT_ROW_SOFT_LIMIT),
+      `Here is the key:\n${begin}\n`,
+      `${body[0]}\n`,
+      `${body[1]}\n`,
+      `${end}\n`,
+      "done.",
+    ]);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]!.text).toBe("[REDACTED:private-key]\ndone.");
+    for (const line of body) {
+      expectNoFragment(rows, line);
+    }
+    expect(rows.map((row) => row.text).join("")).not.toContain("PRIVATE KEY");
+  });
+
+  test("an assignment cut by a soft split is redacted whole", () => {
+    const value = ["wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY"].join("");
+    const { rows } = streamChunks([
+      "q".repeat(AGENT_ROW_SOFT_LIMIT),
+      "q set aws_secret_access_key = ",
+      `${value} end`,
+    ]);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]!.text).toBe("[REDACTED:aws-secret-access-key] end");
+    expectNoFragment(rows, value);
+  });
+
+  test("a settling row stops being rewritten once the new row holds REDACTION_OVERLAP characters", () => {
+    const open = openRow("a".repeat(AGENT_ROW_HARD_LIMIT));
+    const split = planIndex(event("update", chunk("b".repeat(10))), { open, titled: true });
+    expect(split.ops.at(-1)).toEqual(expect.objectContaining({ type: "settle", done: false }));
+    const settling: SettlingAgentRow = { rowid: 1, context: "", raw: open.raw };
+    const next = openRow("b".repeat(10), 2, "a".repeat(REDACTION_OVERLAP));
+    const almost = planIndex(event("update", chunk("c".repeat(REDACTION_OVERLAP - 11))), {
+      open: next,
+      settling,
+      titled: true,
+    });
+    expect(almost.ops.at(-1)).toEqual(expect.objectContaining({ type: "settle", done: false }));
+    const enough = planIndex(event("update", chunk("c".repeat(REDACTION_OVERLAP - 10))), {
+      open: next,
+      settling,
+      titled: true,
+    });
+    expect(enough.ops.at(-1)).toEqual(expect.objectContaining({ type: "settle", done: true }));
+  });
+
+  test("replayAgentRows rebuilds exactly the rows live planning left", () => {
+    const words = Array.from({ length: 3000 }, (_, i) => (i % 7 === 0 ? ` w${i}` : `w${i}`));
+    const chunks = [...words, "", `tail ${TOKEN.slice(0, 10)}`];
+    const live = streamChunks(chunks);
+    const replayed = replayAgentRows(chunks.map((text, index) => ({ seq: index + 1, text })));
+    expect(replayed.open).toEqual({
+      firstSeq: live.open!.firstSeq,
+      context: live.open!.context,
+      raw: live.open!.raw,
+    });
+    expect(replayed.settling).toEqual(
+      live.settling ? { context: live.settling.context, raw: live.settling.raw } : undefined,
+    );
+    expect(live.rows.length).toBeGreaterThan(1);
   });
 });
 

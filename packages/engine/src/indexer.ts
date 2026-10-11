@@ -1,4 +1,4 @@
-import { redactSecrets } from "@aaroncx/checks";
+import { redactSecrets, redactSecretsInWindow } from "@aaroncx/checks";
 import type { EventRecord, SearchKind } from "@aaroncx/protocol";
 import { toolCallPaths, toolCallUpdate } from "./repos.ts";
 
@@ -17,42 +17,91 @@ import { toolCallPaths, toolCallUpdate } from "./repos.ts";
 /**
  * Agent text accumulates into one index row per turn so a hit points at the
  * span of the log that said it, not at one of hundreds of streamed chunks.
- * Past this many characters the row closes at the next chunk that ends in
- * whitespace and a new row starts; ending on whitespace keeps a token from
- * being split across two rows, where neither half would match a redaction
- * pattern.
+ * A long turn splits into several rows, always at a chunk boundary so every
+ * row's seq range is exact: past the soft limit at the first boundary with
+ * whitespace on either side (so a word stays whole for search), and at the
+ * hard limit at the next boundary whatever it is.
+ *
+ * A split never weakens redaction. Each row is redacted with the text around
+ * it as context (REDACTION_OVERLAP), so a token, a private key block or a
+ * `name = value` assignment cut by a split is redacted whole in both rows.
  */
 export const AGENT_ROW_SOFT_LIMIT = 8 * 1024;
 
-/** Hard cap: a row closes here even mid-word (a 16 KiB unbroken run). */
+/** A row splits at the next chunk boundary once it holds this much. */
 export const AGENT_ROW_HARD_LIMIT = 16 * 1024;
+
+/**
+ * How much text on each side of a split redaction sees: a new row is redacted
+ * with the previous row's last REDACTION_OVERLAP characters before it, and
+ * the previous row is re-redacted ("settles") with the new row's text after
+ * it until the new row holds REDACTION_OVERLAP characters. A secret shorter
+ * than this (every token pattern, and an RSA 4096 private key block) is never
+ * cut in two by a split.
+ */
+export const REDACTION_OVERLAP = 4 * 1024;
 
 /** Derived titles stop here (characters, never splitting a code point). */
 export const MAX_DERIVED_TITLE_LENGTH = 80;
 
-/** The agent row currently accumulating text for a session's turn. */
-export interface OpenAgentRow {
-  rowid: number;
-  firstSeq: number;
+/**
+ * An agent row's UNREDACTED text. Redaction runs over the whole accumulated
+ * row on every chunk, because a token streamed across two chunks matches no
+ * pattern in either chunk alone. It lives in memory only (the store rebuilds
+ * it from the event log on a cold start); the index holds the redacted form.
+ */
+export interface AgentRowText {
   /**
-   * The row's UNREDACTED text. Redaction runs over the whole accumulated row
-   * on every chunk, because a token streamed across two chunks matches no
-   * pattern in either chunk alone. It lives in memory only (the store
-   * rebuilds it from the event log on a cold start); the index holds the
-   * redacted form.
+   * Text of the same turn just before the row (the end of the row it split
+   * from), or empty for a turn's first row. Redaction context only: it is
+   * never written to this row.
    */
+  context: string;
+  /** The row's own text: its chunks, concatenated. */
   raw: string;
 }
 
+/** An agent row by its chunk span, before it has a place in the index. */
+export interface AgentRowShape extends AgentRowText {
+  firstSeq: number;
+}
+
+/** The agent row currently accumulating text for a session's turn. */
+export interface OpenAgentRow extends AgentRowShape {
+  rowid: number;
+}
+
+/**
+ * The row a split just closed. It takes no more chunks, but its text is
+ * re-redacted with the new row's opening text after it, until that reaches
+ * REDACTION_OVERLAP characters, so a secret cut by the split is redacted
+ * whole in this row too.
+ */
+export interface SettlingAgentRow extends AgentRowText {
+  rowid: number;
+}
+
 export type IndexOp =
-  /** Close the open agent row; the next agent chunk starts a new one. */
+  /** End of a turn: the open and settling agent rows are final. */
   | { type: "close" }
+  /** The open agent row stops taking chunks and becomes the settling row. */
+  | { type: "split" }
   /** A self-contained row (prompt, tool, error). */
   | { type: "insert"; kind: SearchKind; text: string; firstSeq: number; lastSeq: number; ts: string }
   /** A new agent row that stays open for the following chunks. */
-  | { type: "open"; text: string; raw: string; firstSeq: number; lastSeq: number; ts: string }
+  | {
+      type: "open";
+      text: string;
+      raw: string;
+      context: string;
+      firstSeq: number;
+      lastSeq: number;
+      ts: string;
+    }
   /** Replace the open agent row's text and widen it to lastSeq. */
-  | { type: "extend"; text: string; raw: string; lastSeq: number };
+  | { type: "extend"; text: string; raw: string; lastSeq: number }
+  /** Replace the settling row's text; when done, it is final. */
+  | { type: "settle"; text: string; done: boolean };
 
 export interface IndexPlan {
   ops: IndexOp[];
@@ -62,6 +111,7 @@ export interface IndexPlan {
 
 export interface IndexContext {
   open?: OpenAgentRow;
+  settling?: SettlingAgentRow;
   /** True when the session already has a title (derived, manual or imported). */
   titled: boolean;
 }
@@ -166,11 +216,85 @@ export function agentChunkText(event: EventRecord): string | undefined {
   return content?.type === "text" && typeof content.text === "string" ? content.text : undefined;
 }
 
-function shouldCloseAgentRow(raw: string): boolean {
+/** True when the next chunk starts a new row instead of extending this one. */
+function splitsBefore(raw: string, chunk: string): boolean {
   if (raw.length >= AGENT_ROW_HARD_LIMIT) {
     return true;
   }
-  return raw.length >= AGENT_ROW_SOFT_LIMIT && /\s$/.test(raw);
+  return raw.length >= AGENT_ROW_SOFT_LIMIT && (/\s$/.test(raw) || /^\s/.test(chunk));
+}
+
+export interface AgentRowsShape {
+  open?: AgentRowShape;
+  settling?: AgentRowText;
+}
+
+interface AgentStep {
+  /** The open row after the chunk. */
+  open: AgentRowShape;
+  /** True when the chunk opened that row (first of the turn, or a split). */
+  opened: boolean;
+  /** True when the chunk split the previous open row off. */
+  split: boolean;
+  /** The settling row this chunk re-redacts, if any. */
+  settling?: AgentRowText;
+  /** True when that settling row has seen enough of what follows it. */
+  settled: boolean;
+}
+
+/**
+ * What one non-empty agent chunk does to a turn's rows, with no redaction:
+ * the structural half of planIndex, shared with replayAgentRows so a cold
+ * start rebuilds exactly the rows live indexing built.
+ */
+function stepAgentRows(rows: AgentRowsShape, chunk: string, seq: number): AgentStep {
+  const { open, settling } = rows;
+  if (!open) {
+    return { open: { firstSeq: seq, context: "", raw: chunk }, opened: true, split: false, settled: false };
+  }
+  if (splitsBefore(open.raw, chunk)) {
+    // Code units, not code points: the context only feeds redaction, where
+    // half a surrogate pair at its far end changes nothing.
+    const context = (open.context + open.raw).slice(-REDACTION_OVERLAP);
+    return {
+      open: { firstSeq: seq, context, raw: chunk },
+      opened: true,
+      split: true,
+      settling: { context: open.context, raw: open.raw },
+      settled: chunk.length >= REDACTION_OVERLAP,
+    };
+  }
+  const raw = open.raw + chunk;
+  return {
+    open: { ...open, raw },
+    opened: false,
+    split: false,
+    settling,
+    settled: settling !== undefined && raw.length >= REDACTION_OVERLAP,
+  };
+}
+
+/**
+ * The agent rows of a turn after the given chunks (in seq order, everything
+ * since the turn's opening event), as planIndex would have left them. Empty
+ * chunks are skipped exactly as planIndex skips them.
+ */
+export function replayAgentRows(chunks: Array<{ seq: number; text: string }>): AgentRowsShape {
+  let rows: AgentRowsShape = {};
+  for (const { seq, text } of chunks) {
+    if (text.length === 0) {
+      continue;
+    }
+    const step = stepAgentRows(rows, text, seq);
+    rows = { open: step.open, settling: step.settled ? undefined : step.settling };
+  }
+  return rows;
+}
+
+/** A row's own text, redacted with its context before it and `after` after it. */
+function redactedRow(row: AgentRowText, after = ""): string {
+  const start = row.context.length;
+  return redactSecretsInWindow(row.context + row.raw + after, start, start + row.raw.length).text;
 }
 
 /**
@@ -178,15 +302,17 @@ function shouldCloseAgentRow(raw: string): boolean {
  *
  * - prompt: closes the open agent row (a new turn), then one `prompt` row of
  *   all its text blocks. The first prompt of an untitled session names it.
- * - agent_message_chunk: extends the open agent row, or opens one. Thought
- *   chunks are not indexed (they are the model's scratch work, and noisy).
+ * - agent_message_chunk: extends the open agent row, or opens one (on a
+ *   long turn, splitting the open row off first; see AGENT_ROW_SOFT_LIMIT).
+ *   Thought chunks are not indexed (they are the model's scratch work, and
+ *   noisy).
  * - tool_call / tool_call_update: one `tool` row of the title and the paths,
  *   only when either is present. Tool output is never indexed.
  * - error: closes the open agent row, then one `error` row of its message.
  * - turn_ended, closed: close the open agent row.
  *
- * Every text written goes through redactSecrets first, so the index never
- * holds a token the secrets patterns know.
+ * Every text written goes through the redactor first, so the index never
+ * holds a token the secrets patterns know, a split agent row included.
  */
 export function planIndex(event: EventRecord, context: IndexContext): IndexPlan {
   const ops: IndexOp[] = [];
@@ -216,15 +342,19 @@ export function planIndex(event: EventRecord, context: IndexContext): IndexPlan 
         if (chunk.length === 0) {
           return plan;
         }
-        const raw = context.open ? context.open.raw + chunk : chunk;
-        const text = redacted(raw);
+        const step = stepAgentRows({ open: context.open, settling: context.settling }, chunk, seq);
+        if (step.split) {
+          ops.push({ type: "split" });
+        }
+        const { open } = step;
+        const text = redactedRow(open);
         ops.push(
-          context.open
-            ? { type: "extend", text, raw, lastSeq: seq }
-            : { type: "open", text, raw, firstSeq: seq, lastSeq: seq, ts },
+          step.opened
+            ? { type: "open", text, raw: open.raw, context: open.context, firstSeq: seq, lastSeq: seq, ts }
+            : { type: "extend", text, raw: open.raw, lastSeq: seq },
         );
-        if (shouldCloseAgentRow(raw)) {
-          ops.push({ type: "close" });
+        if (step.settling) {
+          ops.push({ type: "settle", text: redactedRow(step.settling, open.raw), done: step.settled });
         }
         return plan;
       }

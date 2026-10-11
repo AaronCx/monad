@@ -19,6 +19,8 @@ import {
   agentChunkText,
   type OpenAgentRow,
   planIndex,
+  replayAgentRows,
+  type SettlingAgentRow,
   toFtsQuery,
 } from "./indexer.ts";
 import { monadStateDir } from "./paths.ts";
@@ -39,9 +41,10 @@ export interface SessionStoreOptions {
  * kept in PRAGMA user_version. A database below it has its derived tables
  * wiped and rebuilt from the event log at open, so changing what the indexer
  * writes means bumping this, never migrating rows by hand. 1 is the first
- * Link index.
+ * Link index; 2 redacts split agent rows and derived titles with context
+ * (rows a generation 1 index wrote may hold part of a token).
  */
-export const INDEX_GENERATION = 1;
+export const INDEX_GENERATION = 2;
 
 /** Events per transaction while backfilling, so a huge log never holds the write lock for long. */
 const BACKFILL_BATCH = 500;
@@ -93,6 +96,7 @@ interface IndexCache {
   titled: boolean;
   lastIndexedSeq: number;
   open?: OpenAgentRow;
+  settling?: SettlingAgentRow;
 }
 
 interface EventRow {
@@ -250,6 +254,13 @@ export class SessionStore {
    * it), and a build without it fails here, loudly, at daemon start.
    */
   private createIndexTables(): void {
+    const version = this.db.query<{ user_version: number }, []>("PRAGMA user_version").get();
+    const stale = (version?.user_version ?? 0) < INDEX_GENERATION;
+    if (stale) {
+      // index_state is pure bookkeeping, and its columns change between
+      // generations; recreate it rather than migrate it.
+      this.db.exec("DROP TABLE IF EXISTS index_state;");
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS session_repos (
         session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -263,7 +274,8 @@ export class SessionStore {
         session_id TEXT PRIMARY KEY REFERENCES sessions(id),
         last_indexed_seq INTEGER NOT NULL DEFAULT 0,
         open_rowid INTEGER,
-        open_bytes INTEGER NOT NULL DEFAULT 0
+        open_bytes INTEGER NOT NULL DEFAULT 0,
+        settling_rowid INTEGER
       );
     `);
     try {
@@ -285,8 +297,7 @@ export class SessionStore {
         }`,
       );
     }
-    const row = this.db.query<{ user_version: number }, []>("PRAGMA user_version").get();
-    if ((row?.user_version ?? 0) < INDEX_GENERATION) {
+    if (stale) {
       // Older generation (or a pre-Link database): drop every derived row and
       // let backfill rebuild them from the log. Titles are not wiped; a
       // derived title only ever fills an empty one.
@@ -694,19 +705,28 @@ export class SessionStore {
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      const next: IndexCache = { ...cache, lastIndexedSeq: event.seq, open: undefined };
+      const next: IndexCache = { ...cache, lastIndexedSeq: event.seq, open: undefined, settling: undefined };
       this.saveIndexState(event.sessionId, next);
       return next;
     }
   }
 
   private applyIndexPlan(event: EventRecord, cache: IndexCache): IndexCache {
-    const plan = planIndex(event, { open: cache.open, titled: cache.titled });
+    const plan = planIndex(event, { open: cache.open, settling: cache.settling, titled: cache.titled });
     let open = cache.open;
+    let settling = cache.settling;
     let titled = cache.titled;
     for (const op of plan.ops) {
       switch (op.type) {
         case "close":
+          open = undefined;
+          settling = undefined;
+          break;
+        case "split":
+          if (!open) {
+            throw new Error("index plan split an agent row that is not open");
+          }
+          settling = { rowid: open.rowid, context: open.context, raw: open.raw };
           open = undefined;
           break;
         case "insert":
@@ -721,7 +741,7 @@ export class SessionStore {
             op.lastSeq,
             op.ts,
           );
-          open = { rowid, firstSeq: op.firstSeq, raw: op.raw };
+          open = { rowid, firstSeq: op.firstSeq, context: op.context, raw: op.raw };
           break;
         }
         case "extend": {
@@ -732,6 +752,18 @@ export class SessionStore {
             .query("UPDATE search_fts SET text = $text, last_seq = $lastSeq WHERE rowid = $rowid")
             .run({ text: op.text, lastSeq: op.lastSeq, rowid: open.rowid });
           open = { ...open, raw: op.raw };
+          break;
+        }
+        case "settle": {
+          if (!settling) {
+            throw new Error("index plan settled an agent row that is not settling");
+          }
+          this.db
+            .query("UPDATE search_fts SET text = $text WHERE rowid = $rowid")
+            .run({ text: op.text, rowid: settling.rowid });
+          if (op.done) {
+            settling = undefined;
+          }
           break;
         }
       }
@@ -763,7 +795,7 @@ export class SessionStore {
         )
         .run({ sessionId: event.sessionId, root, seq: event.seq });
     }
-    const next: IndexCache = { cwd: cache.cwd, titled, lastIndexedSeq: event.seq, open };
+    const next: IndexCache = { cwd: cache.cwd, titled, lastIndexedSeq: event.seq, open, settling };
     this.saveIndexState(event.sessionId, next);
     return next;
   }
@@ -788,18 +820,20 @@ export class SessionStore {
   private saveIndexState(sessionId: SessionId, cache: IndexCache): void {
     this.db
       .query(
-        `INSERT INTO index_state (session_id, last_indexed_seq, open_rowid, open_bytes)
-         VALUES ($sessionId, $seq, $openRowid, $openBytes)
+        `INSERT INTO index_state (session_id, last_indexed_seq, open_rowid, open_bytes, settling_rowid)
+         VALUES ($sessionId, $seq, $openRowid, $openBytes, $settlingRowid)
          ON CONFLICT (session_id) DO UPDATE SET
            last_indexed_seq = excluded.last_indexed_seq,
            open_rowid = excluded.open_rowid,
-           open_bytes = excluded.open_bytes`,
+           open_bytes = excluded.open_bytes,
+           settling_rowid = excluded.settling_rowid`,
       )
       .run({
         sessionId,
         seq: cache.lastIndexedSeq,
         openRowid: cache.open?.rowid ?? null,
         openBytes: cache.open ? Buffer.byteLength(cache.open.raw) : 0,
+        settlingRowid: cache.settling?.rowid ?? null,
       });
   }
 
@@ -811,7 +845,9 @@ export class SessionStore {
    * The session's index state, from memory or rebuilt from the database. An
    * open agent row's unredacted text is not stored anywhere but the log
    * (keeping a second raw copy would be one more place a token lives), so a
-   * cold start re-reads the row's seq span and concatenates its chunks.
+   * cold start replays the current turn's agent chunks through the same
+   * row logic live indexing used, which also restores the open row's
+   * redaction context and any row still settling after a split.
    */
   private loadIndexCache(sessionId: SessionId): IndexCache {
     const cached = this.indexCache.get(sessionId);
@@ -827,35 +863,72 @@ export class SessionStore {
       throw new Error(`index: unknown session ${sessionId}`);
     }
     const state = this.db
-      .query<{ last_indexed_seq: number; open_rowid: number | null }, { sessionId: string }>(
-        "SELECT last_indexed_seq, open_rowid FROM index_state WHERE session_id = $sessionId",
-      )
+      .query<
+        { last_indexed_seq: number; open_rowid: number | null; settling_rowid: number | null },
+        { sessionId: string }
+      >("SELECT last_indexed_seq, open_rowid, settling_rowid FROM index_state WHERE session_id = $sessionId")
       .get({ sessionId });
+    const lastIndexedSeq = state?.last_indexed_seq ?? 0;
     let open: OpenAgentRow | undefined;
+    let settling: SettlingAgentRow | undefined;
     if (state?.open_rowid !== null && state?.open_rowid !== undefined) {
       const span = this.db
-        .query<{ first_seq: number; last_seq: number }, { rowid: number }>(
-          "SELECT first_seq, last_seq FROM search_fts WHERE rowid = $rowid",
-        )
+        .query<{ first_seq: number }, { rowid: number }>("SELECT first_seq FROM search_fts WHERE rowid = $rowid")
         .get({ rowid: state.open_rowid });
       if (span) {
-        const chunks = this.db
-          .query<EventRow, { sessionId: string; first: number; last: number }>(
-            `SELECT seq, session_id, ts, kind, payload FROM events
-             WHERE session_id = $sessionId AND kind = 'update' AND seq BETWEEN $first AND $last
-             ORDER BY seq ASC`,
-          )
-          .all({ sessionId, first: span.first_seq, last: span.last_seq });
-        const raw = chunks.map((row) => agentChunkText(rowToEvent(row)) ?? "").join("");
-        open = { rowid: state.open_rowid, firstSeq: span.first_seq, raw };
+        const rows = this.replayTurn(sessionId, lastIndexedSeq);
+        if (rows.open && rows.open.firstSeq === span.first_seq) {
+          open = { ...rows.open, rowid: state.open_rowid };
+          if (rows.settling && state.settling_rowid !== null) {
+            settling = { ...rows.settling, rowid: state.settling_rowid };
+          }
+        } else {
+          // The replay disagrees with the stored row (an indexing failure
+          // dropped a row mid-turn): extend the stored row from its own
+          // chunks, with no context, rather than guess.
+          const chunks = this.agentChunks(sessionId, span.first_seq - 1, lastIndexedSeq);
+          open = {
+            rowid: state.open_rowid,
+            firstSeq: span.first_seq,
+            context: "",
+            raw: chunks.map((chunk) => chunk.text).join(""),
+          };
+        }
       }
     }
-    return {
-      cwd: session.cwd,
-      titled: session.title !== null,
-      lastIndexedSeq: state?.last_indexed_seq ?? 0,
-      open,
-    };
+    return { cwd: session.cwd, titled: session.title !== null, lastIndexedSeq, open, settling };
+  }
+
+  /** The agent rows of the turn in progress at `upTo`, rebuilt from the log. */
+  private replayTurn(sessionId: SessionId, upTo: number) {
+    // The last event at or before upTo that closes agent rows starts the turn.
+    const start = this.db
+      .query<{ seq: number | null }, { sessionId: string; upTo: number }>(
+        `SELECT MAX(seq) AS seq FROM events
+         WHERE session_id = $sessionId AND seq <= $upTo
+           AND kind IN ('prompt', 'turn_ended', 'error', 'closed')`,
+      )
+      .get({ sessionId, upTo });
+    return replayAgentRows(this.agentChunks(sessionId, start?.seq ?? 0, upTo));
+  }
+
+  /** Agent message chunk texts with after < seq <= upTo, in seq order. */
+  private agentChunks(sessionId: SessionId, after: number, upTo: number): Array<{ seq: number; text: string }> {
+    const chunks: Array<{ seq: number; text: string }> = [];
+    const rows = this.db
+      .query<EventRow, { sessionId: string; after: number; upTo: number }>(
+        `SELECT seq, session_id, ts, kind, payload FROM events
+         WHERE session_id = $sessionId AND kind = 'update' AND seq > $after AND seq <= $upTo
+         ORDER BY seq ASC`,
+      )
+      .all({ sessionId, after, upTo });
+    for (const row of rows) {
+      const text = agentChunkText(rowToEvent(row));
+      if (text !== undefined) {
+        chunks.push({ seq: row.seq, text });
+      }
+    }
+    return chunks;
   }
 
   private touch(id: SessionId): void {
