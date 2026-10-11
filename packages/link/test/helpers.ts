@@ -111,7 +111,9 @@ export function makeHarness(options: HarnessOptions = {}): Harness {
     ...options.config,
     limits: { ...defaults.limits, ...options.config?.limits },
   };
-  const link = new LinkService({ manager, store, config, repos, ...options.link });
+  // The harness directory stands in for $MONAD_HOME: notes and summarizer
+  // directories land under it, never in the real ~/.monad.
+  const link = new LinkService({ manager, store, config, repos, stateDir: dir, ...options.link });
   return {
     dir,
     store,

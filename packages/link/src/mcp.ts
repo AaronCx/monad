@@ -10,6 +10,7 @@ import {
 import {
   BackendIdSchema,
   type LinkToolName,
+  MAX_NOTE_LENGTH,
   SESSIONS_MCP_SERVER_NAME,
   type SessionId,
   SessionStatusSchema,
@@ -158,6 +159,52 @@ const TOOL_DEFINITIONS: Record<
         timeout_ms: { type: "integer", minimum: 0, maximum: MAX_WAIT_MS },
       },
       required: ["session_id", "until", "timeout_ms"],
+      additionalProperties: false,
+    },
+  },
+  sessions_summarize: {
+    name: "sessions_summarize",
+    description:
+      "Ask for a model-written summary of a session: what it was for, what was done, what is unfinished. " +
+      "It runs a separate read-only session over that session's quoted transcript (this spends tokens and can " +
+      "take minutes), stores the summary on the session, and returns it. Every session already has a free, " +
+      "deterministic handoff (see sessions_list's last handoff and sessions_read); ask for a summary only when " +
+      "that is not enough.",
+    inputSchema: {
+      type: OBJECT,
+      properties: {
+        session_id: { type: "string" },
+      },
+      required: ["session_id"],
+      additionalProperties: false,
+    },
+  },
+  notes_read: {
+    name: "notes_read",
+    description:
+      "Read a repository's notes: lines that sessions and the human chose to record about it (conventions, " +
+      "traps, decisions), oldest first, each with who wrote it and when.",
+    inputSchema: {
+      type: OBJECT,
+      properties: {
+        repo: { type: "string", description: "Any absolute path inside the repository." },
+      },
+      required: ["repo"],
+      additionalProperties: false,
+    },
+  },
+  notes_append: {
+    name: "notes_append",
+    description:
+      "Record one note about a repository for later sessions to read with notes_read: a convention, a trap, " +
+      "a decision. It is stamped with this session's id and the time, and kept by monad outside the repository.",
+    inputSchema: {
+      type: OBJECT,
+      properties: {
+        repo: { type: "string", description: "Any absolute path inside the repository." },
+        text: { type: "string", maxLength: MAX_NOTE_LENGTH },
+      },
+      required: ["repo", "text"],
       additionalProperties: false,
     },
   },
@@ -381,6 +428,43 @@ async function callTool(binding: SessionsMcpBinding, name: string, args: Args): 
           last_turn_stop_reason: result.lastTurnStopReason ?? null,
         },
       );
+    }
+    case "sessions_summarize": {
+      const summary = await service.summarize(caller, requiredString(args, "session_id"));
+      const text = quoteHistory(
+        { sessionId: summary.sessionId, title: summary.title, fromSeq: summary.fromSeq, toSeq: summary.toSeq },
+        summary.text,
+      );
+      return {
+        content: [{ type: "text", text: `${text}\nStored on ${summary.sessionId} as summary event seq ${summary.seq}.` }],
+        structuredContent: redactDeep({
+          session_id: summary.sessionId,
+          summary_seq: summary.seq,
+          summarizer_session_id: summary.summarizerSessionId,
+          from_seq: summary.fromSeq,
+          to_seq: summary.toSeq,
+        }),
+      };
+    }
+    case "notes_read": {
+      const result = service.notesRead(caller, requiredString(args, "repo"));
+      const lines = result.notes.map((note) => {
+        const [first = "", ...rest] = note.text.split("\n");
+        return [`[${note.ts}] ${note.by}: ${first}`, ...rest.map((line) => `  ${line}`)].join("\n");
+      });
+      const text = quoteHistory(
+        { label: `the repo notes for ${result.repo} (${result.notes.length} notes)` },
+        lines.length > 0 ? lines.join("\n") : "no notes yet",
+      );
+      return {
+        content: [{ type: "text", text }],
+        // Metadata only: the notes themselves stay in the fenced text.
+        structuredContent: redactDeep({ repo: result.repo, count: result.notes.length }),
+      };
+    }
+    case "notes_append": {
+      const result = service.notesAppend(caller, requiredString(args, "repo"), requiredString(args, "text"));
+      return plain(`Noted for ${result.repo} at ${result.note.ts}.`, { repo: result.repo, ts: result.note.ts });
     }
     default:
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);

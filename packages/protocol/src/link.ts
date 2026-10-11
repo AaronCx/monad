@@ -16,27 +16,21 @@ export const LINK_TOOL_NAMES = [
   "sessions_message",
   "sessions_spawn",
   "sessions_wait",
+  "sessions_summarize",
+  "notes_read",
+  "notes_append",
 ] as const;
 export type LinkToolName = (typeof LINK_TOOL_NAMES)[number];
 
 /**
  * The tools a trusted review or fix session is offered: reading history and
- * nothing that reaches another session's turn. Messaging, spawning and
- * waiting on a session are interactive only.
+ * repo notes, and nothing that reaches another session's turn, spends vendor
+ * tokens or writes anything. Messaging, spawning, waiting, summarizing and
+ * appending a note are interactive only.
  */
 export const LINK_READ_ONLY_TOOL_NAMES: readonly LinkToolName[] = [
   "sessions_list",
   "sessions_search",
   "sessions_read",
-];
-
-/**
- * Names reserved for later Link phases (summaries and repo notes). They are
- * NOT served and NOT recognized by the policy until their phase lands; they
- * are listed so nothing else takes them meanwhile.
- */
-export const LINK_RESERVED_TOOL_NAMES = [
-  "sessions_summarize",
   "notes_read",
-  "notes_append",
-] as const;
+];

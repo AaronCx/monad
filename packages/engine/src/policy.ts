@@ -1108,8 +1108,9 @@ export class ModeAwarePermissionPolicy implements PermissionPolicy {
     if (linkTool !== undefined) {
       // Link tools (decision record 0012). Interactive sessions get all of
       // them without a keypress, like the checks plane. Review and fix get
-      // the read-only subset; the server does not even offer them the rest,
-      // so this is the second of two layers, and a refusal says why.
+      // the read-only subset (list, search, read, notes_read); the server
+      // does not even offer them the rest, so this is the second of two
+      // layers, and a refusal says why.
       if (mode === "interactive" || isReadOnlyLinkTool(linkTool)) {
         return this.respond(sessionId, params, byForMode(mode), "allow_once");
       }
@@ -1120,7 +1121,7 @@ export class ModeAwarePermissionPolicy implements PermissionPolicy {
         by,
         "reject_once",
         undefined,
-        `${linkTool} is not available in ${mode} mode; ${mode} sessions may only list, search and read other sessions (blocked by ${by})`,
+        `${linkTool} is not available in ${mode} mode; ${mode} sessions may only list, search and read other sessions and read repo notes (blocked by ${by})`,
       );
     }
     if (context && mode !== "interactive") {

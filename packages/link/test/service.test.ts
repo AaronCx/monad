@@ -96,9 +96,12 @@ describe("trust table", () => {
       "sessions_message",
       "sessions_spawn",
       "sessions_wait",
+      "sessions_summarize",
+      "notes_read",
+      "notes_append",
     ]);
     for (const id of [review.id, fix.id]) {
-      expect(h.link.toolsFor(id)).toEqual(["sessions_list", "sessions_search", "sessions_read"]);
+      expect(h.link.toolsFor(id)).toEqual(["sessions_list", "sessions_search", "sessions_read", "notes_read"]);
     }
     for (const id of [untrustedReview.id, untrustedInteractive.id]) {
       expect(h.link.toolsFor(id)).toEqual([]);

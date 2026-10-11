@@ -907,6 +907,9 @@ describe("monad-sessions tool identity and policy (decision record 0012)", () =>
       "sessions_message",
       "sessions_spawn",
       "sessions_wait",
+      "sessions_summarize",
+      "notes_read",
+      "notes_append",
     ]) {
       expect(monadSessionsTool(linkToolRequest(tool), "trusted") as string | undefined).toBe(tool);
     }
@@ -917,8 +920,8 @@ describe("monad-sessions tool identity and policy (decision record 0012)", () =>
     expect(monadSessionsTool(linkToolRequest("sessions_read"), undefined)).toBeUndefined();
   });
 
-  test("reserved, unknown, spoofed-by-title and wrong-kind calls are not Link tools", () => {
-    for (const tool of ["sessions_summarize", "notes_append", "sessions_exec", ""]) {
+  test("unknown, spoofed-by-title and wrong-kind calls are not Link tools", () => {
+    for (const tool of ["sessions_exec", "notes_delete", "notes", ""]) {
       expect(monadSessionsTool(linkToolRequest(tool), "trusted")).toBeUndefined();
     }
     const spoof = request({
@@ -937,26 +940,27 @@ describe("monad-sessions tool identity and policy (decision record 0012)", () =>
     const nobody: PermissionClient = {
       requestPermission: () => Promise.reject(new Error("must not be asked")),
     };
-    for (const tool of ["sessions_message", "sessions_spawn", "sessions_read"]) {
+    for (const tool of ["sessions_message", "sessions_spawn", "sessions_read", "sessions_summarize", "notes_append"]) {
       const response = await policy.request(SESSION_ID, linkToolRequest(tool), nobody);
       expect(response.outcome).toEqual({ outcome: "selected", optionId: "allow" });
     }
     expect(resolved.every((entry) => entry.meta.by === "policy:interactive")).toBe(true);
   });
 
-  test("review and fix: list, search and read only; message and spawn are rejected", async () => {
+  test("review and fix: list, search, read and notes_read only; the rest are rejected", async () => {
     for (const mode of ["review", "fix"] as const) {
       const { policy, resolved } = makeModePolicy({ mode, cwd: "/tmp", trust: "trusted" });
-      for (const tool of ["sessions_list", "sessions_search", "sessions_read"]) {
+      for (const tool of ["sessions_list", "sessions_search", "sessions_read", "notes_read"]) {
         const response = await policy.request(SESSION_ID, linkToolRequest(tool), undefined);
         expect(response.outcome).toEqual({ outcome: "selected", optionId: "allow" });
       }
-      for (const tool of ["sessions_message", "sessions_spawn", "sessions_wait"]) {
+      const writes = ["sessions_message", "sessions_spawn", "sessions_wait", "sessions_summarize", "notes_append"];
+      for (const tool of writes) {
         const response = await policy.request(SESSION_ID, linkToolRequest(tool), undefined);
         expect(response.outcome).toEqual({ outcome: "selected", optionId: "reject" });
       }
       const rejected = resolved.filter((entry) => entry.meta.optionId === "reject");
-      expect(rejected).toHaveLength(3);
+      expect(rejected).toHaveLength(writes.length);
       expect(rejected[0]?.meta).toMatchObject({ by: `policy:${mode}` });
       expect(rejected[0]?.meta.message).toContain(`not available in ${mode} mode`);
     }

@@ -326,6 +326,7 @@ describe("injection: trusted sessions only", () => {
       "sessions_list",
       "sessions_search",
       "sessions_read",
+      "notes_read",
     ]);
     const call = await mcpPost(`/mcp-sessions/${result.sessionId}`, token, {
       jsonrpc: "2.0",
@@ -339,10 +340,10 @@ describe("injection: trusted sessions only", () => {
 });
 
 describe("each mount takes only its own token", () => {
-  test("the sessions token opens /mcp-sessions/<id>: all six tools for an interactive session", async () => {
+  test("the sessions token opens /mcp-sessions/<id>: all nine tools for an interactive session", async () => {
     const { status, json } = await mcpPost(`/mcp-sessions/${sessionA}`, deriveSessionsMountToken(daemon.token, sessionA));
     expect(status).toBe(200);
-    expect(json.result.tools).toHaveLength(6);
+    expect(json.result.tools).toHaveLength(9);
   });
 
   test("the checks mount token cannot open the sessions mount", async () => {
