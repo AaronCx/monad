@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Subprocess } from "bun";
@@ -8,7 +8,9 @@ import { createHttpStream } from "@aaroncx/engine/transport";
 import { formatAccess, formatPeerMessage } from "../src/render.ts";
 import {
   formatSessionRow,
+  parseHandoffFlags,
   parseLsFlags,
+  parseNotesFlags,
   parseSearchFlags,
   parseSendArgs,
   parseShowFlags,
@@ -52,6 +54,24 @@ describe("Link flag parsing", () => {
     expect(parseLsFlags([])).toEqual({ all: false });
     expect(parseLsFlags(["--all", "--repo", "/r"])).toEqual({ all: true, repo: "/r" });
     expect(() => parseLsFlags(["--everything"])).toThrow("unknown flag");
+  });
+});
+
+describe("handoff and notes flag parsing", () => {
+  test("handoff takes an id and --summarize", () => {
+    expect(parseHandoffFlags(["0199"])).toEqual({ id: "0199", summarize: false });
+    expect(parseHandoffFlags(["0199", "--summarize"])).toEqual({ id: "0199", summarize: true });
+    expect(() => parseHandoffFlags([])).toThrow("needs a session id");
+    expect(() => parseHandoffFlags(["0199", "--model"])).toThrow("unknown flag --model");
+  });
+
+  test("notes resolves the repo path and joins everything after --append", () => {
+    expect(parseNotesFlags(["/abs/repo"])).toEqual({ repo: "/abs/repo" });
+    expect(parseNotesFlags(["rel"]).repo).toBe(join(process.cwd(), "rel"));
+    expect(parseNotesFlags(["/r", "--append", "use", "bun", "only"])).toEqual({ repo: "/r", append: "use bun only" });
+    expect(() => parseNotesFlags([])).toThrow("needs a repository path");
+    expect(() => parseNotesFlags(["/r", "--append"])).toThrow("--append needs the note text");
+    expect(() => parseNotesFlags(["/r", "--delete"])).toThrow("unknown flag --delete");
   });
 });
 
@@ -215,6 +235,44 @@ describe("monad search, show, send, ls and title against monadd", () => {
     const elsewhere = await monad("ls", "--repo", home);
     expect(elsewhere.out.trim()).toBe("no sessions");
   }, 20_000);
+
+  test("notes --append writes as the human under MONAD_HOME/notes; notes reads them back", async () => {
+    const appended = await monad("notes", join(repo, "sub", "dir"), "--append", "use", "bun", "only");
+    expect(appended.code).toBe(0);
+    expect(appended.out).toContain(`noted for ${repo} at `);
+    const files = readdirSync(join(home, "notes"));
+    expect(files).toHaveLength(1);
+    expect(statSync(join(home, "notes", files[0] as string)).mode & 0o777).toBe(0o600);
+    expect(readdirSync(repo)).toEqual([".git"]);
+    const read = await monad("notes", repo);
+    expect(read.code).toBe(0);
+    expect(read.out).toContain(`notes for ${repo}`);
+    expect(read.out).toMatch(/\d{4}-\d{2}-\d{2}T[^ ]+ {2}human {2}use bun only/);
+    const outside = await monad("notes", home);
+    expect(outside.code).toBe(1);
+    expect(outside.err).toContain("is not inside a git repository");
+  }, 20_000);
+
+  test("handoff writes one now and prints it; ls shows its first line", async () => {
+    const written = await monad("handoff", sessionId.slice(0, 13));
+    expect(written.code).toBe(0);
+    expect(written.out).toMatch(new RegExp(`^handoff ${sessionId} seq \\d+ \\(manual\\)`));
+    expect(written.out).toContain("handoff: last asked");
+    expect(written.out).toContain("## Last asks");
+    expect(written.out).not.toContain(PLANTED_TOKEN);
+    const listed = await monad("ls");
+    expect(listed.out).toContain("last handoff: handoff: last asked");
+  }, 20_000);
+
+  test("handoff --summarize also prints the summary the summarizer session wrote", async () => {
+    const written = await monad("handoff", sessionId, "--summarize");
+    expect(written.code).toBe(0);
+    expect(written.err).toContain("running the summarizer");
+    expect(written.out).toMatch(/summary seq \d+ \(by summarizer session [0-9a-f-]{36}\)/);
+    // The fake agent echoes its prompt: the summarizer saw quoted, redacted history.
+    expect(written.out).toContain("echo: Summarize monad session");
+    expect(written.out).not.toContain(PLANTED_TOKEN);
+  }, 30_000);
 
   test("errors are one line, not a stack", async () => {
     const missing = await monad("show", "ffffffff");

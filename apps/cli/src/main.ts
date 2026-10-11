@@ -22,12 +22,16 @@ import {
 } from "./daemon.ts";
 import { cmdGc } from "./gc.ts";
 import {
+  cmdHandoff,
   cmdLs,
+  cmdNotes,
   cmdSearch,
   cmdSend,
   cmdShow,
   cmdTitle,
+  parseHandoffFlags,
   parseLsFlags,
+  parseNotesFlags,
   parseSearchFlags,
   parseSendArgs,
   parseShowFlags,
@@ -59,6 +63,9 @@ function usage(): string {
     "       [--limit N]",
     "  send <id> <text>                 message a session (its next turn, or queued)",
     "  title <id> <text>                name a session",
+    "  handoff <id> [--summarize]       write a session's handoff now (--summarize:",
+    "                                   also a model-written summary; spends tokens)",
+    "  notes <repo> [--append text]     a repo's notes, or add one",
     "  daemon start|stop|status         manage monadd",
     "  acp-stdio                        stdio<->daemon ACP bridge for editors",
     "  --version                        print the version and exit",
@@ -334,6 +341,15 @@ try {
       await cmdTitle(handle, (await resolveSession(handle, id)).id, title);
       break;
     }
+    case "handoff": {
+      const flags = parseHandoffFlags(rest);
+      const handle = await ensureDaemon();
+      await cmdHandoff(handle, (await resolveSession(handle, flags.id)).id, flags);
+      break;
+    }
+    case "notes":
+      await cmdNotes(await ensureDaemon(), parseNotesFlags(rest));
+      break;
     case "daemon":
       await cmdDaemon(rest);
       break;

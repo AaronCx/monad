@@ -1,6 +1,9 @@
 import { resolve as resolvePath } from "node:path";
 import {
+  AppendNoteResponseSchema,
+  HandoffResponseSchema,
   ListSessionsResponseSchema,
+  NotesResponseSchema,
   type SessionRecord,
   SearchResponseSchema,
   SendMessageResponseSchema,
@@ -12,7 +15,7 @@ import { parseOlderThanDays } from "./gc.ts";
 
 /**
  * monad Link from the terminal (decision record 0012): search, show, send,
- * ls --repo/--all and title. Every command is a thin call to a /v1 route,
+ * ls --repo/--all, title, handoff and notes. Every command is a thin call to a /v1 route,
  * which runs the daemon's one LinkService with the human as the caller, so
  * the CLI reaches exactly what an agent reaches, through the same checks,
  * and every read lands on the target's log as an access event.
@@ -145,6 +148,56 @@ export function parseTitleArgs(argv: string[]): { id: string; title: string } {
   return { id, title };
 }
 
+export interface HandoffFlags {
+  id: string;
+  summarize: boolean;
+}
+
+export function parseHandoffFlags(argv: string[]): HandoffFlags {
+  const [id, ...rest] = argv;
+  if (!id || id.startsWith("-")) {
+    throw new Error("handoff needs a session id (see monad ls)");
+  }
+  const flags: HandoffFlags = { id, summarize: false };
+  for (const arg of rest) {
+    if (arg === "--summarize") {
+      flags.summarize = true;
+    } else {
+      throw new Error(`unknown flag ${arg}`);
+    }
+  }
+  return flags;
+}
+
+export interface NotesFlags {
+  repo: string;
+  append?: string;
+}
+
+/**
+ * monad notes <repo> [--append text...]. The repo is any path inside the
+ * repository, resolved against the current directory; everything after
+ * --append is the note.
+ */
+export function parseNotesFlags(argv: string[]): NotesFlags {
+  const [repo, ...rest] = argv;
+  if (!repo || repo.startsWith("-")) {
+    throw new Error("notes needs a repository path, e.g. monad notes . or monad notes ~/code/app --append \"use bun\"");
+  }
+  const flags: NotesFlags = { repo: absolute(repo) };
+  if (rest.length === 0) {
+    return flags;
+  }
+  if (rest[0] !== "--append") {
+    throw new Error(`unknown flag ${rest[0]}`);
+  }
+  const text = rest.slice(1).join(" ").trim();
+  if (text.length === 0) {
+    throw new Error("--append needs the note text");
+  }
+  return { ...flags, append: text };
+}
+
 export function parseLsFlags(argv: string[]): LsFlags {
   const flags: LsFlags = { all: false };
   for (let i = 0; i < argv.length; i += 1) {
@@ -246,12 +299,18 @@ export async function cmdTitle(handle: DaemonHandle, id: string, title: string):
   console.log(`${session.id}  ${JSON.stringify(session.title ?? "")}`);
 }
 
-/** One `monad ls` row. */
-export function formatSessionRow(s: SessionRecord, repos?: string[]): string {
+/** One `monad ls` row, with the repos it touched and its last handoff when known. */
+export function formatSessionRow(s: SessionRecord, repos?: string[], handoff?: string): string {
   const pr = s.pr ? `#${s.pr.number}` : "-";
   const title = JSON.stringify(s.title ?? "untitled");
-  const row = `${s.id}  ${s.status.padEnd(22)}  ${s.mode.padEnd(11)}  ${pr.padEnd(6)}  ${title}  ${s.cwd}  ${s.updatedAt}`;
-  return repos === undefined ? row : `${row}\n    repos: ${repos.length > 0 ? repos.join(", ") : "none"}`;
+  const lines = [`${s.id}  ${s.status.padEnd(22)}  ${s.mode.padEnd(11)}  ${pr.padEnd(6)}  ${title}  ${s.cwd}  ${s.updatedAt}`];
+  if (repos !== undefined) {
+    lines.push(`    repos: ${repos.length > 0 ? repos.join(", ") : "none"}`);
+  }
+  if (handoff !== undefined) {
+    lines.push(`    last handoff: ${handoff}`);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -271,6 +330,51 @@ export async function cmdLs(handle: DaemonHandle, flags: LsFlags): Promise<void>
     return;
   }
   for (const s of sessions) {
-    console.log(formatSessionRow(s, response.repos?.[s.id]));
+    console.log(formatSessionRow(s, response.repos?.[s.id], response.handoffs?.[s.id]));
+  }
+}
+
+/**
+ * monad handoff: writes a fresh deterministic handoff and prints it. With
+ * --summarize it also runs the model-written summary (a separate read-only
+ * session; it spends vendor tokens and can take minutes) and prints that.
+ */
+export async function cmdHandoff(handle: DaemonHandle, id: string, flags: HandoffFlags): Promise<void> {
+  if (flags.summarize) {
+    console.error("monad: writing the handoff, then running the summarizer (this can take a few minutes)");
+  }
+  const result = HandoffResponseSchema.parse(
+    await sendJson(handle, "POST", `/v1/sessions/${id}/handoff`, flags.summarize ? { summarize: true } : {}),
+  );
+  console.log(`handoff ${result.sessionId} seq ${result.handoff.seq} (${result.handoff.reason})`);
+  console.log(result.handoff.text);
+  if (result.summary) {
+    console.log("");
+    console.log(`summary seq ${result.summary.seq} (by summarizer session ${result.summary.summarizerSessionId})`);
+    console.log(result.summary.text);
+  }
+}
+
+/** monad notes: prints a repository's notes, or appends one. */
+export async function cmdNotes(handle: DaemonHandle, flags: NotesFlags): Promise<void> {
+  if (flags.append !== undefined) {
+    const { repo, note } = AppendNoteResponseSchema.parse(
+      await sendJson(handle, "POST", "/v1/notes", { repo: flags.repo, text: flags.append }),
+    );
+    console.log(`noted for ${repo} at ${note.ts}`);
+    return;
+  }
+  const { repo, notes } = NotesResponseSchema.parse(await getJson(handle, `/v1/notes${query({ repo: flags.repo })}`));
+  if (notes.length === 0) {
+    console.log(`no notes for ${repo}`);
+    return;
+  }
+  console.log(`notes for ${repo}`);
+  for (const note of notes) {
+    const [first = "", ...rest] = note.text.split("\n");
+    console.log(`${note.ts}  ${note.by}  ${first}`);
+    for (const line of rest) {
+      console.log(`    ${line}`);
+    }
   }
 }
