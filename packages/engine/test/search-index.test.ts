@@ -383,6 +383,22 @@ describe("full-text index fed on append", () => {
     expect(store.search("scroll", { since: "2999-01-01T00:00:00.000Z" })).toEqual([]);
     expect(store.search("scroll", { limit: 1 })).toHaveLength(1);
   });
+
+  test("a non-finite or out-of-range limit falls back or clamps instead of throwing", () => {
+    const dir = tempDir("monad-fts-");
+    const store = openStore(join(dir, "monad.db"));
+    const record = store.create(makeRecord());
+    for (let i = 0; i < 25; i += 1) {
+      store.append(record.id, "prompt", prompt(record.id, `pipeline run ${i}`));
+    }
+    expect(store.search("pipeline", { limit: Number.NaN })).toHaveLength(20);
+    expect(store.search("pipeline", { limit: Number("abc") })).toHaveLength(20);
+    expect(store.search("pipeline", { limit: Number.POSITIVE_INFINITY })).toHaveLength(20);
+    expect(store.search("pipeline", { limit: 0 })).toHaveLength(1);
+    expect(store.search("pipeline", { limit: -5 })).toHaveLength(1);
+    expect(store.search("pipeline", { limit: 2.9 })).toHaveLength(2);
+    expect(store.search("pipeline", { limit: 10_000 })).toHaveLength(25);
+  });
 });
 
 describe("repos touched", () => {

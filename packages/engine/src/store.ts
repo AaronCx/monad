@@ -54,7 +54,7 @@ export interface SearchOptions {
   repo?: string;
   /** Only rows at or after this ISO timestamp. */
   since?: string;
-  /** Default 20, at most 200. */
+  /** Default 20 (also for a non-finite value), clamped to 1..200. */
   limit?: number;
   /** Only these sessions. An empty list matches nothing. */
   sessionIds?: SessionId[];
@@ -583,7 +583,10 @@ export class SessionStore {
     if (options.sessionIds?.length === 0 || options.kinds?.length === 0) {
       return [];
     }
-    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 20), 1), 200);
+    // Any non-finite limit (NaN from a parsed `?limit=abc`, Infinity) means
+    // the default; binding NaN to LIMIT would throw "datatype mismatch".
+    const requested = Number(options.limit);
+    const limit = Number.isFinite(requested) ? Math.min(Math.max(Math.trunc(requested), 1), 200) : 20;
     const params: Record<string, string | number> = {
       match,
       limit,
