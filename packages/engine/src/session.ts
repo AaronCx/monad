@@ -230,11 +230,12 @@ export class SessionManager {
               return undefined;
             }
             if (record.mode !== "fix") {
-              return { mode: record.mode, cwd: record.cwd };
+              return { mode: record.mode, cwd: record.cwd, trust: record.trust };
             }
             return {
               mode: record.mode,
               cwd: record.cwd,
+              trust: record.trust,
               // Frozen at fix-mode entry (decision record 0009). Reading it
               // off the record rather than off the worktree is the whole
               // point: the worktree is what the agent edits. Only fix mode
