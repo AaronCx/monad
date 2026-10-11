@@ -99,18 +99,21 @@ function rootForGitFile(toplevel: string, gitFile: string): string {
  * home directory get no special case either way: they are a repo exactly when
  * they contain `.git`, like any other directory.
  *
- * Every directory visited is cached against its answer, positive or negative,
- * so a busy session pays for a few stat calls the first time it touches a
- * directory and a map lookup after that. A directory that becomes a repo
- * after it was cached as "not a repo" is missed until it is evicted; that is
- * the price of never shelling out on the append path, and it only affects a
- * directory that was touched BEFORE its own `git init` (a fresh directory
- * created by the init is not in the cache yet).
+ * Every directory a walk visits on its way to a repository root is cached
+ * against that root, so a session working in a repo pays for a few stat calls
+ * the first time it touches a directory and a map lookup after that. "Not in
+ * any repo" is never cached: an agent scaffolding a project writes into a
+ * directory and THEN runs `git init` there, and a cached negative would leave
+ * every later edit untagged, for every session, until the daemon restarted.
+ * A path outside every repo costs one stat per ancestor each time instead.
+ * (A positive answer can go stale the same way only when a NEW repo is
+ * initialized inside a directory already cached as part of an outer one,
+ * which is rare enough to leave to eviction.)
  */
 export class RepoResolver {
   private readonly home: string;
   private readonly maxEntries: number;
-  private readonly cache = new Map<string, string | null>();
+  private readonly cache = new Map<string, string>();
 
   constructor(options: RepoResolverOptions = {}) {
     this.home = options.home ?? homedir();
@@ -148,13 +151,13 @@ export class RepoResolver {
     if (kind === "file") {
       start = dirname(start);
     }
-    return this.rootOfDir(start) ?? undefined;
+    return this.rootOfDir(start);
   }
 
-  private rootOfDir(start: string): string | null {
+  private rootOfDir(start: string): string | undefined {
     const visited: string[] = [];
     let dir = start;
-    let found: string | null = null;
+    let found: string | undefined;
     for (;;) {
       const cached = this.lookup(dir);
       if (cached !== undefined) {
@@ -178,24 +181,25 @@ export class RepoResolver {
       }
       dir = parent;
     }
-    for (const seen of visited) {
-      this.store(seen, found);
+    if (found !== undefined) {
+      for (const seen of visited) {
+        this.store(seen, found);
+      }
     }
     return found;
   }
 
-  private lookup(dir: string): string | null | undefined {
-    if (!this.cache.has(dir)) {
-      return undefined;
+  private lookup(dir: string): string | undefined {
+    const value = this.cache.get(dir);
+    if (value !== undefined) {
+      // Refresh recency: Map iteration order is insertion order.
+      this.cache.delete(dir);
+      this.cache.set(dir, value);
     }
-    const value = this.cache.get(dir) ?? null;
-    // Refresh recency: Map iteration order is insertion order.
-    this.cache.delete(dir);
-    this.cache.set(dir, value);
     return value;
   }
 
-  private store(dir: string, root: string | null): void {
+  private store(dir: string, root: string): void {
     this.cache.set(dir, root);
     if (this.cache.size > this.maxEntries) {
       const oldest = this.cache.keys().next().value;

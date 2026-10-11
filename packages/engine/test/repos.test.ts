@@ -143,6 +143,19 @@ describe("RepoResolver", () => {
     expect(new RepoResolver().resolve(join(repo, "src", "a.ts"))).toBeUndefined();
   });
 
+  test("a directory that becomes a repo after it was first touched resolves to it", () => {
+    const parent = tempDir("monad-repos-");
+    const proj = join(parent, "proj");
+    mkdirSync(join(proj, "src"), { recursive: true });
+    const resolver = new RepoResolver();
+    // Scaffold first, git init second: the usual order for a new project.
+    expect(resolver.resolve(join(proj, "package.json"))).toBeUndefined();
+    expect(resolver.resolve(join(proj, "src", "index.ts"))).toBeUndefined();
+    git(proj, "init", "-q", "-b", "main");
+    expect(resolver.resolve(join(proj, "src", "index.ts"))).toBe(proj);
+    expect(resolver.resolve(join(proj, "package.json"))).toBe(proj);
+  });
+
   test("the cache is bounded", () => {
     const parent = tempDir("monad-repos-");
     const repo = makeRepo(parent, "alpha");

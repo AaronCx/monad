@@ -448,6 +448,25 @@ describe("repos touched", () => {
     expect(store.reposFor(record.id)).toEqual([]);
   });
 
+  test("a project scaffolded before its git init is tagged from the init on", () => {
+    const parent = tempDir("monad-repos-");
+    const proj = join(parent, "proj");
+    mkdirSync(proj, { recursive: true });
+    const store = openStore(join(parent, "monad.db"));
+    const record = store.create(makeRecord({ cwd: parent }));
+    const edit = (path: string) =>
+      store.append(record.id, "update", tool(record.id, { title: "Write", kind: "edit", locations: [{ path }] })).seq;
+    edit(join(proj, "package.json"));
+    expect(store.reposFor(record.id)).toEqual([]);
+    git(proj, "init", "-q", "-b", "main");
+    const tagged = edit(join(proj, "src", "index.ts"));
+    expect(store.reposFor(record.id)).toEqual([{ repoRoot: proj, firstSeq: tagged, lastSeq: tagged }]);
+    // Another session in the same daemon resolves it too.
+    const other = store.create(makeRecord());
+    store.append(other.id, "update", tool(other.id, { title: "Read", locations: [{ path: join(proj, "package.json") }] }));
+    expect(store.sessionsForRepo(proj).sort()).toEqual([record.id, other.id].sort());
+  });
+
   test("sessionsForRepo lists the most recently touching session first", () => {
     const parent = tempDir("monad-repos-");
     const repo = makeRepo(parent, "alpha");
