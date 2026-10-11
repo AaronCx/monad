@@ -17,9 +17,15 @@ import {
  * /acp. Both require the bearer token.
  */
 
-/** Response of GET /v1/sessions. */
+/**
+ * Response of GET /v1/sessions. With any Link filter (repo, status, since,
+ * limit, imported) the list is filtered and ordered most recently active
+ * first, and `repos` maps each listed session to the repositories it
+ * touched. With none, every session, oldest first, as in M1.
+ */
 export const ListSessionsResponseSchema = z.object({
   sessions: z.array(SessionRecordSchema),
+  repos: z.record(z.string(), z.array(z.string())).optional(),
 });
 export type ListSessionsResponse = z.infer<typeof ListSessionsResponseSchema>;
 

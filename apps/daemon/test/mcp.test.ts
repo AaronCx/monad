@@ -9,7 +9,7 @@ import {
   methods,
   PROTOCOL_VERSION,
 } from "@agentclientprotocol/sdk";
-import { deriveMountToken } from "@aaroncx/engine";
+import { deriveMountToken, deriveSessionsMountToken } from "@aaroncx/engine";
 import { createHttpStream } from "@aaroncx/engine/transport";
 
 /**
@@ -185,12 +185,17 @@ afterAll(async () => {
 });
 
 describe("monad-checks injection on session/new", () => {
-  test("the vendor received exactly one http entry with the session URL and bearer header", () => {
+  test("the vendor received the checks entry with the session URL and bearer header", () => {
     const records = recordedMcp(sessionCwd);
     expect(records).toHaveLength(1);
     const record = records[0];
     expect(record?.method).toBe("session/new");
-    expect(record?.mcpServers).toHaveLength(1);
+    // A trusted session also gets monad Link's sessions mount (decision
+    // record 0012), after the checks entry and with its own token.
+    expect(record?.mcpServers.map((server) => server.name)).toEqual(["monad-checks", "monad-sessions"]);
+    expect(record?.mcpServers[1]?.headers).toEqual([
+      { name: "Authorization", value: `Bearer ${deriveSessionsMountToken(daemon.token, sessionId)}` },
+    ]);
     const entry = record?.mcpServers[0];
     expect(entry).toEqual({
       type: "http",
@@ -303,7 +308,9 @@ describe("restore after a daemon restart", () => {
     expect(records).toHaveLength(2);
     const load = records[1];
     expect(load?.method).toBe("session/load");
-    expect(load?.mcpServers).toHaveLength(1);
+    // The same two entries as session/new: one shared builder (record 0006
+    // fact 3, the vendor fingerprint).
+    expect(load?.mcpServers.map((server) => server.name)).toEqual(["monad-checks", "monad-sessions"]);
     const entry = load?.mcpServers[0];
     expect(entry?.name).toBe("monad-checks");
     // The entry carries the CURRENT port. With --port 0 the restarted

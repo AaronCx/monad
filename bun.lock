@@ -28,6 +28,7 @@
         "@aaroncx/backends": "workspace:*",
         "@aaroncx/checks": "workspace:*",
         "@aaroncx/engine": "workspace:*",
+        "@aaroncx/link": "workspace:*",
         "@aaroncx/protocol": "workspace:*",
         "@agentclientprotocol/sdk": "^1.4.0",
       },
