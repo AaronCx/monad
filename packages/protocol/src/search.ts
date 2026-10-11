@@ -11,9 +11,9 @@ import { SessionIdSchema, TimestampSchema } from "./session.ts";
  * What an indexed row was made from. prompt: a user prompt's text blocks.
  * agent: agent message text, coalesced per turn. tool: a tool call's title
  * and the paths it touched (never its output). error: an error event's
- * message. Later Link phases add their own kinds here.
+ * message. handoff and summary (phase 3): a handoff's or a summary's text.
  */
-export const SearchKindSchema = z.enum(["prompt", "agent", "tool", "error"]);
+export const SearchKindSchema = z.enum(["prompt", "agent", "tool", "error", "handoff", "summary"]);
 export type SearchKind = z.infer<typeof SearchKindSchema>;
 
 /**

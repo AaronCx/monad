@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
   AccessPayloadSchema,
+  AppendNoteRequestSchema,
   BackendIdSchema,
   DaemonInfoSchema,
   DaemonStatusSchema,
   ERROR_NOTIFICATION_METHOD,
   EventKindSchema,
   EventRecordSchema,
+  HandoffPayloadSchema,
+  HandoffRequestSchema,
   ListSessionsResponseSchema,
   MonadErrorNotificationSchema,
   PeerMessagePayloadSchema,
@@ -16,6 +19,7 @@ import {
   SearchHitSchema,
   SessionIdSchema,
   SessionRecordSchema,
+  SummaryPayloadSchema,
   UpdateSessionRequestSchema,
 } from "../src/index.ts";
 
@@ -117,6 +121,8 @@ describe("EventRecordSchema", () => {
       "closed",
       "peer_message",
       "access",
+      "handoff",
+      "summary",
     ]);
   });
 
@@ -254,5 +260,38 @@ describe("Link schemas", () => {
     expect(SendMessageRequestSchema.parse({ text: "  hi  " }).text).toBe("hi");
     expect(SendMessageRequestSchema.safeParse({ text: "   " }).success).toBe(false);
     expect(SendMessageRequestSchema.safeParse({ text: "x".repeat(32_001) }).success).toBe(false);
+  });
+
+  test("a handoff carries its reason, one-line-first text, repos with git state, and the seq range", () => {
+    const payload = {
+      reason: "idle" as const,
+      text: "idle: fix the clamp (1 repo, dirty)\n\n## Last asks",
+      lastAsks: ["fix the clamp"],
+      files: ["/r/src/a.ts"],
+      repos: [
+        { root: "/r", checkout: "/r", branch: "main", head: "abc", dirty: true, changedFiles: ["src/a.ts"], changedCount: 1 },
+        { root: "/gone", checkout: "/gone", changedFiles: [], changedCount: 0, error: "git status timed out" },
+      ],
+      pendingPermissions: [{ toolCallId: "call_1", title: "Edit a" }],
+      lastErrors: [],
+      children: [{ id: Bun.randomUUIDv7(), title: "child", status: "idle" }],
+      fromSeq: 1,
+      toSeq: 9,
+    };
+    expect(HandoffPayloadSchema.parse(payload)).toEqual(payload);
+    expect(HandoffPayloadSchema.safeParse({ ...payload, reason: "bored" }).success).toBe(false);
+    const summary = { text: "s", summarizerSessionId: Bun.randomUUIDv7(), fromSeq: 1, toSeq: 2 };
+    expect(SummaryPayloadSchema.parse(summary)).toEqual(summary);
+  });
+
+  test("handoff and note requests are strict, notes trimmed and bounded", () => {
+    expect(HandoffRequestSchema.safeParse({ summarize: true }).success).toBe(true);
+    expect(HandoffRequestSchema.safeParse({ summarize: true, model: "x" }).success).toBe(false);
+    expect(AppendNoteRequestSchema.parse({ repo: "/r", text: "  remember this  " }).text).toBe("remember this");
+    expect(AppendNoteRequestSchema.safeParse({ repo: "/r", text: "  " }).success).toBe(false);
+    expect(AppendNoteRequestSchema.safeParse({ repo: "/r", text: "x".repeat(8_001) }).success).toBe(false);
+    expect(ListSessionsResponseSchema.parse({ sessions: [], handoffs: { a: "idle: x" } }).handoffs).toEqual({
+      a: "idle: x",
+    });
   });
 });

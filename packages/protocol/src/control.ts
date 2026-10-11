@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EventRecordSchema } from "./events.ts";
+import { EventRecordSchema, HandoffReasonSchema, LinkActorSchema } from "./events.ts";
 import { SearchKindSchema } from "./search.ts";
 import {
   BackendIdSchema,
@@ -20,12 +20,14 @@ import {
 /**
  * Response of GET /v1/sessions. With any Link filter (repo, status, since,
  * limit, imported) the list is filtered and ordered most recently active
- * first, and `repos` maps each listed session to the repositories it
- * touched. With none, every session, oldest first, as in M1.
+ * first, `repos` maps each listed session to the repositories it touched,
+ * and `handoffs` maps each session that has one to its last handoff's first
+ * line. With none, every session, oldest first, as in M1.
  */
 export const ListSessionsResponseSchema = z.object({
   sessions: z.array(SessionRecordSchema),
   repos: z.record(z.string(), z.array(z.string())).optional(),
+  handoffs: z.record(z.string(), z.string()).optional(),
 });
 export type ListSessionsResponse = z.infer<typeof ListSessionsResponseSchema>;
 
@@ -250,3 +252,71 @@ export const SendMessageResponseSchema = z.object({
   delivery: z.enum(["turn", "queued"]),
 });
 export type SendMessageResponse = z.infer<typeof SendMessageResponseSchema>;
+
+/**
+ * Body of POST /v1/sessions/<id>/handoff (Link phase 3). Writes a fresh
+ * deterministic handoff (reason manual) and returns it. summarize: true also
+ * runs the model-written summary, which spends vendor tokens and so only
+ * ever happens on a request like this one.
+ */
+export const HandoffRequestSchema = z.strictObject({
+  summarize: z.boolean().optional(),
+});
+export type HandoffRequest = z.infer<typeof HandoffRequestSchema>;
+
+/** Response of POST /v1/sessions/<id>/handoff. Text is redacted. */
+export const HandoffResponseSchema = z.object({
+  sessionId: SessionIdSchema,
+  handoff: z.object({
+    seq: z.number().int().positive(),
+    ts: TimestampSchema,
+    reason: HandoffReasonSchema,
+    text: z.string(),
+  }),
+  summary: z
+    .object({
+      seq: z.number().int().positive(),
+      ts: TimestampSchema,
+      text: z.string(),
+      summarizerSessionId: SessionIdSchema,
+    })
+    .optional(),
+});
+export type HandoffResponse = z.infer<typeof HandoffResponseSchema>;
+
+/** Longest repo note accepted, from a session or from the CLI. */
+export const MAX_NOTE_LENGTH = 8_000;
+
+/**
+ * One repo note (Link phase 3, the Memory equivalent): written only by an
+ * explicit notes_append call or by the human, never inferred. `by` is the
+ * writing session, or "human". `repo` is the canonical repository root.
+ */
+export const RepoNoteSchema = z.object({
+  ts: TimestampSchema,
+  by: LinkActorSchema,
+  repo: z.string(),
+  text: z.string(),
+});
+export type RepoNote = z.infer<typeof RepoNoteSchema>;
+
+/** Response of GET /v1/notes?repo=P. Notes oldest first, redacted. */
+export const NotesResponseSchema = z.object({
+  repo: z.string(),
+  notes: z.array(RepoNoteSchema),
+});
+export type NotesResponse = z.infer<typeof NotesResponseSchema>;
+
+/** Body of POST /v1/notes. `repo` is any path inside the repository. */
+export const AppendNoteRequestSchema = z.strictObject({
+  repo: z.string().min(1),
+  text: z.string().trim().min(1).max(MAX_NOTE_LENGTH),
+});
+export type AppendNoteRequest = z.infer<typeof AppendNoteRequestSchema>;
+
+/** Response of POST /v1/notes: the note as stored. */
+export const AppendNoteResponseSchema = z.object({
+  repo: z.string(),
+  note: RepoNoteSchema,
+});
+export type AppendNoteResponse = z.infer<typeof AppendNoteResponseSchema>;
