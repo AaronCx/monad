@@ -202,8 +202,13 @@ export class SessionManager {
    */
   private readonly allowlistInputsEdited = new Set<SessionId>();
   private readonly changeListeners = new Set<SessionChangeListener>();
-  /** Set by shutdown(); a deferred peer drain must not touch a closed store. */
-  private stopped = false;
+  /**
+   * Set by beginShutdown() (and shutdown()). From then on no deferred peer
+   * drain starts a turn: the daemon is about to cancel and close everything,
+   * and a turn started now would log its prompt (marking the message
+   * delivered) and then be killed, losing the message across the restart.
+   */
+  private stopping = false;
   /** Sessions with a peer drain already scheduled, so a burst schedules one. */
   private readonly drainsScheduled = new Set<SessionId>();
 
@@ -595,9 +600,20 @@ export class SessionManager {
     this.setStatus(id, "closed");
   }
 
+  /**
+   * Stops peer delivery ahead of a daemon shutdown. The daemon calls this
+   * before it cancels in-flight turns: a cancelled turn's boundary (or one
+   * that ended just before the signal) would otherwise start the next
+   * queued message's turn mid-shutdown, log its prompt and then lose it.
+   * Messages stay queued in the log and are delivered after the restart.
+   */
+  beginShutdown(): void {
+    this.stopping = true;
+  }
+
   /** Daemon shutdown: closes every live backend without closing sessions. */
   async shutdown(): Promise<void> {
-    this.stopped = true;
+    this.stopping = true;
     for (const session of this.live.values()) {
       if (session.backend) {
         await session.backend.close();
@@ -719,7 +735,7 @@ export class SessionManager {
   }
 
   private schedulePeerDrain(id: SessionId): void {
-    if (this.stopped || this.drainsScheduled.has(id)) {
+    if (this.stopping || this.drainsScheduled.has(id)) {
       return;
     }
     this.drainsScheduled.add(id);
@@ -731,7 +747,7 @@ export class SessionManager {
 
   /** Delivers the oldest queued peer message when the session can take it. */
   private drainPeerQueue(id: SessionId): void {
-    if (this.stopped) {
+    if (this.stopping) {
       return;
     }
     let record: SessionRecord | undefined;

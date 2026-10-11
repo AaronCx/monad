@@ -359,6 +359,36 @@ describe("deliverPeerMessage", () => {
     await waitFor(() => manager.get(target.id)?.status === "idle", "idle");
   });
 
+  test("after beginShutdown a turn boundary does not start the next queued message", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "monad-peer-shutdown-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "monad.db");
+    const first = makeManager(openStore(dbPath));
+    const target = await first.manager.create({ cwd: "/tmp/target" });
+    const turn = first.manager.prompt(target.id, {
+      sessionId: target.id,
+      prompt: [{ type: "text", text: "human ask" }],
+    });
+    const queued = message(target.id, "deliver me after the restart");
+    first.manager.deliverPeerMessage(queued);
+    const backend = first.backends.get(target.id);
+    await waitFor(() => (backend?.prompts.length ?? 0) === 1, "the human turn");
+    // The turn ends just as SIGTERM arrives: its drain is scheduled but has
+    // not run when the daemon begins shutting down.
+    backend?.turns[0]?.resolve({ stopReason: "end_turn" });
+    await turn;
+    first.manager.beginShutdown();
+    await Bun.sleep(20);
+    expect(backend?.prompts).toHaveLength(1);
+    await first.manager.shutdown();
+    first.store.close();
+
+    const second = makeManager(openStore(dbPath));
+    expect(second.manager.queuedPeerMessages(target.id).map((m) => m.messageId)).toEqual([
+      queued.messageId,
+    ]);
+  });
+
   test("closed and imported targets refuse; review targets hold the message queued", async () => {
     const { store, manager } = makeManager();
     const closed = await manager.create({ cwd: "/tmp/a" });

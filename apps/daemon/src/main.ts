@@ -212,6 +212,10 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`monadd: ${signal} received, shutting down`);
   try {
+    // No queued peer message may start a turn from here on: the cancels
+    // below end turns, and a turn started at one of those boundaries would
+    // log its prompt (marking the message delivered) and then be killed.
+    manager.beginShutdown();
     // Cancel in-flight turns (this also resolves held permission requests
     // with a cancelled outcome) before closing backends.
     for (const record of manager.list()) {
