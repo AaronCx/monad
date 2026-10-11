@@ -144,6 +144,42 @@ describe("idle handoffs", () => {
     expect(handoffs(h, s.id)).toHaveLength(2);
   });
 
+  test("a manual handoff written mid-turn does not stand in for the idle one after the turn", async () => {
+    const h = harness();
+    const s = await h.session();
+    scheduler(h, 40).start();
+
+    const done = h.manager.prompt(s.id, userPrompt(s.id, "a long turn"));
+    await waitFor(() => h.backends.get(s.id)?.prompts.length === 1, "the turn");
+    // The human snapshots the session while it works.
+    await h.link.handoff({ kind: "human" }, s.id);
+    h.history(s.id, [["error", { message: "the build broke late in the turn" }]]);
+    h.backends.get(s.id)?.endTurn();
+    await done;
+
+    await waitFor(() => handoffs(h, s.id).length === 2, "the idle handoff after the turn");
+    const [manual, idle] = handoffs(h, s.id);
+    expect(manual?.reason).toBe("manual");
+    expect(idle?.reason).toBe("idle");
+    // The idle one knows how the turn ended; the mid-turn snapshot could not.
+    expect(idle?.lastErrors).toEqual(["the build broke late in the turn"]);
+    expect(h.link.lastHandoffLine(s.id)).toMatch(/^idle: /);
+    await Bun.sleep(200);
+    expect(handoffs(h, s.id)).toHaveLength(2);
+  });
+
+  test("a manual handoff written after the turn ended covers the stretch: no second one", async () => {
+    const h = harness();
+    const s = await h.session();
+    const sched = scheduler(h, 80);
+    sched.start();
+    await turn(h, s.id, "short work");
+    await h.link.handoff({ kind: "human" }, s.id);
+    await Bun.sleep(250);
+    expect(handoffs(h, s.id).map((handoff) => handoff.reason)).toEqual(["manual"]);
+    expect(sched.armed()).toEqual([]);
+  });
+
   test("a session nobody prompted gets no automatic handoff", async () => {
     const h = harness();
     const s = await h.session();

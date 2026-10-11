@@ -448,7 +448,7 @@ export interface HandoffSchedulerOptions {
 }
 
 interface ArmedTimer {
-  /** The idle stretch this timer belongs to: the seq of the prompt that began it. */
+  /** The idle stretch this timer belongs to: the seq of the turn boundary that began it. */
   stretch: number;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -457,13 +457,21 @@ interface ArmedTimer {
  * Writes the automatic handoffs: one per idle stretch, idleMs after the
  * stretch's turn boundary, and one just before a session closes.
  *
- * An idle stretch is everything after a session's last prompt. It gets at
- * most one idle handoff, and whether it has one is read from the log (a
- * handoff with a seq past the stretch's prompt), so a restarted daemon
- * neither repeats one nor misses one: start() catches up every idle session
- * whose window has already passed, and arms the rest for what is left of
- * theirs. A new prompt ends the stretch (its timer is dropped) and the turn
- * boundary after it starts the next.
+ * An idle stretch is everything after a session's last turn boundary (the
+ * turn_ended or error that ended its last turn). It gets at most one idle
+ * handoff, and whether it has one is read from the log (a handoff with a seq
+ * past the boundary), so a restarted daemon neither repeats one nor misses
+ * one: start() catches up every idle session whose window has already
+ * passed, and arms the rest for what is left of theirs. A new prompt ends
+ * the stretch (its timer is dropped) and the turn boundary after it starts
+ * the next.
+ *
+ * A handoff written BEFORE the boundary does not count: `monad handoff <id>`
+ * run while a turn is in flight describes the session mid-turn (its git
+ * state, errors and children as they were then), so the stretch after that
+ * turn still gets its own. An error logged while the session sits idle (a
+ * vendor process dying) is a boundary too: the handoff before it no longer
+ * says where the session stands, so the stretch it starts gets a fresh one.
  *
  * Nothing a handoff writes re-arms anything. The timers are driven by the
  * manager's change listener (status flips and turn boundaries) and by
@@ -523,22 +531,23 @@ export class HandoffScheduler {
   }
 
   /**
-   * The open idle stretch of a session: the seq of its last prompt and the
-   * time of its last turn boundary. Undefined when it was never prompted or
-   * the stretch already has a handoff.
+   * The open idle stretch of a session: the seq and time of its last turn
+   * boundary (the last prompt, turn_ended or error; the prompt itself when
+   * its turn logged no end). Undefined when it was never prompted or a
+   * handoff was written after that boundary.
    */
   private openStretch(id: SessionId): { stretch: number; boundaryMs: number } | undefined {
     const prompt = this.store.lastEventOfKind(id, "prompt");
     if (!prompt) {
       return undefined;
     }
+    const boundary = this.store.lastEventOfKinds(id, ["prompt", "turn_ended", "error"]) ?? prompt;
     const handoff = this.store.lastEventOfKind(id, "handoff");
-    if (handoff && handoff.seq > prompt.seq) {
+    if (handoff && handoff.seq > boundary.seq) {
       return undefined;
     }
-    const boundary = this.store.lastEventOfKinds(id, ["prompt", "turn_ended", "error"]) ?? prompt;
     const boundaryMs = Date.parse(boundary.ts);
-    return { stretch: prompt.seq, boundaryMs: Number.isFinite(boundaryMs) ? boundaryMs : this.now() };
+    return { stretch: boundary.seq, boundaryMs: Number.isFinite(boundaryMs) ? boundaryMs : this.now() };
   }
 
   private clear(id: SessionId): void {
