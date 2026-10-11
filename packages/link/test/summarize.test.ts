@@ -379,4 +379,36 @@ describe("what bounds the summaries a session can start", () => {
     finish(h, await runningFor(h, t2));
     expect((await again).text).toBe("Summary.");
   });
+
+  test("a session's summaries share its message and spawn rate bucket; the human's do not", async () => {
+    const h = harness({ config: { limits: { messagesPerMinute: 1, messageBurst: 1 } } });
+    const caller = await h.session();
+    const as = { kind: "session" as const, id: caller.id };
+    const a = await targetWithHistory(h);
+    const b = await targetWithHistory(h);
+
+    const first = h.link.summarize(as, a.id);
+    finish(h, await runningFor(h, a.id));
+    await first;
+
+    const before = h.store.list().length;
+    let limited: unknown;
+    try {
+      await h.link.summarize(as, b.id);
+    } catch (error) {
+      limited = error;
+    }
+    expect(limited).toBeInstanceOf(LinkError);
+    expect((limited as LinkError).code).toBe("rate_limited");
+    expect(h.store.list()).toHaveLength(before);
+    expect(accessEvents(h.store, caller.id).at(-1)).toMatchObject({ op: "summarize", target: b.id });
+    expect(String(accessEvents(h.store, caller.id).at(-1)?.refused)).toContain("rate limited");
+    // The same bucket: a message is refused now too.
+    expect(() => h.link.message(as, a.id, "hello")).toThrow("rate limited");
+
+    // The human is not rate limited.
+    const human = h.link.summarize({ kind: "human" }, b.id);
+    finish(h, await runningFor(h, b.id));
+    expect((await human).text).toBe("Summary.");
+  });
 });
