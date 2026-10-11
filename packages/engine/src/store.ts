@@ -5,18 +5,63 @@ import {
   type EventKind,
   type EventRecord,
   EventRecordSchema,
+  type SearchHit,
+  type SearchKind,
   type SessionId,
   type SessionMode,
   type SessionRecord,
   SessionRecordSchema,
+  type SessionRepo,
   type SessionStatus,
+  type TitleSource,
 } from "@aaroncx/protocol";
+import {
+  agentChunkText,
+  type OpenAgentRow,
+  planIndex,
+  toFtsQuery,
+} from "./indexer.ts";
 import { monadStateDir } from "./paths.ts";
+import { eventPaths, RepoResolver } from "./repos.ts";
 
 export interface SessionStoreOptions {
   /** Database file path. Defaults to ~/.monad/monad.db. Injectable for tests. */
   dbPath?: string;
+  /**
+   * Maps tool-call paths to repository roots for session_repos. Injectable so
+   * tests can point `~` at a fixture home.
+   */
+  repoResolver?: RepoResolver;
 }
+
+/**
+ * Generation of the derived index (search_fts, session_repos, index_state),
+ * kept in PRAGMA user_version. A database below it has its derived tables
+ * wiped and rebuilt from the event log at open, so changing what the indexer
+ * writes means bumping this, never migrating rows by hand. 1 is the first
+ * Link index.
+ */
+export const INDEX_GENERATION = 1;
+
+/** Events per transaction while backfilling, so a huge log never holds the write lock for long. */
+const BACKFILL_BATCH = 500;
+
+export interface SearchOptions {
+  /** Only sessions tagged with this exact repository root (see reposFor). */
+  repo?: string;
+  /** Only rows at or after this ISO timestamp. */
+  since?: string;
+  /** Default 20, at most 200. */
+  limit?: number;
+  /** Only these sessions. An empty list matches nothing. */
+  sessionIds?: SessionId[];
+  /** Only these row kinds. An empty list matches nothing. */
+  kinds?: SearchKind[];
+}
+
+/** Snippet highlight markers around each matched term. */
+export const SNIPPET_OPEN = "\u00ab";
+export const SNIPPET_CLOSE = "\u00bb";
 
 export function defaultDbPath(): string {
   return join(monadStateDir(), "monad.db");
@@ -34,8 +79,20 @@ interface SessionRow {
   head: string | null;
   pr: string | null;
   exec_allowlist: string | null;
+  title: string | null;
+  title_source: string | null;
+  parent_id: string | null;
+  spawn_depth: number | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Per-session indexing state, cached in memory after first use. */
+interface IndexCache {
+  cwd: string;
+  titled: boolean;
+  lastIndexedSeq: number;
+  open?: OpenAgentRow;
 }
 
 interface EventRow {
@@ -62,6 +119,10 @@ function rowToSession(row: SessionRow): SessionRecord {
     // Unreadable JSON reads back as absent, which the fix policy treats as an
     // empty allowlist (record 0009): a corrupt row denies, it never allows.
     execAllowlist: parseJsonArray(row.exec_allowlist),
+    title: row.title ?? undefined,
+    titleSource: row.title_source ?? undefined,
+    parentId: row.parent_id ?? undefined,
+    spawnDepth: row.spawn_depth ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -98,11 +159,22 @@ function rowToEvent(row: EventRow): EventRecord {
  * from here plus a live subscription. Event payloads are stored verbatim as
  * JSON, including non-message update kinds like available_commands_update
  * and usage_update.
+ *
+ * monad Link (decision record 0012) derives three things from the log, in the
+ * same transaction as every append: the full-text index (search_fts), the
+ * repositories each session touched (session_repos), and the session title.
+ * All three are rebuildable from the log alone; index_state records how far
+ * each session has been indexed, so a database that predates the index (or
+ * a crash between the append and anything later) is caught up at open by
+ * feeding the missing events through the same planner.
  */
 export class SessionStore {
   private readonly db: Database;
+  private readonly repos: RepoResolver;
+  private readonly indexCache = new Map<SessionId, IndexCache>();
 
   constructor(options: SessionStoreOptions = {}) {
+    this.repos = options.repoResolver ?? new RepoResolver();
     const dbPath = options.dbPath ?? defaultDbPath();
     if (dbPath !== ":memory:") {
       mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
@@ -124,6 +196,10 @@ export class SessionStore {
         head TEXT,
         pr TEXT,
         exec_allowlist TEXT,
+        title TEXT,
+        title_source TEXT,
+        parent_id TEXT,
+        spawn_depth INTEGER,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -142,12 +218,82 @@ export class SessionStore {
     // pr holds the SessionPr as JSON and exec_allowlist the frozen fix
     // allowlist as a JSON string array; a null trust reads back as untrusted
     // and a null exec_allowlist as no allowlist at all (record 0009).
-    for (const column of ["base", "head", "pr", "trust", "exec_allowlist"]) {
+    // Link adds title, title_source, parent_id and spawn_depth the same way;
+    // all nullable, so a pre-Link row reads back untitled and parentless.
+    const columns: Array<[string, string]> = [
+      ["base", "TEXT"],
+      ["head", "TEXT"],
+      ["pr", "TEXT"],
+      ["trust", "TEXT"],
+      ["exec_allowlist", "TEXT"],
+      ["title", "TEXT"],
+      ["title_source", "TEXT"],
+      ["parent_id", "TEXT"],
+      ["spawn_depth", "INTEGER"],
+    ];
+    for (const [column, type] of columns) {
       try {
-        this.db.exec(`ALTER TABLE sessions ADD COLUMN ${column} TEXT;`);
+        this.db.exec(`ALTER TABLE sessions ADD COLUMN ${column} ${type};`);
       } catch {
         // Column already present.
       }
+    }
+    this.createIndexTables();
+    this.backfillIndex();
+  }
+
+  /**
+   * The derived index tables. search_fts is an FTS5 table: `text` is the only
+   * indexed column and is always redacted (decision record 0012); the rest
+   * locate the row in the log. bun:sqlite ships FTS5 on every platform monad
+   * runs on (the static Linux build enables it, macOS's system SQLite has
+   * it), and a build without it fails here, loudly, at daemon start.
+   */
+  private createIndexTables(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS session_repos (
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        repo_root TEXT NOT NULL,
+        first_seq INTEGER NOT NULL,
+        last_seq INTEGER NOT NULL,
+        PRIMARY KEY (session_id, repo_root)
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_repos_root ON session_repos(repo_root);
+      CREATE TABLE IF NOT EXISTS index_state (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+        last_indexed_seq INTEGER NOT NULL DEFAULT 0,
+        open_rowid INTEGER,
+        open_bytes INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    try {
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
+          text,
+          session_id UNINDEXED,
+          kind UNINDEXED,
+          first_seq UNINDEXED,
+          last_seq UNINDEXED,
+          ts UNINDEXED,
+          tokenize = 'porter unicode61'
+        );
+      `);
+    } catch (error) {
+      throw new Error(
+        `this SQLite build has no FTS5, which monad's session index needs: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    const row = this.db.query<{ user_version: number }, []>("PRAGMA user_version").get();
+    if ((row?.user_version ?? 0) < INDEX_GENERATION) {
+      // Older generation (or a pre-Link database): drop every derived row and
+      // let backfill rebuild them from the log. Titles are not wiped; a
+      // derived title only ever fills an empty one.
+      this.db.transaction(() => {
+        this.db.exec("DELETE FROM search_fts; DELETE FROM session_repos; DELETE FROM index_state;");
+        this.db.exec(`PRAGMA user_version = ${INDEX_GENERATION};`);
+      })();
     }
   }
 
@@ -156,8 +302,8 @@ export class SessionStore {
     const parsed = SessionRecordSchema.parse(record);
     this.db
       .query(
-        `INSERT INTO sessions (id, cwd, backend, agent_session_id, mode, status, trust, base, head, pr, exec_allowlist, created_at, updated_at)
-         VALUES ($id, $cwd, $backend, $agentSessionId, $mode, $status, $trust, $base, $head, $pr, $execAllowlist, $createdAt, $updatedAt)`,
+        `INSERT INTO sessions (id, cwd, backend, agent_session_id, mode, status, trust, base, head, pr, exec_allowlist, title, title_source, parent_id, spawn_depth, created_at, updated_at)
+         VALUES ($id, $cwd, $backend, $agentSessionId, $mode, $status, $trust, $base, $head, $pr, $execAllowlist, $title, $titleSource, $parentId, $spawnDepth, $createdAt, $updatedAt)`,
       )
       .run({
         id: parsed.id,
@@ -172,27 +318,90 @@ export class SessionStore {
         pr: parsed.pr === undefined ? null : JSON.stringify(parsed.pr),
         execAllowlist:
           parsed.execAllowlist === undefined ? null : JSON.stringify(parsed.execAllowlist),
+        title: parsed.title ?? null,
+        titleSource: parsed.title === undefined ? null : (parsed.titleSource ?? null),
+        parentId: parsed.parentId ?? null,
+        spawnDepth: parsed.spawnDepth ?? null,
         createdAt: parsed.createdAt,
         updatedAt: parsed.updatedAt,
       });
     return parsed;
   }
 
-  /** Appends one event and returns it with its assigned sequence number. */
+  /**
+   * Appends one event and returns it with its assigned sequence number. The
+   * event, the updated_at bump and the index writes it implies commit
+   * together, so the index can never run ahead of the log; the indexer never
+   * fails an append (see indexOne).
+   */
   append(sessionId: SessionId, kind: EventKind, payload: unknown): EventRecord {
     const ts = new Date().toISOString();
-    const row = this.db
-      .query<{ seq: number }, { sessionId: string; ts: string; kind: string; payload: string }>(
-        `INSERT INTO events (session_id, ts, kind, payload)
-         VALUES ($sessionId, $ts, $kind, $payload)
-         RETURNING seq`,
+    const { event, cache } = this.db.transaction(() => {
+      const row = this.db
+        .query<{ seq: number }, { sessionId: string; ts: string; kind: string; payload: string }>(
+          `INSERT INTO events (session_id, ts, kind, payload)
+           VALUES ($sessionId, $ts, $kind, $payload)
+           RETURNING seq`,
+        )
+        .get({ sessionId, ts, kind, payload: JSON.stringify(payload ?? null) });
+      if (!row) {
+        throw new Error(`append failed for session ${sessionId}`);
+      }
+      this.touch(sessionId);
+      const appended: EventRecord = { seq: row.seq, sessionId, ts, kind, payload: payload ?? null };
+      return { event: appended, cache: this.indexOne(appended, this.loadIndexCache(sessionId)) };
+    })();
+    // Only a committed transaction updates the in-memory cache; a rolled-back
+    // append leaves it exactly as the database is.
+    this.setIndexCache(sessionId, cache);
+    return event;
+  }
+
+  /**
+   * Catches the index up with the log: every session whose newest event is
+   * past its index_state.last_indexed_seq has the missing events fed through
+   * the same planner append() uses (full-text rows, repo tags, title).
+   * Idempotent by construction, since an event at or below last_indexed_seq
+   * is never fed twice. Runs at open; returns how many events it indexed.
+   */
+  backfillIndex(): number {
+    const pending = this.db
+      .query<{ id: string; done: number; max_seq: number | null }, []>(
+        `SELECT s.id AS id,
+                COALESCE(i.last_indexed_seq, 0) AS done,
+                (SELECT MAX(seq) FROM events e WHERE e.session_id = s.id) AS max_seq
+         FROM sessions s LEFT JOIN index_state i ON i.session_id = s.id
+         ORDER BY s.created_at ASC, s.id ASC`,
       )
-      .get({ sessionId, ts, kind, payload: JSON.stringify(payload ?? null) });
-    if (!row) {
-      throw new Error(`append failed for session ${sessionId}`);
+      .all()
+      .filter((row) => row.max_seq !== null && row.max_seq > row.done);
+    let indexed = 0;
+    for (const { id, done } of pending) {
+      let after = done;
+      for (;;) {
+        const rows = this.db
+          .query<EventRow, { sessionId: string; after: number; limit: number }>(
+            `SELECT seq, session_id, ts, kind, payload FROM events
+             WHERE session_id = $sessionId AND seq > $after
+             ORDER BY seq ASC LIMIT $limit`,
+          )
+          .all({ sessionId: id, after, limit: BACKFILL_BATCH });
+        if (rows.length === 0) {
+          break;
+        }
+        const cache = this.db.transaction(() => {
+          let current = this.loadIndexCache(id);
+          for (const row of rows) {
+            current = this.indexOne(rowToEvent(row), current);
+          }
+          return current;
+        })();
+        this.setIndexCache(id, cache);
+        indexed += rows.length;
+        after = rows[rows.length - 1]?.seq ?? after;
+      }
     }
-    this.touch(sessionId);
-    return { seq: row.seq, sessionId, ts, kind, payload: payload ?? null };
+    return indexed;
   }
 
   /**
@@ -236,10 +445,14 @@ export class SessionStore {
     return rows.map(rowToEvent);
   }
 
-  /** All sessions, oldest first (uuid v7 ids sort by creation time). */
+  /**
+   * All sessions, oldest first. Ordered by created_at, then id: monad's own
+   * v7 ids sort by creation time, but imported sessions keep vendor v4 ids,
+   * which sort randomly.
+   */
   list(): SessionRecord[] {
     const rows = this.db
-      .query<SessionRow, []>("SELECT * FROM sessions ORDER BY id ASC")
+      .query<SessionRow, []>("SELECT * FROM sessions ORDER BY created_at ASC, id ASC")
       .all();
     return rows.map(rowToSession);
   }
@@ -297,10 +510,352 @@ export class SessionStore {
     }
   }
 
+  /**
+   * Sets a session's title. `manual` titles come from a human over the
+   * control API and are never replaced by derivation; `import` titles come
+   * from an imported vendor log. Deliberately does not bump updated_at:
+   * updated_at means "last activity", and Link lists sessions by it.
+   */
+  setTitle(id: SessionId, title: string, source: TitleSource): void {
+    const result = this.db
+      .query("UPDATE sessions SET title = $title, title_source = $source WHERE id = $id")
+      .run({ id, title, source });
+    if (result.changes === 0) {
+      throw new Error(`setTitle: unknown session ${id}`);
+    }
+    const cache = this.indexCache.get(id);
+    if (cache) {
+      cache.titled = true;
+    }
+  }
+
+  /**
+   * Drops a session's title and derives it again from its prompts, exactly as
+   * indexing would have: the first prompt with a usable first line wins. A
+   * session with no such prompt is left untitled, and its next prompt names it.
+   */
+  resetTitle(id: SessionId): void {
+    this.db.transaction(() => {
+      const result = this.db
+        .query("UPDATE sessions SET title = NULL, title_source = NULL WHERE id = $id")
+        .run({ id });
+      if (result.changes === 0) {
+        throw new Error(`resetTitle: unknown session ${id}`);
+      }
+      let title: string | undefined;
+      for (const event of this.replayKinds(id, ["prompt"])) {
+        title = planIndex(event, { titled: false }).title;
+        if (title !== undefined) {
+          break;
+        }
+      }
+      if (title !== undefined) {
+        this.db
+          .query("UPDATE sessions SET title = $title, title_source = 'prompt' WHERE id = $id")
+          .run({ id, title });
+      }
+    })();
+    this.indexCache.delete(id);
+  }
+
+  /**
+   * Full-text search over every session's index. The query is free text
+   * (see toFtsQuery for exactly how it is read); it never reaches MATCH as
+   * written. Hits are ordered by bm25 relevance, then newest first, and each
+   * carries the seq range of the log it came from.
+   */
+  search(query: string, options: SearchOptions = {}): SearchHit[] {
+    const match = toFtsQuery(query);
+    if (match === undefined) {
+      return [];
+    }
+    if (options.sessionIds?.length === 0 || options.kinds?.length === 0) {
+      return [];
+    }
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 20), 1), 200);
+    const params: Record<string, string | number> = {
+      match,
+      limit,
+      open: SNIPPET_OPEN,
+      close: SNIPPET_CLOSE,
+    };
+    const where = ["search_fts MATCH $match"];
+    if (options.repo !== undefined) {
+      where.push("session_id IN (SELECT session_id FROM session_repos WHERE repo_root = $repo)");
+      params.repo = options.repo;
+    }
+    if (options.since !== undefined) {
+      where.push("ts >= $since");
+      params.since = options.since;
+    }
+    if (options.sessionIds !== undefined) {
+      const names = options.sessionIds.map((sessionId, index) => {
+        params[`session${index}`] = sessionId;
+        return `$session${index}`;
+      });
+      where.push(`session_id IN (${names.join(", ")})`);
+    }
+    if (options.kinds !== undefined) {
+      const names = options.kinds.map((kind, index) => {
+        params[`kind${index}`] = kind;
+        return `$kind${index}`;
+      });
+      where.push(`kind IN (${names.join(", ")})`);
+    }
+    const rows = this.db
+      .query<
+        {
+          session_id: string;
+          kind: SearchKind;
+          first_seq: number;
+          last_seq: number;
+          ts: string;
+          snippet: string;
+          rank: number;
+        },
+        Record<string, string | number>
+      >(
+        `SELECT session_id, kind, first_seq, last_seq, ts,
+                snippet(search_fts, 0, $open, $close, '...', 16) AS snippet,
+                bm25(search_fts) AS rank
+         FROM search_fts
+         WHERE ${where.join(" AND ")}
+         ORDER BY rank ASC, ts DESC
+         LIMIT $limit`,
+      )
+      .all(params);
+    return rows.map((row) => ({
+      sessionId: row.session_id,
+      kind: row.kind,
+      firstSeq: row.first_seq,
+      lastSeq: row.last_seq,
+      ts: row.ts,
+      snippet: row.snippet,
+      rank: row.rank,
+    }));
+  }
+
+  /** The repositories a session touched, in the order it first touched them. */
+  reposFor(sessionId: SessionId): SessionRepo[] {
+    return this.db
+      .query<{ repo_root: string; first_seq: number; last_seq: number }, { sessionId: string }>(
+        `SELECT repo_root, first_seq, last_seq FROM session_repos
+         WHERE session_id = $sessionId ORDER BY first_seq ASC, repo_root ASC`,
+      )
+      .all({ sessionId })
+      .map((row) => ({ repoRoot: row.repo_root, firstSeq: row.first_seq, lastSeq: row.last_seq }));
+  }
+
+  /** Sessions that touched a repository root, most recently touched first. */
+  sessionsForRepo(repoRoot: string): SessionId[] {
+    return this.db
+      .query<{ session_id: string }, { repoRoot: string }>(
+        `SELECT session_id FROM session_repos
+         WHERE repo_root = $repoRoot ORDER BY last_seq DESC`,
+      )
+      .all({ repoRoot })
+      .map((row) => row.session_id);
+  }
+
+  /** A session's newest event of one kind, if it has any. */
+  lastEventOfKind(sessionId: SessionId, kind: EventKind): EventRecord | undefined {
+    const row = this.db
+      .query<EventRow, { sessionId: string; kind: string }>(
+        `SELECT seq, session_id, ts, kind, payload FROM events
+         WHERE session_id = $sessionId AND kind = $kind
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .get({ sessionId, kind });
+    return row ? rowToEvent(row) : undefined;
+  }
+
   /** Checkpoints the WAL and closes the database. */
   close(): void {
+    this.indexCache.clear();
     this.db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
     this.db.close();
+  }
+
+  /**
+   * Indexes one event inside the caller's transaction and returns the
+   * session's next index state. The planner's writes run in a nested
+   * transaction (a SAVEPOINT): if indexing throws, its partial writes roll
+   * back, the event itself still commits, and last_indexed_seq moves past it
+   * so backfill does not retry it forever. A missed search hit is a far
+   * smaller failure than a session that can no longer append. The warning
+   * names the session and seq only, never payload text.
+   */
+  private indexOne(event: EventRecord, cache: IndexCache): IndexCache {
+    try {
+      return this.db.transaction(() => this.applyIndexPlan(event, cache))();
+    } catch (error) {
+      console.warn(
+        `monad: indexing session ${event.sessionId} seq ${event.seq} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      const next: IndexCache = { ...cache, lastIndexedSeq: event.seq, open: undefined };
+      this.saveIndexState(event.sessionId, next);
+      return next;
+    }
+  }
+
+  private applyIndexPlan(event: EventRecord, cache: IndexCache): IndexCache {
+    const plan = planIndex(event, { open: cache.open, titled: cache.titled });
+    let open = cache.open;
+    let titled = cache.titled;
+    for (const op of plan.ops) {
+      switch (op.type) {
+        case "close":
+          open = undefined;
+          break;
+        case "insert":
+          this.insertFtsRow(event.sessionId, op.kind, op.text, op.firstSeq, op.lastSeq, op.ts);
+          break;
+        case "open": {
+          const rowid = this.insertFtsRow(
+            event.sessionId,
+            "agent",
+            op.text,
+            op.firstSeq,
+            op.lastSeq,
+            op.ts,
+          );
+          open = { rowid, firstSeq: op.firstSeq, raw: op.raw };
+          break;
+        }
+        case "extend": {
+          if (!open) {
+            throw new Error("index plan extended an agent row that is not open");
+          }
+          this.db
+            .query("UPDATE search_fts SET text = $text, last_seq = $lastSeq WHERE rowid = $rowid")
+            .run({ text: op.text, lastSeq: op.lastSeq, rowid: open.rowid });
+          open = { ...open, raw: op.raw };
+          break;
+        }
+      }
+    }
+    if (plan.title !== undefined && !titled) {
+      // The IS NULL guard keeps a manual title set by another writer safe.
+      this.db
+        .query(
+          "UPDATE sessions SET title = $title, title_source = 'prompt' WHERE id = $id AND title IS NULL",
+        )
+        .run({ id: event.sessionId, title: plan.title });
+      titled = true;
+    }
+    const roots = new Set<string>();
+    for (const path of eventPaths(event, cache.cwd)) {
+      const root = this.repos.resolve(path, cache.cwd);
+      if (root !== undefined) {
+        roots.add(root);
+      }
+    }
+    for (const root of roots) {
+      this.db
+        .query(
+          `INSERT INTO session_repos (session_id, repo_root, first_seq, last_seq)
+           VALUES ($sessionId, $root, $seq, $seq)
+           ON CONFLICT (session_id, repo_root) DO UPDATE SET
+             first_seq = MIN(first_seq, excluded.first_seq),
+             last_seq = MAX(last_seq, excluded.last_seq)`,
+        )
+        .run({ sessionId: event.sessionId, root, seq: event.seq });
+    }
+    const next: IndexCache = { cwd: cache.cwd, titled, lastIndexedSeq: event.seq, open };
+    this.saveIndexState(event.sessionId, next);
+    return next;
+  }
+
+  private insertFtsRow(
+    sessionId: SessionId,
+    kind: SearchKind,
+    text: string,
+    firstSeq: number,
+    lastSeq: number,
+    ts: string,
+  ): number {
+    const result = this.db
+      .query(
+        `INSERT INTO search_fts (text, session_id, kind, first_seq, last_seq, ts)
+         VALUES ($text, $sessionId, $kind, $firstSeq, $lastSeq, $ts)`,
+      )
+      .run({ text, sessionId, kind, firstSeq, lastSeq, ts });
+    return Number(result.lastInsertRowid);
+  }
+
+  private saveIndexState(sessionId: SessionId, cache: IndexCache): void {
+    this.db
+      .query(
+        `INSERT INTO index_state (session_id, last_indexed_seq, open_rowid, open_bytes)
+         VALUES ($sessionId, $seq, $openRowid, $openBytes)
+         ON CONFLICT (session_id) DO UPDATE SET
+           last_indexed_seq = excluded.last_indexed_seq,
+           open_rowid = excluded.open_rowid,
+           open_bytes = excluded.open_bytes`,
+      )
+      .run({
+        sessionId,
+        seq: cache.lastIndexedSeq,
+        openRowid: cache.open?.rowid ?? null,
+        openBytes: cache.open ? Buffer.byteLength(cache.open.raw) : 0,
+      });
+  }
+
+  private setIndexCache(sessionId: SessionId, cache: IndexCache): void {
+    this.indexCache.set(sessionId, cache);
+  }
+
+  /**
+   * The session's index state, from memory or rebuilt from the database. An
+   * open agent row's unredacted text is not stored anywhere but the log
+   * (keeping a second raw copy would be one more place a token lives), so a
+   * cold start re-reads the row's seq span and concatenates its chunks.
+   */
+  private loadIndexCache(sessionId: SessionId): IndexCache {
+    const cached = this.indexCache.get(sessionId);
+    if (cached) {
+      return cached;
+    }
+    const session = this.db
+      .query<{ cwd: string; title: string | null }, { id: string }>(
+        "SELECT cwd, title FROM sessions WHERE id = $id",
+      )
+      .get({ id: sessionId });
+    if (!session) {
+      throw new Error(`index: unknown session ${sessionId}`);
+    }
+    const state = this.db
+      .query<{ last_indexed_seq: number; open_rowid: number | null }, { sessionId: string }>(
+        "SELECT last_indexed_seq, open_rowid FROM index_state WHERE session_id = $sessionId",
+      )
+      .get({ sessionId });
+    let open: OpenAgentRow | undefined;
+    if (state?.open_rowid !== null && state?.open_rowid !== undefined) {
+      const span = this.db
+        .query<{ first_seq: number; last_seq: number }, { rowid: number }>(
+          "SELECT first_seq, last_seq FROM search_fts WHERE rowid = $rowid",
+        )
+        .get({ rowid: state.open_rowid });
+      if (span) {
+        const chunks = this.db
+          .query<EventRow, { sessionId: string; first: number; last: number }>(
+            `SELECT seq, session_id, ts, kind, payload FROM events
+             WHERE session_id = $sessionId AND kind = 'update' AND seq BETWEEN $first AND $last
+             ORDER BY seq ASC`,
+          )
+          .all({ sessionId, first: span.first_seq, last: span.last_seq });
+        const raw = chunks.map((row) => agentChunkText(rowToEvent(row)) ?? "").join("");
+        open = { rowid: state.open_rowid, firstSeq: span.first_seq, raw };
+      }
+    }
+    return {
+      cwd: session.cwd,
+      titled: session.title !== null,
+      lastIndexedSeq: state?.last_indexed_seq ?? 0,
+      open,
+    };
   }
 
   private touch(id: SessionId): void {

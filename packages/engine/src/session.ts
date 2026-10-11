@@ -311,6 +311,21 @@ export class SessionManager {
     return this.mustGet(id);
   }
 
+  /**
+   * Names a session by hand (title) or drops the manual name and derives one
+   * from its first prompt again (null). A manual title is never overwritten
+   * by prompt derivation (monad Link, decision record 0012).
+   */
+  setTitle(id: SessionId, title: string | null): SessionRecord {
+    this.mustGet(id);
+    if (title === null) {
+      this.store.resetTitle(id);
+    } else {
+      this.store.setTitle(id, title, "manual");
+    }
+    return this.mustGet(id);
+  }
+
   list(): SessionRecord[] {
     return this.store.list();
   }
