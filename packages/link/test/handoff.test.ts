@@ -325,6 +325,53 @@ describe("what a handoff holds", () => {
     expect(h.store.search("push", { kinds: ["handoff"] })).toHaveLength(1);
     expect(h.store.search(PLANTED_TOKEN)).toEqual([]);
   });
+
+  test("a token straddling the 80- and 300-character cuts is redacted before it is cut", async () => {
+    const h = harness();
+    // The first 12 characters of the token, and a longer run of it: neither
+    // may survive anywhere a handoff reaches.
+    const prefix = PLANTED_TOKEN.slice(0, 12);
+    const fragment = PLANTED_TOKEN.slice(4, 20);
+    const cases = [
+      // The summary line quotes the last ask cut to 80: the cut lands 20
+      // characters into the token.
+      { ask: `${"x ".repeat(30)}${PLANTED_TOKEN} tail`, error: "plain failure", title: "Edit config.json" },
+      // lastAsks, lastErrors and permission titles are cut to 300: each cut
+      // lands 20 characters into the token.
+      {
+        ask: `${"y ".repeat(140)}${PLANTED_TOKEN} tail`,
+        error: `${"e ".repeat(140)}${PLANTED_TOKEN} tail`,
+        title: `${"t ".repeat(140)}${PLANTED_TOKEN} tail`,
+      },
+    ];
+    for (const { ask, error, title } of cases) {
+      const s = await h.session();
+      h.history(s.id, [
+        ["prompt", userPrompt(s.id, ask)],
+        ["error", { message: error }],
+      ]);
+      // A held permission whose title carries the token.
+      void h.manager.prompt(s.id, userPrompt(s.id, ask));
+      await waitFor(() => h.backends.get(s.id)?.prompts.length === 1, "the turn");
+      void h.backends.get(s.id)?.requestPermission({
+        ...PERMISSION,
+        sessionId: s.id,
+        toolCall: { ...PERMISSION.toolCall, title },
+      });
+      await waitFor(() => h.manager.pendingPermissionCount(s.id) === 1, "the held permission");
+
+      const event = await h.link.writeHandoff(s.id, "manual");
+      const payload = event?.payload as HandoffPayload;
+      const serialized = JSON.stringify(payload);
+      expect(serialized).not.toContain(prefix);
+      expect(serialized).not.toContain(fragment);
+      expect(payload.lastAsks.at(-1)).toContain("[REDACTED:");
+      expect(h.link.lastHandoffLine(s.id)).not.toContain(prefix);
+      expect(h.link.lastHandoffLine(s.id)).toContain("last asked");
+    }
+    expect(h.store.search(fragment)).toEqual([]);
+    expect(h.store.search(prefix)).toEqual([]);
+  });
 });
 
 describe("sessions_list shows the last handoff", () => {

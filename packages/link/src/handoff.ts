@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
 import { isAbsolute, resolve as resolvePath } from "node:path";
+import { redactSecrets } from "@aaroncx/checks";
 import {
   promptTexts,
   type RepoResolver,
@@ -69,6 +70,18 @@ function oneLine(text: string, max: number): string {
   const collapsed = text.replace(/\s+/g, " ").trim();
   const points = Array.from(collapsed);
   return points.length <= max ? collapsed : `${points.slice(0, max).join("")}...`;
+}
+
+/**
+ * oneLine over the REDACTED text. Every cut of session-supplied text goes
+ * through this: cutting first would leave a token's prefix, which no longer
+ * matches its pattern (a ghp_ token needs all 36 characters) and so would
+ * survive the redactDeep pass at the end of buildHandoff, into the summary
+ * line, sessions_list, `monad ls` and the index. The title derivation
+ * (engine indexer.ts) follows the same rule.
+ */
+function redactedLine(text: string, max: number): string {
+  return oneLine(redactSecrets(text).text, max);
 }
 
 function plural(count: number, word: string): string {
@@ -148,7 +161,7 @@ export async function gitState(root: string, checkout: string, timeoutMs = DEFAU
   }
   if (errors.length > 0) {
     // The first failure says enough; an unborn HEAD fails rev-parse twice.
-    entry.error = oneLine(errors[0] ?? "git failed", MAX_LINE);
+    entry.error = redactedLine(errors[0] ?? "git failed", MAX_LINE);
   }
   return entry;
 }
@@ -190,12 +203,12 @@ function touchedFiles(store: SessionStore, record: SessionRecord): string[] {
 
 /** One ask as a handoff quotes it: every text block, on one line. */
 function askText(event: EventRecord): string {
-  return oneLine(promptTexts(event.payload).join(" "), MAX_LINE);
+  return redactedLine(promptTexts(event.payload).join(" "), MAX_LINE);
 }
 
 function errorText(event: EventRecord): string {
   const message = (event.payload as { message?: unknown } | null)?.message;
-  return oneLine(typeof message === "string" ? message : "unknown error", MAX_LINE);
+  return redactedLine(typeof message === "string" ? message : "unknown error", MAX_LINE);
 }
 
 /** The newest event of any kind but `except`, for the handoff's seq range. */
@@ -241,7 +254,9 @@ function summaryLine(
     parts.push(`${count} ${count === 1 ? "child" : "children"}${live > 0 ? ` (${live} running)` : ""}`);
   }
   const label = reason === "manual" ? "handoff" : reason;
-  return oneLine(`${label}: ${parts.join("; ")}`, MAX_SUMMARY_LINE);
+  // The ask is already redacted (askText); the line is redacted again as a
+  // whole before its own cut, since repo labels are session-supplied too.
+  return redactedLine(`${label}: ${parts.join("; ")}`, MAX_SUMMARY_LINE);
 }
 
 function renderText(reason: HandoffReason, record: SessionRecord, payload: HandoffBody, turnErrors: number): string {
@@ -341,7 +356,7 @@ export async function buildHandoff(
     repos,
     pendingPermissions: deps.manager.pendingPermissions(id).map((request, index) => ({
       toolCallId: request.toolCall?.toolCallId ?? `request-${index + 1}`,
-      ...(typeof request.toolCall?.title === "string" ? { title: oneLine(request.toolCall.title, MAX_LINE) } : {}),
+      ...(typeof request.toolCall?.title === "string" ? { title: redactedLine(request.toolCall.title, MAX_LINE) } : {}),
     })),
     lastErrors: errors.map(errorText),
     children: deps.store.childrenOf(id).map((child) => ({
@@ -355,7 +370,9 @@ export async function buildHandoff(
   const turnErrors = errors.filter((event) => event.seq > lastAskSeq).length;
   const payload: HandoffPayload = { reason, text: renderText(reason, record, body, turnErrors), ...body };
   // Asks, errors, titles, paths and branch names are all session-supplied
-  // text, and other sessions read handoffs: redact every string.
+  // text, and other sessions read handoffs: redact every string. The cut
+  // strings were redacted before their cut (redactedLine); this pass covers
+  // the rest and is a second layer for those.
   return redactDeep(payload);
 }
 
