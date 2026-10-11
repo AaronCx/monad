@@ -541,6 +541,35 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Puts sessions a previous daemon left mid-turn back to idle. Called once
+   * at daemon start, before resumePeerQueues. A fresh process has no turn in
+   * flight and holds no permission, so a stored running or
+   * waiting_for_permission status can only be stale: the daemon died
+   * (SIGKILL, crash, power loss) without the graceful cancel. Left alone it
+   * would strand the session's peer queue, make sessions_wait(idle) time
+   * out, and hold a spawned-session slot forever. Each recovered session
+   * gets an error event saying its turn was interrupted. Returns their ids.
+   */
+  recoverInterruptedTurns(): SessionId[] {
+    const recovered: SessionId[] = [];
+    for (const record of this.store.list()) {
+      if (record.status !== "running" && record.status !== "waiting_for_permission") {
+        continue;
+      }
+      if (this.isTurnInFlight(record.id) || this.pendingPermissionCount(record.id) > 0) {
+        continue; // Live in this process after all; nothing to recover.
+      }
+      this.appendAndPublish(record.id, "error", {
+        message: `the daemon stopped while this session was ${record.status === "running" ? "running a turn" : "waiting for a permission"}; that turn was interrupted`,
+      });
+      this.store.setStatus(record.id, "idle");
+      this.notifyChange(record.id);
+      recovered.push(record.id);
+    }
+    return recovered;
+  }
+
   /** Cancels the in-flight turn and resolves any held permission request. */
   async cancel(id: SessionId): Promise<void> {
     const session = this.live.get(id);

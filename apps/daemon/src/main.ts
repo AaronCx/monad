@@ -181,6 +181,16 @@ const server = createAcpHttpServer(createDaemonAgentFactory({ manager, version: 
 // deliberate decision, not a flag.
 const { port } = await server.listen(flags.port, "127.0.0.1");
 bound.port = port;
+// A previous daemon that died mid-turn (SIGKILL, crash, power loss) left
+// running or waiting_for_permission on the record; nothing is in flight in
+// this process, so those are stale. Put them back to idle (with an error
+// event each) first, or their peer queues, sessions_wait and spawned-session
+// slots stay stuck. This runs after listen so a drain it enables starts its
+// backend with the mounts' port known.
+const recovered = manager.recoverInterruptedTurns();
+if (recovered.length > 0) {
+  console.log(`monadd: ${recovered.length} session(s) were mid-turn when the last daemon stopped; set to idle`);
+}
 // Peer messages queued before a restart are still in the log; idle targets
 // get their oldest one now, the rest at later turn boundaries.
 manager.resumePeerQueues();

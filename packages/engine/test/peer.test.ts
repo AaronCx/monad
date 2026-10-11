@@ -232,7 +232,7 @@ describe("deliverPeerMessage", () => {
     expect(prompts).toEqual([undefined, first.messageId, second.messageId]);
   });
 
-  test("the queue is rebuilt from the log after a restart", async () => {
+  test("the queue is rebuilt from the log after a crash mid-turn", async () => {
     const dir = mkdtempSync(join(tmpdir(), "monad-peer-restart-"));
     dirs.push(dir);
     const dbPath = join(dir, "monad.db");
@@ -244,16 +244,20 @@ describe("deliverPeerMessage", () => {
     });
     const queued = message(target.id, "while you were busy");
     first.manager.deliverPeerMessage(queued);
-    // The daemon dies mid-turn; shutdown leaves the session as the policy
-    // and cancel would (idle), with the message still queued in the log.
-    await first.manager.shutdown();
-    first.store.setStatus(target.id, "idle");
+    // The daemon is SIGKILLed mid-turn: no cancel, no shutdown, no status
+    // reset. The record still says running.
     first.store.close();
 
     const second = makeManager(openStore(dbPath));
+    expect(second.manager.get(target.id)?.status).toBe("running");
     expect(second.manager.queuedPeerMessages(target.id).map((m) => m.messageId)).toEqual([
       queued.messageId,
     ]);
+    // What monadd does at start: recover stale statuses, then resume queues.
+    expect(second.manager.recoverInterruptedTurns()).toEqual([target.id]);
+    expect(second.manager.get(target.id)?.status).toBe("idle");
+    const errors = second.store.replayKinds(target.id, ["error"]);
+    expect((errors.at(-1)?.payload as { message: string }).message).toContain("interrupted");
     second.manager.resumePeerQueues();
     await waitFor(() => (second.backends.get(target.id)?.prompts.length ?? 0) === 1, "redelivery");
     expect(peerMetaOf(second.backends.get(target.id)?.prompts[0])?.messageId).toBe(queued.messageId);
@@ -264,6 +268,29 @@ describe("deliverPeerMessage", () => {
     second.manager.resumePeerQueues();
     await Bun.sleep(10);
     expect(second.backends.get(target.id)?.prompts).toHaveLength(1);
+    // And a new message to the recovered session is a turn again, not queued forever.
+    const later = second.manager.deliverPeerMessage(message(target.id, "after the restart"));
+    expect((later.payload as PeerMessagePayload).delivery).toBe("turn");
+  });
+
+  test("a crash while waiting for a permission is recovered too; live sessions are left alone", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "monad-peer-restart-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "monad.db");
+    const first = makeManager(openStore(dbPath));
+    const stale = await first.manager.create({ cwd: "/tmp/stale" });
+    first.store.setStatus(stale.id, "waiting_for_permission");
+    first.store.close();
+
+    const second = makeManager(openStore(dbPath));
+    const live = await second.manager.create({ cwd: "/tmp/live" });
+    void second.manager.prompt(live.id, { sessionId: live.id, prompt: [{ type: "text", text: "busy" }] });
+    expect(second.manager.recoverInterruptedTurns()).toEqual([stale.id]);
+    expect(second.manager.get(stale.id)?.status).toBe("idle");
+    expect(second.manager.get(live.id)?.status).toBe("running");
+    await waitFor(() => (second.backends.get(live.id)?.prompts.length ?? 0) === 1, "the live turn");
+    second.backends.get(live.id)?.turns[0]?.resolve({ stopReason: "end_turn" });
+    await waitFor(() => second.manager.get(live.id)?.status === "idle", "idle");
   });
 
   test("a queued message drains when the session goes back to interactive", async () => {
