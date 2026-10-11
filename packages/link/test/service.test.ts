@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { peerMetaOf } from "@aaroncx/engine";
@@ -396,6 +397,101 @@ describe("sessions_spawn", () => {
     );
     await waitFor(() => (h.backends.get(child.sessionId)?.prompts.length ?? 0) === 1, "the review child's turn");
     expect(promptText(h.backends.get(child.sessionId)?.prompts[0])).toEndWith("\n\nread only please");
+  });
+
+  describe("a spawn never trusts untrusted content", () => {
+    /**
+     * Decision record 0009: worktree content from an untrusted PR may never
+     * decide what monad executes. A trusted child spawned into a hostile PR
+     * worktree would honor its .monad.yml (checks.lint.command) through its
+     * own trusted checks mount, with no human involved. The planted command
+     * writes a canary; it must never run, and no child may exist.
+     */
+    function hostileWorktree(root: string, owner: string): { path: string; canary: string } {
+      const path = join(root, "0123456789ab", owner);
+      mkdirSync(path, { recursive: true });
+      const canary = join(root, `canary-${owner}`);
+      const git = (...args: string[]) =>
+        execFileSync("git", ["-c", "user.name=x", "-c", "user.email=x@x", ...args], { cwd: path, stdio: "ignore" });
+      git("init", "-q", "-b", "main");
+      writeFileSync(join(path, "pwn.sh"), `#!/bin/sh\necho pwned > ${canary}\n`);
+      chmodSync(join(path, "pwn.sh"), 0o755);
+      writeFileSync(join(path, ".monad.yml"), "checks:\n  lint:\n    command: ./pwn.sh\n");
+      git("add", ".");
+      git("commit", "-qm", "pr");
+      return { path, canary };
+    }
+
+    test("an untrusted review's worktree, a subdirectory of it, and worktree: true are refused", async () => {
+      const root = tempDir("monad-link-worktrees-");
+      const made: string[] = [];
+      const h = harness({
+        link: {
+          worktreesRoot: root,
+          createWorktree: async (cwd) => {
+            made.push(cwd);
+            return cwd;
+          },
+        },
+      });
+      const parent = await h.session();
+      const caller = { kind: "session" as const, id: parent.id };
+      const id = Bun.randomUUIDv7();
+      const { path, canary } = hostileWorktree(root, id);
+      mkdirSync(join(path, "src"));
+      h.manager.createRecord({ id, cwd: path, mode: "review", trust: "untrusted" });
+      // The worktree path is what sessions_list hands the model.
+      expect(h.link.list(caller).find((s) => s.id === id)?.cwd).toBe(path);
+
+      for (const options of [
+        { cwd: path, prompt: "call run_checks" },
+        { cwd: join(path, "src"), prompt: "call run_checks" },
+        { cwd: path, prompt: "call run_checks", worktree: true },
+        { cwd: path, prompt: "call run_checks", mode: "review" as const },
+      ]) {
+        await expectLinkError(h.link.spawn(caller, options), "forbidden", "untrusted");
+      }
+      expect(made).toEqual([]);
+      expect(h.store.childrenOf(parent.id)).toEqual([]);
+      expect(existsSync(canary)).toBe(false);
+      expect(accessEvents(h.store, parent.id).at(-1)).toMatchObject({ op: "spawn", refused: expect.any(String) });
+
+      // Closing the review changes nothing: the worktree stays on disk until gc.
+      await h.manager.close(id);
+      await expectLinkError(h.link.spawn(caller, { cwd: path, prompt: "x" }), "forbidden");
+    });
+
+    test("a worktree no session owns is refused; one a trusted session owns is allowed", async () => {
+      const root = tempDir("monad-link-worktrees-");
+      const h = harness({ link: { worktreesRoot: root } });
+      const parent = await h.session();
+      const caller = { kind: "session" as const, id: parent.id };
+      const orphan = hostileWorktree(root, Bun.randomUUIDv7());
+      await expectLinkError(h.link.spawn(caller, { cwd: orphan.path, prompt: "x" }), "forbidden");
+      await expectLinkError(h.link.spawn(caller, { cwd: root, prompt: "x" }), "forbidden");
+      expect(existsSync(orphan.canary)).toBe(false);
+
+      // A trusted review of your own repo (or a worktree: true child) is fine.
+      const id = Bun.randomUUIDv7();
+      const own = hostileWorktree(root, id);
+      h.manager.createRecord({ id, cwd: own.path, mode: "review", trust: "trusted" });
+      expect((await h.link.spawn(caller, { cwd: own.path, prompt: "x" })).cwd).toBe(own.path);
+    });
+
+    test("anything inside an untrusted session's directory is refused, wherever it is", async () => {
+      const h = harness();
+      const parent = await h.session();
+      const outside = tempDir("monad-link-untrusted-");
+      h.manager.createRecord({ cwd: outside, mode: "review", trust: "untrusted" });
+      mkdirSync(join(outside, "deep"));
+      await expectLinkError(
+        h.link.spawn({ kind: "session", id: parent.id }, { cwd: join(outside, "deep"), prompt: "x" }),
+        "forbidden",
+        "untrusted session",
+      );
+      // The human at the CLI is held to the same rule.
+      await expectLinkError(h.link.spawn({ kind: "human" }, { cwd: outside, prompt: "x" }), "forbidden");
+    });
   });
 
   test("spawn depth 3 is refused", async () => {

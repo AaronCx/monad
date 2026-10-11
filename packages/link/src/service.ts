@@ -1,5 +1,5 @@
-import { statSync } from "node:fs";
-import { isAbsolute, resolve as resolvePath } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 import { redactSecrets } from "@aaroncx/checks";
 import {
   type PeerMessageInput,
@@ -8,6 +8,7 @@ import {
   type SessionManager,
   type SessionStore,
   turnHop,
+  worktreesRoot,
 } from "@aaroncx/engine";
 import {
   type AccessOp,
@@ -96,6 +97,12 @@ export interface LinkServiceOptions {
   createWorktree?: (cwd: string, sessionId: SessionId) => Promise<string>;
   /** Clock for the rate limiter. */
   now?: () => number;
+  /**
+   * Where monad keeps every worktree (review, fix and spawn worktrees),
+   * default $MONAD_HOME/worktrees. A spawn into one is only allowed when the
+   * session it belongs to is trusted.
+   */
+  worktreesRoot?: string;
 }
 
 export interface LinkSessionSummary {
@@ -208,6 +215,7 @@ export class LinkService {
   private readonly repos: RepoResolver;
   private readonly backendUnavailable: (backend: BackendId) => string | undefined;
   private readonly createWorktree?: (cwd: string, sessionId: SessionId) => Promise<string>;
+  private readonly worktreesRoot: string;
   private readonly rate: RateLimiter;
   /** Canonical roots of link.json's repo allowlist; undefined means everything. */
   private readonly scopeRoots?: Set<string>;
@@ -223,6 +231,7 @@ export class LinkService {
       options.backendUnavailable ??
       ((backend) => (backend === "claude-acp" ? undefined : `${backend} is not available on this daemon`));
     this.createWorktree = options.createWorktree;
+    this.worktreesRoot = options.worktreesRoot ?? worktreesRoot();
     this.rate = new RateLimiter({
       perMinute: options.config.limits.messagesPerMinute,
       burst: options.config.limits.messageBurst,
@@ -464,6 +473,15 @@ export class LinkService {
     if (!isDirectory(cwd)) {
       throw this.refuse(caller, "spawn", "invalid", `cwd ${cwd} is not a directory`);
     }
+    // A spawned child is trusted, so its cwd must not hold content monad
+    // checked out or let an agent write as untrusted (decision record
+    // 0009): a trusted child in a hostile PR worktree would run the PR's
+    // .monad.yml and toolchain with no human involved. This also covers
+    // worktree: true, whose source is this cwd.
+    const untrusted = this.untrustedContent(cwd);
+    if (untrusted !== undefined) {
+      throw this.refuse(caller, "spawn", "forbidden", untrusted);
+    }
     if (caller.kind === "session" && this.scopeRoots !== undefined) {
       const root = this.repos.resolve(cwd);
       if (root === undefined || !this.scopeRoots.has(root)) {
@@ -679,6 +697,36 @@ export class LinkService {
   // ----------------------------------------------------------------- helpers
 
   /**
+   * Why a directory may hold untrusted content, or undefined when it does
+   * not. Two rules, on real paths (symlinks resolved):
+   * - anything under monad's worktrees root must be inside the worktree of
+   *   a session that exists and is trusted (the layout is
+   *   <root>/<repoKey>/<sessionId>, so the owner is the second segment);
+   * - anything inside the cwd of an untrusted session (whatever its status:
+   *   a closed review's worktree stays on disk until `monad gc`) is refused.
+   */
+  private untrustedContent(cwd: string): string | undefined {
+    const real = realPath(cwd);
+    const root = realPath(this.worktreesRoot);
+    if (isInside(real, root)) {
+      const [key, owner] = relative(root, real).split(sep);
+      const record = key && owner ? this.store.get(owner) : undefined;
+      if (!record || record.trust !== "trusted") {
+        return `cwd ${cwd} is inside a monad worktree that does not belong to a trusted session; a spawned session would trust content that was checked out untrusted`;
+      }
+    }
+    for (const record of this.store.list()) {
+      if (record.trust === "trusted") {
+        continue;
+      }
+      if (isInside(real, realPath(record.cwd))) {
+        return `cwd ${cwd} is inside the directory of untrusted session ${record.id}; a spawned session would trust its content`;
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Spawned sessions running a turn or holding a permission right now, plus
    * spawns still starting (their slot is reserved), optionally not counting
    * one. The cap is daemon-wide: every spawned session counts, whoever
@@ -885,6 +933,19 @@ export class LinkService {
       // The session vanished between the check and the log; nothing to record on.
     }
   }
+}
+
+/** The real path of a directory, or its normalized absolute path when it cannot be resolved. */
+function realPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolvePath(path);
+  }
+}
+
+function isInside(path: string, dir: string): boolean {
+  return path === dir || path.startsWith(dir.endsWith(sep) ? dir : dir + sep);
 }
 
 function isDirectory(path: string): boolean {
