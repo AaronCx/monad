@@ -29,6 +29,14 @@ export interface LinkLimits {
   maxSpawnDepth: number;
   /** Spawned sessions running or waiting on a permission at once. */
   maxConcurrentSpawned: number;
+  /**
+   * Summarizer sessions running at once, daemon-wide, before a session's
+   * sessions_summarize is refused. Each one is a vendor session spending
+   * Aaron's tokens for up to ten minutes that a session, not a human,
+   * started. The human's `monad handoff --summarize` counts toward it but is
+   * never refused by it.
+   */
+  maxConcurrentSummaries: number;
 }
 
 export interface LinkConfig {
@@ -49,6 +57,7 @@ export const DEFAULT_LINK_LIMITS: LinkLimits = {
   maxHops: 4,
   maxSpawnDepth: 2,
   maxConcurrentSpawned: 3,
+  maxConcurrentSummaries: 2,
 };
 
 export function defaultLinkConfig(): LinkConfig {
@@ -79,6 +88,7 @@ const LinkConfigFileSchema = z.strictObject({
       maxHops: positiveInt.optional(),
       maxSpawnDepth: z.number().int().nonnegative().optional(),
       maxConcurrentSpawned: positiveInt.optional(),
+      maxConcurrentSummaries: positiveInt.optional(),
     })
     .optional(),
 });

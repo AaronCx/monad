@@ -32,7 +32,13 @@ describe("loadLinkConfig", () => {
     expect(loaded.config).toMatchObject({
       enabled: true,
       repos: null,
-      limits: { messagesPerMinute: 10, maxHops: 4, maxSpawnDepth: 2, maxConcurrentSpawned: 3 },
+      limits: {
+        messagesPerMinute: 10,
+        maxHops: 4,
+        maxSpawnDepth: 2,
+        maxConcurrentSpawned: 3,
+        maxConcurrentSummaries: 2,
+      },
     });
   });
 

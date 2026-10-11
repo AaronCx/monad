@@ -880,6 +880,20 @@ export class LinkService {
     if (this.summarizing.has(target.id)) {
       throw this.refuse(caller, "summarize", "refused", `a summary of ${target.id} is already being written`, target.id);
     }
+    // A summarizer is a vendor session spending tokens for up to ten
+    // minutes, and it is not a spawned child, so the spawned-session cap
+    // does not see it: summaries have a daemon-wide cap of their own. A
+    // session may not start one past it; the human always may (their runs
+    // count toward it).
+    if (caller.kind === "session" && this.summarizing.size >= this.config.limits.maxConcurrentSummaries) {
+      throw this.refuse(
+        caller,
+        "summarize",
+        "refused",
+        `${this.summarizing.size} summaries are already being written; the limit is ${this.config.limits.maxConcurrentSummaries}`,
+        target.id,
+      );
+    }
     // A session asking for summaries spends vendor tokens per call; it shares
     // the bucket that bounds messages and spawns.
     this.takeRate(caller, "summarize", target.id);

@@ -323,3 +323,60 @@ describe("a summarizer session is not a way around the target's log", () => {
     expect(scoped.search(as, "Clamped").map((hit) => hit.sessionId)).not.toContain(summarizer.id);
   });
 });
+
+describe("what bounds the summaries a session can start", () => {
+  /** The summarizer running for a target, once its turn has started. */
+  async function runningFor(h: Harness, target: SessionId): Promise<SessionRecord> {
+    let found: SessionRecord | undefined;
+    await waitFor(() => {
+      found = h.store
+        .list()
+        .find((record) => record.cwd === join(h.dir, "summaries", target) && record.status !== "closed");
+      return found !== undefined && (h.backends.get(found.id)?.prompts.length ?? 0) === 1;
+    }, `the summarizer of ${target}`);
+    return found as SessionRecord;
+  }
+
+  function finish(h: Harness, summarizer: SessionRecord): void {
+    h.backends.get(summarizer.id)?.hooks.onUpdate(agentChunk(summarizer.id, "Summary."));
+    h.backends.get(summarizer.id)?.endTurn();
+  }
+
+  test("a daemon-wide cap on running summarizers refuses a session past it; the human is never refused", async () => {
+    const h = harness({ config: { limits: { maxConcurrentSummaries: 2, messageBurst: 10, maxConcurrentSpawned: 1 } } });
+    const caller = await h.session();
+    const as = { kind: "session" as const, id: caller.id };
+    const targets = [await targetWithHistory(h), await targetWithHistory(h), await targetWithHistory(h)];
+    const [t0, t1, t2] = targets.map((t) => t.id) as [SessionId, SessionId, SessionId];
+
+    const first = h.link.summarize(as, t0);
+    const second = h.link.summarize({ kind: "human" }, t1);
+    // Two are running (one the human's): a session's third is refused, and
+    // no summarizer session is created for it.
+    let third: unknown;
+    try {
+      await h.link.summarize(as, t2);
+    } catch (error) {
+      third = error;
+    }
+    expect(third).toBeInstanceOf(LinkError);
+    expect((third as LinkError).message).toBe("2 summaries are already being written; the limit is 2");
+    expect(h.store.list().some((record) => record.cwd === join(h.dir, "summaries", t2))).toBe(false);
+    expect(accessEvents(h.store, caller.id).at(-1)).toMatchObject({
+      op: "summarize",
+      target: t2,
+      refused: "2 summaries are already being written; the limit is 2",
+    });
+    // The human is never refused by it.
+    const human = h.link.summarize({ kind: "human" }, t2);
+
+    for (const target of [t0, t1, t2]) {
+      finish(h, await runningFor(h, target));
+    }
+    await Promise.all([first, second, human]);
+    // With the summarizers done, the session may start one again.
+    const again = h.link.summarize(as, t2);
+    finish(h, await runningFor(h, t2));
+    expect((await again).text).toBe("Summary.");
+  });
+});
