@@ -59,8 +59,15 @@ function canonical(path: string): string {
  * monad's own review and fix worktrees (and a human's `git worktree add`) are
  * tagged with the repo they are a checkout of, not with a throwaway path.
  * Submodules (`.git` file, no commondir) and worktrees of a bare repository
- * (commondir not named `.git`) keep their own toplevel. Unreadable metadata
- * also keeps the toplevel: a wrong fold would be worse than none.
+ * (commondir not named `.git`) keep their own toplevel.
+ *
+ * A worktree whose main repository is gone (deleted, or a purged temp
+ * checkout, which is exactly what monad's leftover review worktrees look like
+ * after their source clone disappears) has no readable commondir. Its gitdir
+ * line still says `<main>/.git/worktrees/<name>`, which is git's own layout,
+ * so that names the main root; the sessions that ran in sibling worktrees
+ * still group under one repository. Any other unreadable metadata keeps the
+ * toplevel: a wrong fold would be worse than none.
  */
 function rootForGitFile(toplevel: string, gitFile: string): string {
   try {
@@ -73,7 +80,8 @@ function rootForGitFile(toplevel: string, gitFile: string): string {
     try {
       commondir = resolve(gitdir, readFileSync(join(gitdir, "commondir"), "utf8").trim());
     } catch {
-      return toplevel;
+      const layout = gitdir.match(/^(.+)\/\.git\/worktrees\/[^/]+\/?$/);
+      return layout?.[1] ?? toplevel;
     }
     if (basename(commondir) === ".git" && statKind(commondir) === "dir") {
       return dirname(commondir);

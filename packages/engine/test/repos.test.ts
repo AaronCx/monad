@@ -110,6 +110,16 @@ describe("RepoResolver", () => {
     expect(resolver.resolve(join(worktree, "src", "a.ts"))).toBe(main);
   });
 
+  test("a worktree whose main repository is gone still folds into the main root git named", () => {
+    const parent = tempDir("monad-repos-");
+    const main = makeRepo(parent, "purged-clone");
+    const worktrees = tempDir("monad-worktrees-");
+    const worktree = join(worktrees, "review-2");
+    git(main, "worktree", "add", "-q", "--detach", worktree, "HEAD");
+    rmSync(main, { recursive: true, force: true });
+    expect(new RepoResolver().resolve(join(worktree, "src", "a.ts"))).toBe(main);
+  });
+
   test("a .git file with no commondir (a submodule checkout) keeps its own toplevel", () => {
     const parent = tempDir("monad-repos-");
     const modules = join(parent, "super", ".git", "modules", "sub");
