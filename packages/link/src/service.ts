@@ -302,6 +302,18 @@ export class LinkService {
     const limit = clampInt(options.limit, DEFAULT_LIST_LIMIT, 1, MAX_LIST_LIMIT);
     const summaries = records.slice(0, limit).map((record) => this.summarize(record));
     this.logCaller(caller, { op: "list", count: summaries.length });
+    // A listing shows each session's title (taken from its first prompt),
+    // cwd and repos, so a session listing others is on their logs too:
+    // nothing reads a session silently. The human's listing is not: the
+    // unfiltered GET /v1/sessions has always returned every record to the
+    // human unlogged (`monad attach` and `monad gc` rely on it), so logging
+    // only the filtered form would record nothing real and bury every
+    // transcript under a line per `monad ls` (decision record 0012).
+    if (caller.kind === "session") {
+      for (const summary of summaries) {
+        this.logTarget(caller, summary.id, { op: "list" });
+      }
+    }
     return summaries;
   }
 

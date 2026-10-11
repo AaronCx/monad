@@ -780,6 +780,24 @@ describe("sessions_read and sessions_search", () => {
     }
   });
 
+  test("a session's list is on every listed session's log; the human's is not", async () => {
+    const h = harness();
+    const lister = await h.session();
+    const a = await h.session();
+    const b = await h.session();
+    const listed = h.link.list({ kind: "session", id: lister.id }).map((s) => s.id);
+    expect(listed).toEqual(expect.arrayContaining([lister.id, a.id, b.id]));
+    for (const id of [a.id, b.id]) {
+      expect(accessEvents(h.store, id)).toEqual([{ op: "list", by: lister.id, role: "target", target: id }]);
+    }
+    // The lister's own log has the caller record once, no target record for itself.
+    expect(accessEvents(h.store, lister.id)).toEqual([
+      { op: "list", count: listed.length, by: lister.id, role: "caller" },
+    ]);
+    h.link.list({ kind: "human" }, { limit: 10 });
+    expect(accessEvents(h.store, a.id)).toHaveLength(1);
+  });
+
   test("list returns repos and parent links, most recently active first", async () => {
     const repo = tempRepo("monad-link-list-");
     const h = harness();
