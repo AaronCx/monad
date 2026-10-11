@@ -266,6 +266,72 @@ describe("deliverPeerMessage", () => {
     expect(second.backends.get(target.id)?.prompts).toHaveLength(1);
   });
 
+  test("a queued message drains when the session goes back to interactive", async () => {
+    const { manager, backends } = makeManager();
+    const target = await manager.create({ cwd: "/tmp/target" });
+    const human = manager.prompt(target.id, {
+      sessionId: target.id,
+      prompt: [{ type: "text", text: "human ask" }],
+    });
+    const queued = message(target.id, "first");
+    expect((manager.deliverPeerMessage(queued).payload as PeerMessagePayload).delivery).toBe("queued");
+    const backend = backends.get(target.id);
+    await waitFor(() => (backend?.prompts.length ?? 0) === 1, "the human turn");
+    // Switched to review mid-turn: the boundary must not deliver to a review session.
+    await manager.setMode(target.id, "review");
+    backend?.turns[0]?.resolve({ stopReason: "end_turn" });
+    await human;
+    await Bun.sleep(20);
+    expect(backend?.prompts).toHaveLength(1);
+    expect(manager.queuedPeerMessages(target.id)).toHaveLength(1);
+
+    // Back to interactive: the queued message is the next turn, no human needed.
+    await manager.setMode(target.id, "interactive");
+    await waitFor(() => backend?.prompts.length === 2, "the drained message");
+    expect(peerMetaOf(backend?.prompts[1])?.messageId).toBe(queued.messageId);
+    expect(manager.queuedPeerMessages(target.id)).toEqual([]);
+    backend?.turns[1]?.resolve({ stopReason: "end_turn" });
+    await waitFor(() => manager.get(target.id)?.status === "idle" && !manager.isTurnInFlight(target.id), "idle");
+  });
+
+  test("a message to an idle session with a backlog queues behind it, oldest first", async () => {
+    const { manager, backends } = makeManager();
+    const target = manager.createRecord({ cwd: "/tmp/target", mode: "review", trust: "trusted" });
+    await manager.activate(target.id);
+    const older = message(target.id, "older");
+    expect((manager.deliverPeerMessage(older).payload as PeerMessagePayload).delivery).toBe("queued");
+    // setMode writes the mode synchronously and drains on a later tick, so
+    // this message meets an idle, interactive session that still has a
+    // backlog. It must not jump the queue.
+    const switching = manager.setMode(target.id, "interactive");
+    const newer = message(target.id, "newer");
+    expect((manager.deliverPeerMessage(newer).payload as PeerMessagePayload).delivery).toBe("queued");
+    await switching;
+    const backend = backends.get(target.id);
+    await waitFor(() => (backend?.prompts.length ?? 0) === 1, "the oldest message");
+    expect(textOf(backend?.prompts[0])).toEndWith("\n\nolder");
+    backend?.turns[0]?.resolve({ stopReason: "end_turn" });
+    await waitFor(() => backend?.prompts.length === 2, "the newer message");
+    expect(textOf(backend?.prompts[1])).toEndWith("\n\nnewer");
+    backend?.turns[1]?.resolve({ stopReason: "end_turn" });
+    await waitFor(() => manager.get(target.id)?.status === "idle" && !manager.isTurnInFlight(target.id), "idle");
+  });
+
+  test("cancel with nothing in flight lets the queue drain", async () => {
+    const { store, manager, backends } = makeManager();
+    const target = await manager.create({ cwd: "/tmp/target" });
+    // A stale status with a queued message, as a lost turn would leave it.
+    store.setStatus(target.id, "running");
+    const queued = message(target.id, "stuck");
+    expect((manager.deliverPeerMessage(queued).payload as PeerMessagePayload).delivery).toBe("queued");
+    await manager.cancel(target.id);
+    const backend = backends.get(target.id);
+    await waitFor(() => (backend?.prompts.length ?? 0) === 1, "the drained message");
+    expect(peerMetaOf(backend?.prompts[0])?.messageId).toBe(queued.messageId);
+    backend?.turns[0]?.resolve({ stopReason: "end_turn" });
+    await waitFor(() => manager.get(target.id)?.status === "idle", "idle");
+  });
+
   test("closed and imported targets refuse; review targets hold the message queued", async () => {
     const { store, manager } = makeManager();
     const closed = await manager.create({ cwd: "/tmp/a" });

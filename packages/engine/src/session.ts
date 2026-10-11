@@ -204,6 +204,8 @@ export class SessionManager {
   private readonly changeListeners = new Set<SessionChangeListener>();
   /** Set by shutdown(); a deferred peer drain must not touch a closed store. */
   private stopped = false;
+  /** Sessions with a peer drain already scheduled, so a burst schedules one. */
+  private readonly drainsScheduled = new Set<SessionId>();
 
   constructor(options: SessionManagerOptions) {
     this.store = options.store;
@@ -336,6 +338,11 @@ export class SessionManager {
     const backend = this.live.get(id)?.backend;
     if (backend?.setSessionMode) {
       await backend.setSessionMode(mode);
+    }
+    if (mode === "interactive") {
+      // Messages queued while the session was review or fix (or busy) are
+      // deliverable again; without this they wait for an unrelated turn.
+      this.schedulePeerDrain(id);
     }
     return this.mustGet(id);
   }
@@ -511,6 +518,12 @@ export class SessionManager {
     const event = this.appendAndPublish(input.to, "peer_message", payload);
     if (deliverNow) {
       this.startPeerTurn(input.to, payload);
+    } else {
+      // Queued behind a backlog on a session that may be ready right now
+      // (its older messages are waiting for exactly this): the drain delivers
+      // the OLDEST one, so order holds and nothing waits for an unrelated
+      // turn. A busy session's drain is a no-op until its boundary.
+      this.schedulePeerDrain(input.to);
     }
     return event;
   }
@@ -536,6 +549,9 @@ export class SessionManager {
       await session.backend.cancel();
     }
     this.setStatus(id, "idle");
+    // With no turn in flight (nothing to end and drain at its boundary),
+    // the idle session can take its queued peer message now.
+    this.schedulePeerDrain(id);
   }
 
   /** Closes a session for good: backend down, closed event, status closed. */
@@ -644,15 +660,20 @@ export class SessionManager {
    * no turn holds its lock, no permission is held, nothing is queued ahead
    * of it, and it is an interactive session. A session switched to review or
    * fix after a message was queued keeps the message queued until it is
-   * interactive again: peers only ever reach interactive sessions.
+   * interactive again (setMode then drains it): peers only ever reach
+   * interactive sessions.
    */
   private readyForPeerTurn(record: SessionRecord): boolean {
+    return this.canTakePeerTurn(record) && this.queuedPeerMessages(record.id).length === 0;
+  }
+
+  /** The session-side half of readiness: idle, interactive, unlocked, holding nothing. */
+  private canTakePeerTurn(record: SessionRecord): boolean {
     return (
       record.status === "idle" &&
       record.mode === "interactive" &&
       !this.isTurnInFlight(record.id) &&
-      this.pendingPermissionCount(record.id) === 0 &&
-      this.queuedPeerMessages(record.id).length === 0
+      this.pendingPermissionCount(record.id) === 0
     );
   }
 
@@ -669,7 +690,12 @@ export class SessionManager {
   }
 
   private schedulePeerDrain(id: SessionId): void {
+    if (this.stopped || this.drainsScheduled.has(id)) {
+      return;
+    }
+    this.drainsScheduled.add(id);
     setTimeout(() => {
+      this.drainsScheduled.delete(id);
       this.drainPeerQueue(id);
     }, 0);
   }
@@ -685,13 +711,7 @@ export class SessionManager {
     } catch {
       return; // The store is gone (daemon shutting down).
     }
-    if (
-      !record ||
-      record.status !== "idle" ||
-      record.mode !== "interactive" ||
-      this.isTurnInFlight(id) ||
-      this.pendingPermissionCount(id) > 0
-    ) {
+    if (!record || !this.canTakePeerTurn(record)) {
       return;
     }
     const next = this.queuedPeerMessages(id)[0];
