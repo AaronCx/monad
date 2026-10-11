@@ -109,6 +109,23 @@ describe("normalizeTranscript", () => {
     ]);
   });
 
+  test("a handoff shows its first line and a summary its opening, one line each", () => {
+    const summarizer = Bun.randomUUIDv7();
+    const page = normalizeTranscript(
+      log([
+        ["handoff", { reason: "idle", text: "idle: last asked \"fix the clamp\"\n\n## Last asks\n1. fix the clamp" }],
+        ["summary", { text: "Fixed the clamp.\nNothing left.", summarizerSessionId: summarizer, fromSeq: 1, toSeq: 1 }],
+      ]),
+      all,
+    );
+    expect(page.text).toBe(
+      [
+        '[seq 1] handoff (idle): idle: last asked "fix the clamp"',
+        `[seq 2] summary by summarizer session ${summarizer}: Fixed the clamp. Nothing left.`,
+      ].join("\n"),
+    );
+  });
+
   test("pages stop at the entry limit, and the next page starts where this one stopped", () => {
     // Log-wide seqs: this session's events are every third seq.
     const events = log(

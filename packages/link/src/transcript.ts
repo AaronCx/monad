@@ -15,7 +15,9 @@ import type { EventRecord } from "@aaroncx/protocol";
  *   updates by toolCallId, plus the permission answer if one was asked.
  *   Tool OUTPUT is never shown: it is the bulk of any log, and the place
  *   secrets and injected text are likeliest to sit;
- * - every other monad event as one compact line.
+ * - every other monad event as one compact line (a handoff by its first
+ *   line, a summary by its opening; both are readable in full in the log
+ *   and both are indexed for search).
  *
  * The text here is NOT redacted; callers redact the whole page at once (so a
  * secret split across two entries is still caught) and fence it.
@@ -320,6 +322,20 @@ export function normalizeTranscript(events: EventRecord[], options: NormalizeOpt
         );
         break;
       }
+      case "handoff": {
+        const first = (str(payload.text) ?? "").split("\n", 1)[0] ?? "";
+        accepted = simple(event, `handoff (${str(payload.reason) ?? "?"}): ${oneLine(first, PEER_TEXT_PREVIEW)}`);
+        break;
+      }
+      case "summary":
+        accepted = simple(
+          event,
+          `summary by summarizer session ${str(payload.summarizerSessionId) ?? "?"}: ${oneLine(
+            str(payload.text) ?? "",
+            PEER_TEXT_PREVIEW,
+          )}`,
+        );
+        break;
       case "access": {
         const parts = [`access: ${str(payload.by) ?? "?"} ${str(payload.op) ?? "?"} (${str(payload.role) ?? "?"})`];
         if (str(payload.target)) {
