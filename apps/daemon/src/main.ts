@@ -14,7 +14,7 @@ import {
 } from "@aaroncx/engine";
 import { createAcpHttpServer } from "@aaroncx/engine/transport";
 import { backendUnavailable, createClaudeBackend } from "@aaroncx/backends";
-import { LinkService, loadLinkConfig } from "@aaroncx/link";
+import { HandoffScheduler, handoffIdleMs, LinkService, loadLinkConfig } from "@aaroncx/link";
 import type { DaemonInfo } from "@aaroncx/protocol";
 import { createDaemonAgentFactory } from "./acp-agent.ts";
 import { createControlHandler } from "./control.ts";
@@ -194,6 +194,25 @@ if (recovered.length > 0) {
 // Peer messages queued before a restart are still in the log; idle targets
 // get their oldest one now, the rest at later turn boundaries.
 manager.resumePeerQueues();
+// Deterministic handoffs (Link phase 3): one per idle stretch after the
+// idle window (MONAD_HANDOFF_IDLE_MS, default ten minutes) and one just
+// before every close. start() also catches up: a session that went idle
+// under the previous daemon and was never handed off gets its handoff now,
+// one that went idle recently gets the rest of its window. Summarizer
+// sessions are skipped. No model runs here, ever; summaries are on demand.
+const handoffs = new HandoffScheduler({
+  manager,
+  store,
+  write: (id, reason) => link.writeHandoff(id, reason),
+  idleMs: handoffIdleMs(),
+  skip: (record) => link.isSummarizer(record),
+  onError: (id, error) => {
+    console.warn(
+      `monadd: the handoff for session ${id} failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  },
+});
+handoffs.start();
 
 const infoPath = daemonInfoPath();
 const pidPath = daemonPidPath();
@@ -216,6 +235,9 @@ async function shutdown(signal: string): Promise<void> {
     // below end turns, and a turn started at one of those boundaries would
     // log its prompt (marking the message delivered) and then be killed.
     manager.beginShutdown();
+    // Pending idle handoffs are in the log's terms (no handoff after the
+    // stretch's prompt), so the next daemon's catch-up writes them.
+    handoffs.stop();
     // Cancel in-flight turns (this also resolves held permission requests
     // with a cancelled outcome) before closing backends.
     for (const record of manager.list()) {

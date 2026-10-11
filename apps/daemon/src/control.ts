@@ -2,8 +2,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { runReviewPlaybook, type SessionManager } from "@aaroncx/engine";
 import { LinkError, type LinkErrorCode, type LinkService } from "@aaroncx/link";
 import {
+  AppendNoteRequestSchema,
+  type AppendNoteResponse,
   type DaemonStatus,
+  HandoffRequestSchema,
+  type HandoffResponse,
   type ListSessionsResponse,
+  type NotesResponse,
   ReviewRequestSchema,
   type ReviewStreamLine,
   type SearchResponse,
@@ -21,8 +26,8 @@ import {
 /**
  * The control API: plain JSON beside ACP for what the protocol does not
  * cover (cross-repo session listing, daemon introspection, the review
- * playbook, mode switches, session titles, and monad Link's search, read and
- * send for the human at the CLI). Runs behind the same bearer check as /acp;
+ * playbook, mode switches, session titles, and monad Link's search, read,
+ * send, handoffs and repo notes for the human at the CLI). Runs behind the same bearer check as /acp;
  * the transport wrapper calls this only for authenticated non-ACP paths.
  */
 
@@ -253,14 +258,28 @@ const LIST_FILTERS = ["repo", "status", "since", "limit", "imported"];
 
 /**
  * GET /v1/sessions. With no Link filter, every record oldest first (the M1
- * contract `monad attach` and `monad gc` rely on). With any of repo, status,
+ * contract `monad attach` and `monad gc` rely on), plus each one's last
+ * handoff line. With any of repo, status,
  * since, limit or imported, the Link list: filtered, most recently active
  * first, with each session's repos. imported=0 hides imported logs (the
  * default `monad ls`); anything else includes them.
  */
 function handleListSessions(deps: ControlDeps, res: ServerResponse, params: URLSearchParams): void {
   if (!LIST_FILTERS.some((name) => params.has(name))) {
-    const body: ListSessionsResponse = { sessions: deps.manager.list() };
+    const sessions = deps.manager.list();
+    // Each session's last handoff line rides along (an optional field the M1
+    // clients ignore), so plain `monad ls` shows where every session stands.
+    const handoffs: Record<string, string> = {};
+    for (const session of sessions) {
+      const line = deps.link.lastHandoffLine(session.id);
+      if (line !== undefined) {
+        handoffs[session.id] = line;
+      }
+    }
+    const body: ListSessionsResponse = {
+      sessions,
+      ...(Object.keys(handoffs).length === 0 ? {} : { handoffs }),
+    };
     sendJson(res, 200, body);
     return;
   }
@@ -283,9 +302,13 @@ function handleListSessions(deps: ControlDeps, res: ServerResponse, params: URLS
     const sessions = summaries
       .map((summary) => deps.manager.get(summary.id))
       .filter((record): record is SessionRecord => record !== undefined);
+    const handoffs = summaries.filter((summary) => summary.lastHandoff !== undefined);
     const body: ListSessionsResponse = {
       sessions,
       repos: Object.fromEntries(summaries.map((summary) => [summary.id, summary.repos])),
+      ...(handoffs.length === 0
+        ? {}
+        : { handoffs: Object.fromEntries(handoffs.map((summary) => [summary.id, summary.lastHandoff as string])) }),
     };
     sendJson(res, 200, body);
   } catch (error) {
@@ -368,6 +391,92 @@ async function handleSendMessage(
   }
 }
 
+/**
+ * POST /v1/sessions/<id>/handoff: writes a fresh deterministic handoff
+ * (reason manual) and returns it; with { summarize: true } also runs the
+ * model-written summary, which spends vendor tokens and so only ever runs
+ * on a request like this (or the sessions_summarize tool). The response
+ * waits for the summary.
+ */
+async function handleHandoff(
+  deps: ControlDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessionId: string,
+): Promise<void> {
+  let body: unknown;
+  try {
+    const raw = await readBody(req);
+    body = raw.trim() === "" ? {} : JSON.parse(raw);
+  } catch (error) {
+    sendJson(res, 400, { error: `unreadable body: ${errorMessage(error)}` });
+    return;
+  }
+  const parsed = HandoffRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: `invalid handoff request: ${parsed.error.message}` });
+    return;
+  }
+  try {
+    const result = await deps.link.handoff({ kind: "human" }, sessionId, { summarize: parsed.data.summarize });
+    const payload = result.handoff.payload as { reason: HandoffResponse["handoff"]["reason"]; text: string };
+    const response: HandoffResponse = {
+      sessionId: result.sessionId,
+      handoff: { seq: result.handoff.seq, ts: result.handoff.ts, reason: payload.reason, text: payload.text },
+      ...(result.summary
+        ? {
+            summary: {
+              seq: result.summary.seq,
+              ts: result.summary.ts,
+              text: result.summary.text,
+              summarizerSessionId: result.summary.summarizerSessionId,
+            },
+          }
+        : {}),
+    };
+    sendJson(res, 200, response);
+  } catch (error) {
+    sendLinkError(res, error);
+  }
+}
+
+/** GET /v1/notes?repo=P: a repository's notes, the human as reader. */
+function handleReadNotes(deps: ControlDeps, res: ServerResponse, params: URLSearchParams): void {
+  const repo = params.get("repo");
+  if (repo === null || repo.trim() === "") {
+    sendJson(res, 400, { error: "repo is required" });
+    return;
+  }
+  try {
+    const body: NotesResponse = deps.link.notesRead({ kind: "human" }, repo);
+    sendJson(res, 200, body);
+  } catch (error) {
+    sendLinkError(res, error);
+  }
+}
+
+/** POST /v1/notes { repo, text }: the human writes a note. */
+async function handleAppendNote(deps: ControlDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: unknown;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch (error) {
+    sendJson(res, 400, { error: `unreadable body: ${errorMessage(error)}` });
+    return;
+  }
+  const parsed = AppendNoteRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: `invalid note: ${parsed.error.message}` });
+    return;
+  }
+  try {
+    const response: AppendNoteResponse = deps.link.notesAppend({ kind: "human" }, parsed.data.repo, parsed.data.text);
+    sendJson(res, 200, response);
+  } catch (error) {
+    sendLinkError(res, error);
+  }
+}
+
 export function createControlHandler(deps: ControlDeps) {
   return (req: IncomingMessage, res: ServerResponse): void => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -375,6 +484,15 @@ export function createControlHandler(deps: ControlDeps) {
     if (req.method === "POST") {
       if (pathname === "/v1/review") {
         void handleReview(deps, req, res);
+        return;
+      }
+      if (pathname === "/v1/notes") {
+        void handleAppendNote(deps, req, res);
+        return;
+      }
+      const handoffMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/handoff$/);
+      if (handoffMatch) {
+        void handleHandoff(deps, req, res, handoffMatch[1] ?? "");
         return;
       }
       const messageMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/messages$/);
@@ -409,6 +527,10 @@ export function createControlHandler(deps: ControlDeps) {
     }
     if (pathname === "/v1/search") {
       handleSearch(deps, res, url.searchParams);
+      return;
+    }
+    if (pathname === "/v1/notes") {
+      handleReadNotes(deps, res, url.searchParams);
       return;
     }
     const transcriptMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/transcript$/);

@@ -20,9 +20,10 @@ import {
 /**
  * Response of GET /v1/sessions. With any Link filter (repo, status, since,
  * limit, imported) the list is filtered and ordered most recently active
- * first, `repos` maps each listed session to the repositories it touched,
- * and `handoffs` maps each session that has one to its last handoff's first
- * line. With none, every session, oldest first, as in M1.
+ * first, and `repos` maps each listed session to the repositories it
+ * touched. With none, every session, oldest first, as in M1. Either way
+ * `handoffs` maps each session that has one to its last handoff's first
+ * line (Link phase 3).
  */
 export const ListSessionsResponseSchema = z.object({
   sessions: z.array(SessionRecordSchema),
