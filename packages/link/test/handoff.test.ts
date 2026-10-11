@@ -403,6 +403,50 @@ describe("what a handoff holds", () => {
     expect(first).toContain("(feat/clamp, clean)");
   });
 
+  test("a session in a linked worktree reports the worktree's branch and changes, not the main checkout's", async () => {
+    const h = harness();
+    const main = gitRepo("monad-handoff-main-");
+    const holder = tempDir("monad-handoff-wt-");
+    const worktree = join(holder, "wt");
+    git(main, "worktree", "add", "-q", "--detach", worktree);
+    // The human's own edit in the main checkout, and the session's in its worktree.
+    writeFileSync(join(main, "human-edit.txt"), "the human's\n");
+    writeFileSync(join(worktree, "session-edit.txt"), "the session's\n");
+    const s = await h.session(worktree);
+    h.history(s.id, [
+      ["prompt", userPrompt(s.id, "fix it in the worktree")],
+      [
+        "update",
+        {
+          sessionId: s.id,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "t1",
+            title: "Write session-edit.txt",
+            kind: "edit",
+            locations: [{ path: join(worktree, "session-edit.txt") }],
+          },
+        },
+      ],
+    ]);
+
+    const payload = (await h.link.writeHandoff(s.id, "manual"))?.payload as HandoffPayload;
+    // The worktree folds into its main repository's root, and its git state
+    // is read from the worktree itself.
+    expect(payload.repos).toHaveLength(1);
+    expect(payload.repos[0]).toMatchObject({
+      root: main,
+      checkout: worktree,
+      branch: "HEAD",
+      head: git(main, "rev-parse", "HEAD"),
+      dirty: true,
+      changedCount: 1,
+      changedFiles: ["session-edit.txt"],
+    });
+    expect(JSON.stringify(payload)).not.toContain("human-edit.txt");
+    expect(payload.text).toContain(`(checkout ${worktree})`);
+  });
+
   test("a repository git cannot read is recorded as an error, never thrown", async () => {
     const h = harness();
     const repo = tempDir("monad-handoff-gone-");
