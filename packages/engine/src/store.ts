@@ -434,9 +434,20 @@ export class SessionStore {
   /**
    * Returns a session's events in seq order, starting at fromSeq inclusive.
    * With the default of 0 the whole log is returned; pass lastSeenSeq + 1 to
-   * resume.
+   * resume. `limit` caps how many events come back.
    */
-  replay(sessionId: SessionId, fromSeq = 0): EventRecord[] {
+  replay(sessionId: SessionId, fromSeq = 0, limit?: number): EventRecord[] {
+    if (limit !== undefined) {
+      // A bounded window, for readers that page (Link's sessions_read).
+      return this.db
+        .query<EventRow, { sessionId: string; fromSeq: number; limit: number }>(
+          `SELECT seq, session_id, ts, kind, payload FROM events
+           WHERE session_id = $sessionId AND seq >= $fromSeq
+           ORDER BY seq ASC LIMIT $limit`,
+        )
+        .all({ sessionId, fromSeq, limit: Math.max(0, Math.trunc(limit)) })
+        .map(rowToEvent);
+    }
     const rows = this.db
       .query<EventRow, { sessionId: string; fromSeq: number }>(
         `SELECT seq, session_id, ts, kind, payload FROM events
