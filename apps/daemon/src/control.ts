@@ -7,12 +7,14 @@ import {
   type ReviewStreamLine,
   SetModeRequestSchema,
   type SetModeResponse,
+  UpdateSessionRequestSchema,
+  type UpdateSessionResponse,
 } from "@aaroncx/protocol";
 
 /**
  * The control API: plain JSON beside ACP for what the protocol does not
  * cover (cross-repo session listing, daemon introspection, the review
- * playbook, mode switches). Runs behind the same bearer check as /acp; the
+ * playbook, mode switches, session titles). Runs behind the same bearer check as /acp; the
  * transport wrapper calls this only for authenticated non-ACP paths.
  */
 
@@ -162,6 +164,48 @@ async function handleSetMode(
   }
 }
 
+/**
+ * PATCH /v1/sessions/<id>: names a session by hand ({ title: "..." }) or
+ * drops the manual name and re-derives it from the first prompt
+ * ({ title: null }). A manual title is never overwritten by derivation
+ * (monad Link, decision record 0012). Titles are metadata, not activity, so
+ * updatedAt does not move.
+ */
+async function handleUpdateSession(
+  deps: ControlDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessionId: string,
+): Promise<void> {
+  let body: unknown;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch (error) {
+    sendJson(res, 400, { error: `unreadable body: ${errorMessage(error)}` });
+    return;
+  }
+  const parsed = UpdateSessionRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: `invalid session update: ${parsed.error.message}` });
+    return;
+  }
+  if (!deps.manager.get(sessionId)) {
+    sendJson(res, 404, { error: `no session ${sessionId}` });
+    return;
+  }
+  try {
+    // Whitespace runs (newlines included) collapse to one space: a title is
+    // one line wherever it is shown.
+    const title = parsed.data.title === null ? null : parsed.data.title.replace(/\s+/g, " ");
+    const response: UpdateSessionResponse = {
+      session: deps.manager.setTitle(sessionId, title),
+    };
+    sendJson(res, 200, response);
+  } catch (error) {
+    sendJson(res, 500, { error: errorMessage(error) });
+  }
+}
+
 export function createControlHandler(deps: ControlDeps) {
   return (req: IncomingMessage, res: ServerResponse): void => {
     const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
@@ -173,6 +217,15 @@ export function createControlHandler(deps: ControlDeps) {
       const modeMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/mode$/);
       if (modeMatch) {
         void handleSetMode(deps, req, res, modeMatch[1] ?? "");
+        return;
+      }
+      sendJson(res, 404, { error: "not found" });
+      return;
+    }
+    if (req.method === "PATCH") {
+      const sessionMatch = pathname.match(/^\/v1\/sessions\/([^/]+)$/);
+      if (sessionMatch) {
+        void handleUpdateSession(deps, req, res, sessionMatch[1] ?? "");
         return;
       }
       sendJson(res, 404, { error: "not found" });
