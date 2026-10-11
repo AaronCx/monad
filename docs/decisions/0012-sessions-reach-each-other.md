@@ -135,7 +135,9 @@ message is a prompt and nothing else:
   `packages/link/test/service.test.ts`.
 - **Delivery.** If the target is idle (status idle, no turn holding its lock, no permission held,
   nothing queued ahead, interactive mode) the message starts its next turn at once. Otherwise it
-  is queued, and the SessionManager drains ONE queued message at each turn boundary. A session
+  is queued, and the SessionManager drains ONE queued message, always the oldest, at each turn
+  boundary, and also whenever the session otherwise becomes able to take one (switched back to
+  interactive, cancelled with nothing in flight, a spawned-session slot freeing). A session
   switched to review or fix keeps its queue until it is interactive again.
 - **Provenance.** The delivered prompt's text starts with a header the daemon writes:
   `[message from monad session <id> "<title>", repo <x>]` (or
@@ -144,7 +146,13 @@ message is a prompt and nothing else:
   line, so a session first named by a peer is titled after the message body.
 - **The queue is the log.** A queued message is delivered exactly when a prompt carrying its
   `messageId` appears in the log, so undelivered messages are rebuilt from the log alone, a daemon
-  restart redelivers them (`resumePeerQueues` at start), and nothing is delivered twice.
+  restart redelivers them (`resumePeerQueues` at start), and nothing is delivered twice. Two
+  details keep that true across unclean and clean stops. At start, before resuming queues, the
+  daemon puts any session a dead daemon left `running` or `waiting_for_permission` back to idle
+  with an error event (`recoverInterruptedTurns`): nothing is in flight in a fresh process, and a
+  stale status would strand the queue, hang `sessions_wait`, and hold a spawn slot forever. At
+  shutdown, the daemon stops peer delivery (`beginShutdown`) before it cancels turns, so no
+  queued message's turn starts mid-shutdown and is lost with its prompt already logged.
 - **Targets.** The target must exist, be visible to the caller, be live (not closed or imported),
   be trusted, be interactive, and not be the caller. The text is redacted before delivery: a token
   one session saw does not travel to another.
@@ -164,14 +172,32 @@ the daemon and configurable in link.json:
   spawns. In memory on purpose: a restart refilling every bucket is harmless.
 - **Spawn depth.** A root session is depth 0; spawning from depth 2 is refused (max depth 2).
 - **Concurrency.** At most 3 spawned sessions running or waiting on a permission at once,
-  counting spawns still starting.
+  counting spawns still starting. The cap holds for every turn a peer message starts, not only
+  at spawn: a message (from a session or from `monad send`) to an idle spawned session while
+  the cap is reached stays queued, and the SessionManager retries it as soon as a spawned
+  session goes idle or closes. Otherwise a parent could spawn children, let them go idle, and
+  message them all at once. Only a human prompting a child directly (`monad attach`) is not
+  gated.
 
 ## Spawn and wait
 
 `sessions_spawn(cwd, prompt, backend?, mode?, worktree?)` creates a trusted child (a trusted
 session started it) in interactive mode, or review for a read-only child, records `parentId` and
 `spawnDepth` on the child's record, starts its backend, and returns its id once its first turn is
-running. The first turn is a peer turn from the parent: same provenance header, hop + 1.
+running. The first turn is a peer turn from the parent: same provenance header, hop + 1. It
+starts right after `session_created`, before the vendor adapter starts, so the child holds its
+prompt lock before anything else can reach it; a message that arrives while the adapter is still
+starting queues behind the parent's task instead of taking the turn.
+
+A spawned child is trusted, so its directory must not hold content monad checked out, or let an
+agent write, as untrusted (record 0009). A spawn is refused when its cwd (real path) is under
+`$MONAD_HOME/worktrees` and not inside the worktree of an existing trusted session (the layout is
+`<repoKey>/<sessionId>`, so the owner is known), or when it is inside the directory of any
+untrusted session, closed ones included (a closed review's worktree stays on disk until
+`monad gc`). Without this, a prompt-injected trusted session could spawn a child into a hostile
+PR's worktree, and the child's trusted checks mount would run the PR's `.monad.yml` commands with
+no human involved. The rule covers `worktree: true` too, since its source is that cwd. The
+link.json allowlist is no substitute: worktrees fold into their main repository.
 `worktree: true` runs the child in a detached worktree of the cwd's repository at HEAD, under the
 same layout review worktrees use, so `monad gc` cleans it up. `backend: "codex-acp"` resolves
 `MONAD_CODEX_CMD`, then `codex-acp` on PATH, then the provisioned vendor tree, and a missing
@@ -186,8 +212,13 @@ wait. The timeout is capped at ten minutes.
 
 Every list, search, read, message, spawn and wait appends an `access` event to the caller's log
 and to every target it touched (for search, each session that produced a returned hit, with the
-query, redacted). Refusals are recorded on the caller's log with the reason. The human at the CLI
-has no log of their own, so a human access is recorded on the targets with `by: "human"`. Access
+query, redacted; for list, each session the listing returned, since a listing shows titles taken
+from first prompts). Refusals are recorded on the caller's log with the reason. The human at the
+CLI has no log of their own, so a human access is recorded on the targets with `by: "human"`,
+with one exception: a human list is not recorded anywhere. The unfiltered `GET /v1/sessions`
+(the M1 contract `monad attach` and `monad gc` use) has always returned every record to the
+human unlogged, so logging only the filtered form would record nothing real and put a line in
+every transcript per `monad ls`. Access
 events are not indexed and do not move a session's `updatedAt`: they record someone else looking,
 not the session doing anything. `monad show` displays them.
 
