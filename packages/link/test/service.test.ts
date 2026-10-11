@@ -149,6 +149,26 @@ describe("trust table", () => {
     await expectLinkError(() => h.link.read({ kind: "session", id: a.id }, b.id), "not_found");
     // The human at the CLI sees everything.
     expect(h.link.list({ kind: "human" }).map((s) => s.id)).toContain(b.id);
+
+    // Search is scoped the same way: out-of-scope history never comes back.
+    h.history(b.id, [["prompt", userPrompt(b.id, "the zanzibar clamp broke")]]);
+    h.history(a.id, [["prompt", userPrompt(a.id, "zanzibar in scope")]]);
+    expect(h.link.search({ kind: "human" }, "zanzibar").map((hit) => hit.sessionId)).toContain(b.id);
+    const scoped = h.link.search({ kind: "session", id: a.id }, "zanzibar").map((hit) => hit.sessionId);
+    expect(scoped).toContain(a.id);
+    expect(scoped).not.toContain(b.id);
+    expect(accessEvents(h.store, b.id).filter((e) => e.op === "search" && e.by === a.id)).toEqual([]);
+
+    // And so is spawn: a session in scope cannot start a child outside it.
+    await expectLinkError(
+      h.link.spawn({ kind: "session", id: a.id }, { cwd: outOfScope, prompt: "x" }),
+      "forbidden",
+      "outside the repos link.json allows",
+    );
+    expect(h.store.childrenOf(a.id)).toEqual([]);
+    expect(h.store.list().filter((r) => r.cwd === outOfScope).map((r) => r.id)).toEqual([b.id]);
+    // The human is not limited by link.json.
+    expect((await h.link.spawn({ kind: "human" }, { cwd: outOfScope, prompt: "x" })).cwd).toBe(outOfScope);
   });
 });
 
@@ -670,14 +690,42 @@ describe("sessions_wait", () => {
     const target = await h.session();
     void h.manager.prompt(target.id, userPrompt(target.id, "work"));
     h.link.message({ kind: "human" }, target.id, "then this");
-    const waiting = h.link.wait({ kind: "session", id: caller.id }, target.id, "idle", 5_000);
+    let settled = false;
+    const waiting = h.link.wait({ kind: "session", id: caller.id }, target.id, "idle", 5_000).then((r) => {
+      settled = true;
+      return r;
+    });
     const backend = h.backends.get(target.id);
     await waitFor(() => backend?.prompts.length === 1, "the first turn");
     backend?.endTurn();
     await waitFor(() => backend?.prompts.length === 2, "the queued turn");
+    // The first turn's boundary passed with a message still queued: the
+    // wait must not have resolved there, nor now that the queued turn runs.
+    await Bun.sleep(20);
+    expect(settled).toBe(false);
     backend?.endTurn();
-    expect((await waiting).reached).toBe(true);
+    expect(await waiting).toMatchObject({ reached: true, status: "idle" });
     expect(backend?.prompts).toHaveLength(2);
+  });
+
+  test("idle does not resolve between a turn's end and its queued message's turn", async () => {
+    const h = harness();
+    const caller = await h.session();
+    const target = await h.session();
+    const turn = h.manager.prompt(target.id, userPrompt(target.id, "work"));
+    h.link.message({ kind: "human" }, target.id, "queued");
+    const backend = h.backends.get(target.id);
+    await waitFor(() => backend?.prompts.length === 1, "the first turn");
+    backend?.endTurn();
+    await turn;
+    // The turn is over and the session idle, but its queued message has not
+    // started yet (the drain runs on a later tick). A wait now is not idle.
+    expect(h.store.get(target.id)?.status).toBe("idle");
+    expect(h.manager.queuedPeerMessages(target.id)).toHaveLength(1);
+    const result = await h.link.wait({ kind: "session", id: caller.id }, target.id, "idle", 30);
+    expect(result.reached).toBe(false);
+    await waitFor(() => backend?.prompts.length === 2, "the queued turn");
+    backend?.endTurn();
   });
 
   test("waiting_for_permission, closed, and a timeout", async () => {
