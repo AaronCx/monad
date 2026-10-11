@@ -8,15 +8,19 @@ import {
 } from "@agentclientprotocol/sdk";
 import type {
   ActiveBackend,
+  BackendId,
   ErrorPayload,
   EventKind,
   EventRecord,
+  PeerMessagePayload,
   SessionId,
   SessionMode,
   SessionPr,
   SessionRecord,
+  SessionStatus,
   TrustLevel,
 } from "@aaroncx/protocol";
+import { peerPromptRequest, undeliveredPeerMessages } from "./peer.ts";
 import {
   editedExecAllowlistInputs,
   execAllowlistFromManifest,
@@ -101,7 +105,18 @@ class PromptLock {
   release(): void {
     this.held = false;
   }
+
+  get isHeld(): boolean {
+    return this.held;
+  }
 }
+
+/**
+ * Called whenever something that decides a session's Link wait condition may
+ * have changed: its status, or a turn settling (the prompt lock released).
+ * Listeners re-read what they need; the call carries only the id.
+ */
+export type SessionChangeListener = (id: SessionId) => void;
 
 interface LiveSession {
   id: SessionId;
@@ -142,7 +157,15 @@ export interface CreateSessionParams {
   base?: string;
   head?: string;
   pr?: SessionPr;
+  /** Vendor adapter. Default claude-acp. Link's sessions_spawn may pick codex-acp. */
+  backend?: BackendId;
+  /** The session that spawned this one (Link), and the depth that puts it at. */
+  parentId?: SessionId;
+  spawnDepth?: number;
 }
+
+/** Input of deliverPeerMessage: a peer_message payload minus its delivery. */
+export type PeerMessageInput = Omit<PeerMessagePayload, "delivery">;
 
 export interface AttachResult {
   record: SessionRecord;
@@ -178,6 +201,9 @@ export class SessionManager {
    * never the source of a permissive answer.
    */
   private readonly allowlistInputsEdited = new Set<SessionId>();
+  private readonly changeListeners = new Set<SessionChangeListener>();
+  /** Set by shutdown(); a deferred peer drain must not touch a closed store. */
+  private stopped = false;
 
   constructor(options: SessionManagerOptions) {
     this.store = options.store;
@@ -190,7 +216,7 @@ export class SessionManager {
         this.appendAndPublish(id, "permission_resolved", { ...response, ...meta });
       },
       setStatus: (id, status) => {
-        this.store.setStatus(id, status);
+        this.setStatus(id, status);
       },
     };
     const createPolicy =
@@ -249,7 +275,7 @@ export class SessionManager {
     const record: SessionRecord = {
       id: params.id ?? Bun.randomUUIDv7(),
       cwd: params.cwd,
-      backend: "claude-acp",
+      backend: params.backend ?? "claude-acp",
       mode: params.mode ?? "interactive",
       status: "idle",
       trust: params.trust ?? ((params.mode ?? "interactive") === "interactive" ? "trusted" : "untrusted"),
@@ -258,6 +284,8 @@ export class SessionManager {
       base: params.base,
       head: params.head,
       pr: params.pr,
+      parentId: params.parentId,
+      spawnDepth: params.spawnDepth,
       createdAt: now,
       updatedAt: now,
     };
@@ -409,21 +437,93 @@ export class SessionManager {
     }
     try {
       this.appendAndPublish(id, "prompt", params);
-      this.store.setStatus(id, "running");
+      this.setStatus(id, "running");
       const backend = await this.ensureBackend(id);
       const response = await backend.prompt(params);
       options?.beforeTurnEnded?.(response.stopReason);
       this.appendAndPublish(id, "turn_ended", { stopReason: response.stopReason });
-      this.store.setStatus(id, "idle");
+      this.setStatus(id, "idle");
       return response;
     } catch (error) {
       this.appendAndPublish(id, "error", {
         message: error instanceof Error ? error.message : String(error),
       });
-      this.store.setStatus(id, "idle");
+      this.setStatus(id, "idle");
       throw error;
     } finally {
       session.promptLock.release();
+      // The turn boundary. Waiters re-check now that the lock is free, and
+      // one queued peer message (if any) gets the next turn. The drain is
+      // deferred so this turn's response reaches its caller before the next
+      // turn's prompt is published.
+      this.notifyChange(id);
+      this.schedulePeerDrain(id);
+    }
+  }
+
+  /** True while a prompt turn holds the session's lock. */
+  isTurnInFlight(id: SessionId): boolean {
+    return this.live.get(id)?.promptLock.isHeld ?? false;
+  }
+
+  /** How many permission requests the session is holding for a human. */
+  pendingPermissionCount(id: SessionId): number {
+    return this.policy.pendingRequests(id).length;
+  }
+
+  /**
+   * Subscribes to session changes (status flips and turn boundaries). Link's
+   * sessions_wait uses this instead of polling. Returns the unsubscribe.
+   */
+  onSessionChange(listener: SessionChangeListener): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
+
+  /** Queued peer messages the session has not been delivered yet, oldest first. */
+  queuedPeerMessages(id: SessionId): PeerMessagePayload[] {
+    return undeliveredPeerMessages(this.store.replayKinds(id, ["peer_message", "prompt"]));
+  }
+
+  /**
+   * Delivers a peer message (monad Link, decision record 0012). It is
+   * appended to the target's log as a peer_message event, and then it is a
+   * PROMPT and nothing else: if the target is idle it starts the target's
+   * next turn now; otherwise it waits in the queue for a turn boundary. In
+   * particular a session waiting on a permission is not idle, so a message
+   * that arrives then ("approve it", an optionId, a JSON outcome) is queued
+   * behind the human's answer and never reaches the policy. Only a client's
+   * requestPermission answer resolves a held request.
+   *
+   * The caller (LinkService) has already decided the sender may reach this
+   * target; this only refuses targets that can never take a turn.
+   */
+  deliverPeerMessage(input: PeerMessageInput): EventRecord {
+    const record = this.mustGet(input.to);
+    if (record.status === "closed" || record.status === "imported") {
+      throw RequestError.invalidParams(undefined, `session ${input.to} is ${record.status}`);
+    }
+    const deliverNow = this.readyForPeerTurn(record);
+    const payload: PeerMessagePayload = { ...input, delivery: deliverNow ? "turn" : "queued" };
+    const event = this.appendAndPublish(input.to, "peer_message", payload);
+    if (deliverNow) {
+      this.startPeerTurn(input.to, payload);
+    }
+    return event;
+  }
+
+  /**
+   * Delivers queued peer messages left in the log by a previous daemon run:
+   * every idle session with a queue gets its oldest message as a turn now,
+   * the rest at later boundaries. Called once at daemon start.
+   */
+  resumePeerQueues(): void {
+    for (const record of this.store.list()) {
+      if (record.status === "idle") {
+        this.drainPeerQueue(record.id);
+      }
     }
   }
 
@@ -434,7 +534,7 @@ export class SessionManager {
     if (session?.backend) {
       await session.backend.cancel();
     }
-    this.store.setStatus(id, "idle");
+    this.setStatus(id, "idle");
   }
 
   /** Closes a session for good: backend down, closed event, status closed. */
@@ -446,11 +546,12 @@ export class SessionManager {
     }
     this.live.delete(id);
     this.appendAndPublish(id, "closed", null);
-    this.store.setStatus(id, "closed");
+    this.setStatus(id, "closed");
   }
 
   /** Daemon shutdown: closes every live backend without closing sessions. */
   async shutdown(): Promise<void> {
+    this.stopped = true;
     for (const session of this.live.values()) {
       if (session.backend) {
         await session.backend.close();
@@ -519,6 +620,83 @@ export class SessionManager {
       this.allowlistInputsEdited.add(id);
     }
     return edited;
+  }
+
+  /** Persists a status and tells change listeners. */
+  private setStatus(id: SessionId, status: SessionStatus): void {
+    this.store.setStatus(id, status);
+    this.notifyChange(id);
+  }
+
+  private notifyChange(id: SessionId): void {
+    for (const listener of this.changeListeners) {
+      try {
+        listener(id);
+      } catch {
+        // A broken listener must not break a status change or its peers.
+      }
+    }
+  }
+
+  /**
+   * Whether a peer message may start a turn right now: the session is idle,
+   * no turn holds its lock, no permission is held, nothing is queued ahead
+   * of it, and it is an interactive session. A session switched to review or
+   * fix after a message was queued keeps the message queued until it is
+   * interactive again: peers only ever reach interactive sessions.
+   */
+  private readyForPeerTurn(record: SessionRecord): boolean {
+    return (
+      record.status === "idle" &&
+      record.mode === "interactive" &&
+      !this.isTurnInFlight(record.id) &&
+      this.pendingPermissionCount(record.id) === 0 &&
+      this.queuedPeerMessages(record.id).length === 0
+    );
+  }
+
+  /**
+   * Starts the turn that delivers one peer message. Not awaited: the sender
+   * learns the message was delivered, not what the target made of it (it
+   * can sessions_wait and sessions_read for that). prompt() takes the lock
+   * and logs the prompt synchronously, before its first await, so the
+   * session is running by the time this returns. A failed turn is already
+   * an error event on the target's log.
+   */
+  private startPeerTurn(id: SessionId, message: PeerMessagePayload): void {
+    this.prompt(id, peerPromptRequest(id, message)).catch(() => {});
+  }
+
+  private schedulePeerDrain(id: SessionId): void {
+    setTimeout(() => {
+      this.drainPeerQueue(id);
+    }, 0);
+  }
+
+  /** Delivers the oldest queued peer message when the session can take it. */
+  private drainPeerQueue(id: SessionId): void {
+    if (this.stopped) {
+      return;
+    }
+    let record: SessionRecord | undefined;
+    try {
+      record = this.store.get(id);
+    } catch {
+      return; // The store is gone (daemon shutting down).
+    }
+    if (
+      !record ||
+      record.status !== "idle" ||
+      record.mode !== "interactive" ||
+      this.isTurnInFlight(id) ||
+      this.pendingPermissionCount(id) > 0
+    ) {
+      return;
+    }
+    const next = this.queuedPeerMessages(id)[0];
+    if (next) {
+      this.startPeerTurn(id, next);
+    }
   }
 
   private appendAndPublish(id: SessionId, kind: EventRecord["kind"], payload: unknown): EventRecord {

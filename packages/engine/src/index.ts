@@ -2,6 +2,7 @@
 export * from "./auth.ts";
 export * from "./indexer.ts";
 export * from "./paths.ts";
+export * from "./peer.ts";
 export * from "./playbooks/review.ts";
 export * from "./policy.ts";
 export * from "./repos.ts";

@@ -369,7 +369,12 @@ export class SessionStore {
       if (!row) {
         throw new Error(`append failed for session ${sessionId}`);
       }
-      this.touch(sessionId);
+      // updated_at means "last activity", and Link lists sessions by it. An
+      // access event records that someone ELSE looked at this session, which
+      // is not this session doing anything (decision record 0012).
+      if (kind !== "access") {
+        this.touch(sessionId);
+      }
       const appended: EventRecord = { seq: row.seq, sessionId, ts, kind, payload: payload ?? null };
       return { event: appended, cache: this.indexOne(appended, this.loadIndexCache(sessionId)) };
     })();
@@ -687,6 +692,19 @@ export class SessionStore {
       )
       .all({ repoRoot })
       .map((row) => row.session_id);
+  }
+
+  /**
+   * Sessions spawned by this one (Link sessions_spawn), oldest first. The
+   * link lives on the child's record as parent_id.
+   */
+  childrenOf(parentId: SessionId): SessionRecord[] {
+    return this.db
+      .query<SessionRow, { parentId: string }>(
+        "SELECT * FROM sessions WHERE parent_id = $parentId ORDER BY created_at ASC, id ASC",
+      )
+      .all({ parentId })
+      .map(rowToSession);
   }
 
   /** A session's newest event of one kind, if it has any. */
