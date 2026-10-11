@@ -260,6 +260,14 @@ export type SendMessageResponse = z.infer<typeof SendMessageResponseSchema>;
  * runs the model-written summary, which spends vendor tokens and so only
  * ever happens on a request like this one.
  */
+/**
+ * How long the daemon lets a summarizer's turn run before cancelling it:
+ * ten minutes. POST /v1/sessions/<id>/handoff with summarize: true holds
+ * the response open that long, so a client must wait at least this long
+ * (the CLI waits this plus a margin).
+ */
+export const SUMMARY_TIMEOUT_MS = 10 * 60 * 1000;
+
 export const HandoffRequestSchema = z.strictObject({
   summarize: z.boolean().optional(),
 });

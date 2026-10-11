@@ -7,6 +7,7 @@ import {
   type SessionRecord,
   SearchResponseSchema,
   SendMessageResponseSchema,
+  SUMMARY_TIMEOUT_MS,
   TranscriptResponseSchema,
   UpdateSessionResponseSchema,
 } from "@aaroncx/protocol";
@@ -222,11 +223,31 @@ async function getJson(handle: DaemonHandle, path: string): Promise<unknown> {
   return body;
 }
 
-async function sendJson(handle: DaemonHandle, method: "POST" | "PATCH", path: string, payload: unknown) {
+/**
+ * How long `monad handoff --summarize` waits for the daemon: the
+ * summarizer's own timeout plus a margin, so the daemon's answer (a summary
+ * or its timeout error) always arrives before the CLI gives up.
+ */
+export const SUMMARIZE_REQUEST_TIMEOUT_MS = SUMMARY_TIMEOUT_MS + 2 * 60 * 1000;
+
+async function sendJson(
+  handle: DaemonHandle,
+  method: "POST" | "PATCH",
+  path: string,
+  payload: unknown,
+  options: { timeoutMs?: number } = {},
+) {
   const response = await fetch(`${handle.url}${path}`, {
     method,
     headers: { ...authHeaders(handle.token), "content-type": "application/json" },
     body: JSON.stringify(payload),
+    // Bun's fetch gives up on a response idle for five minutes, and a
+    // request the daemon legitimately holds open longer (a summary) would
+    // fail at the CLI after succeeding at the daemon. Such a request turns
+    // that timer off and sets its own whole-request deadline instead.
+    ...(options.timeoutMs === undefined
+      ? {}
+      : { timeout: false, signal: AbortSignal.timeout(options.timeoutMs) }),
   });
   const body = (await response.json().catch(() => ({}))) as { error?: string };
   if (!response.ok) {
@@ -344,7 +365,13 @@ export async function cmdHandoff(handle: DaemonHandle, id: string, flags: Handof
     console.error("monad: writing the handoff, then running the summarizer (this can take a few minutes)");
   }
   const result = HandoffResponseSchema.parse(
-    await sendJson(handle, "POST", `/v1/sessions/${id}/handoff`, flags.summarize ? { summarize: true } : {}),
+    await sendJson(
+      handle,
+      "POST",
+      `/v1/sessions/${id}/handoff`,
+      flags.summarize ? { summarize: true } : {},
+      flags.summarize ? { timeoutMs: SUMMARIZE_REQUEST_TIMEOUT_MS } : {},
+    ),
   );
   console.log(`handoff ${result.sessionId} seq ${result.handoff.seq} (${result.handoff.reason})`);
   console.log(result.handoff.text);

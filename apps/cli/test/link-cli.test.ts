@@ -6,7 +6,9 @@ import type { Subprocess } from "bun";
 import { client, type ClientConnection, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import { createHttpStream } from "@aaroncx/engine/transport";
 import { formatAccess, formatPeerMessage } from "../src/render.ts";
+import { SUMMARY_TIMEOUT_MS } from "@aaroncx/protocol";
 import {
+  cmdHandoff,
   formatSessionRow,
   parseHandoffFlags,
   parseLsFlags,
@@ -16,6 +18,7 @@ import {
   parseShowFlags,
   parseSince,
   parseTitleArgs,
+  SUMMARIZE_REQUEST_TIMEOUT_MS,
 } from "../src/link.ts";
 
 /**
@@ -72,6 +75,45 @@ describe("handoff and notes flag parsing", () => {
     expect(() => parseNotesFlags([])).toThrow("needs a repository path");
     expect(() => parseNotesFlags(["/r", "--append"])).toThrow("--append needs the note text");
     expect(() => parseNotesFlags(["/r", "--delete"])).toThrow("unknown flag --delete");
+  });
+});
+
+describe("handoff --summarize waits as long as the daemon may", () => {
+  test("the summarize request turns off Bun's five-minute idle timeout and outlasts the summarizer", async () => {
+    const sessionId = "01a12d53-0000-7000-8000-000000000000";
+    const seen: Array<{ body: unknown; init: RequestInit & { timeout?: number | boolean } }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      seen.push({ body: JSON.parse(String(init?.body)), init: init ?? {} });
+      return Response.json({
+        sessionId,
+        handoff: { seq: 9, ts: "2026-10-11T12:00:00.000Z", reason: "manual", text: "handoff: line" },
+      });
+    }) as typeof fetch;
+    const log = console.log;
+    const error = console.error;
+    console.log = () => {};
+    console.error = () => {};
+    try {
+      const handle = { url: "http://127.0.0.1:1", token: "t", info: { port: 1, pid: 1, startedAt: "" } };
+      await cmdHandoff(handle, sessionId, { id: sessionId, summarize: true });
+      await cmdHandoff(handle, sessionId, { id: sessionId, summarize: false });
+    } finally {
+      globalThis.fetch = realFetch;
+      console.log = log;
+      console.error = error;
+    }
+    const [summarize, plain] = seen;
+    expect(summarize?.body).toEqual({ summarize: true });
+    // The daemon holds this response open for up to SUMMARY_TIMEOUT_MS.
+    expect(summarize?.init.timeout).toBe(false);
+    expect(summarize?.init.signal).toBeInstanceOf(AbortSignal);
+    expect(summarize?.init.signal?.aborted).toBe(false);
+    expect(SUMMARIZE_REQUEST_TIMEOUT_MS).toBeGreaterThan(SUMMARY_TIMEOUT_MS);
+    // A plain handoff answers at once and keeps the defaults.
+    expect(plain?.body).toEqual({});
+    expect(plain?.init.timeout).toBeUndefined();
+    expect(plain?.init.signal).toBeUndefined();
   });
 });
 

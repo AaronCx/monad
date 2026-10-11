@@ -31,6 +31,7 @@ import {
   type SessionMode,
   type SessionRecord,
   type SessionStatus,
+  SUMMARY_TIMEOUT_MS,
   type SummaryPayload,
 } from "@aaroncx/protocol";
 import type { LinkConfig } from "./config.ts";
@@ -227,8 +228,8 @@ const TOOL_OPS: Record<LinkToolName, AccessOp> = {
   notes_append: "notes_append",
 };
 
-/** A summarizer turn gets this long before it is cancelled: ten minutes. */
-export const DEFAULT_SUMMARY_TIMEOUT_MS = 10 * 60 * 1000;
+/** A summarizer turn gets this long before it is cancelled: ten minutes (the CLI waits longer). */
+export const DEFAULT_SUMMARY_TIMEOUT_MS = SUMMARY_TIMEOUT_MS;
 
 /**
  * The most transcript a summarizer is shown, in bytes: the TAIL of the
