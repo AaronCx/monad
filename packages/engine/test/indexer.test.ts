@@ -412,4 +412,12 @@ describe("toFtsQuery", () => {
     const many = Array.from({ length: 50 }, (_, i) => `t${i}`).join(" ");
     expect(toFtsQuery(many)?.split(" ")).toHaveLength(32);
   });
+
+  test("lone surrogates become separators; paired ones (emoji) are kept", () => {
+    expect(toFtsQuery("x\ud800")).toBe('"x"*');
+    expect(toFtsQuery("x\ud800\"y")).toBe('"x" "\"\"y"*');
+    expect(toFtsQuery("abc\udc00 OR y\ud800 secret")).toBe('"abc" "OR" "y" "secret"*');
+    expect(toFtsQuery("hi \u{1F600}x")).toBe('"hi" "\u{1F600}x"*');
+    expect(toFtsQuery(JSON.parse('"\\ud800"'))).toBeUndefined();
+  });
 });

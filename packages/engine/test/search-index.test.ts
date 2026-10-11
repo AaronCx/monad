@@ -366,6 +366,33 @@ describe("full-text index fed on append", () => {
     expect(store.search("caf")).toHaveLength(1);
   });
 
+  test("fuzzed queries, lone surrogates included, never throw", () => {
+    const dir = tempDir("monad-fts-");
+    const store = openStore(join(dir, "monad.db"));
+    const record = store.create(makeRecord());
+    store.append(record.id, "prompt", prompt(record.id, 'say "hello" OR NEAR the café (日本) - done x'));
+    // A lone surrogate swallowed the closing quote: this was a SQLiteError.
+    expect(store.search("x\ud800")).toHaveLength(1);
+    expect(store.search("abc\udc00")).toEqual([]);
+    const pieces = ['"', "*", "-", "(", ")", ":", "^", "+", "NEAR", "OR", "AND", "NOT", " ", "x", "é", "日",
+      "\ud800", "\udbff", "\udc00", "\udfff", "\u{1F600}", "\0", "\n", "{", "}", ",", "'"];
+    // A fixed linear congruential sequence: deterministic, so a failure
+    // reproduces.
+    let state = 12345;
+    const next = () => {
+      state = (state * 1103515245 + 12345) % 2147483648;
+      return state;
+    };
+    for (let i = 0; i < 3000; i += 1) {
+      let query = "";
+      const length = 1 + (next() % 8);
+      for (let j = 0; j < length; j += 1) {
+        query += pieces[next() % pieces.length];
+      }
+      expect(() => store.search(query)).not.toThrow();
+    }
+  });
+
   test("filters: repo, since, kinds, session ids, limit", () => {
     const parent = tempDir("monad-filters-");
     const repo = makeRepo(parent, "alpha");

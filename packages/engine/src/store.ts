@@ -99,6 +99,17 @@ interface IndexCache {
   settling?: SettlingAgentRow;
 }
 
+/** One search_fts hit as SQLite returns it. */
+interface SearchRow {
+  session_id: string;
+  kind: SearchKind;
+  first_seq: number;
+  last_seq: number;
+  ts: string;
+  snippet: string;
+  rank: number;
+}
+
 interface EventRow {
   seq: number;
   session_id: string;
@@ -616,17 +627,33 @@ export class SessionStore {
       });
       where.push(`kind IN (${names.join(", ")})`);
     }
-    const rows = this.db
+    let rows: SearchRow[];
+    try {
+      rows = this.runSearch(where, params);
+    } catch (error) {
+      // toFtsQuery's output should never be a bad MATCH expression; if one
+      // ever is, a query the user typed is not a server error. Anything
+      // else (a locked or corrupt database) still throws.
+      if (error instanceof Error && /fts5: syntax error|unterminated string|malformed MATCH/i.test(error.message)) {
+        return [];
+      }
+      throw error;
+    }
+    return rows.map((row) => ({
+      sessionId: row.session_id,
+      kind: row.kind,
+      firstSeq: row.first_seq,
+      lastSeq: row.last_seq,
+      ts: row.ts,
+      snippet: row.snippet,
+      rank: row.rank,
+    }));
+  }
+
+  private runSearch(where: string[], params: Record<string, string | number>): SearchRow[] {
+    return this.db
       .query<
-        {
-          session_id: string;
-          kind: SearchKind;
-          first_seq: number;
-          last_seq: number;
-          ts: string;
-          snippet: string;
-          rank: number;
-        },
+        SearchRow,
         Record<string, string | number>
       >(
         `SELECT session_id, kind, first_seq, last_seq, ts,
@@ -638,15 +665,6 @@ export class SessionStore {
          LIMIT $limit`,
       )
       .all(params);
-    return rows.map((row) => ({
-      sessionId: row.session_id,
-      kind: row.kind,
-      firstSeq: row.first_seq,
-      lastSeq: row.last_seq,
-      ts: row.ts,
-      snippet: row.snippet,
-      rank: row.rank,
-    }));
   }
 
   /** The repositories a session touched, in the order it first touched them. */

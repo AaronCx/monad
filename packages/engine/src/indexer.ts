@@ -398,6 +398,9 @@ export function planIndex(event: EventRecord, context: IndexContext): IndexPlan 
   }
 }
 
+/** A high surrogate with no low one after it, or a low one with no high one before it. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
 /** Most terms a search query keeps; the rest are dropped. */
 const MAX_QUERY_TERMS = 32;
 
@@ -427,8 +430,11 @@ function hasToken(text: string): boolean {
  */
 export function toFtsQuery(input: string): string | undefined {
   // NUL never belongs in a query; the rest of the control range is harmless
-  // inside a quoted string.
-  const text = input.replace(/\0/g, " ");
+  // inside a quoted string. A lone UTF-16 surrogate (JSON `"\ud800"` decodes
+  // to one) is not: bun:sqlite encodes it together with the code unit after
+  // it, so a lone high surrogate before the closing `"` swallows the quote
+  // and the query escapes its quoting. Both become separators.
+  const text = input.replace(LONE_SURROGATE, " ").replace(/\0/g, " ");
   const parts: Array<{ value: string; phrase: boolean }> = [];
   let i = 0;
   while (i < text.length && parts.length < MAX_QUERY_TERMS) {
