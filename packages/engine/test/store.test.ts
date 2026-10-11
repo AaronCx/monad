@@ -176,3 +176,25 @@ describe("SessionStore sessions", () => {
     expect(() => store.setStatus(Bun.randomUUIDv7(), "idle")).toThrow(/unknown session/);
   });
 });
+
+describe("SessionStore Link bookkeeping", () => {
+  test("an access event is logged but does not move updatedAt", async () => {
+    const store = openStore();
+    const record = store.create(makeRecord({ updatedAt: "2026-01-01T00:00:00.000Z" }));
+    store.append(record.id, "access", { op: "read", by: "human", role: "target" });
+    expect(store.get(record.id)?.updatedAt).toBe("2026-01-01T00:00:00.000Z");
+    expect(store.replay(record.id).map((e) => e.kind)).toEqual(["access"]);
+    store.append(record.id, "peer_message", { text: "hi" });
+    expect(store.get(record.id)?.updatedAt).not.toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  test("childrenOf returns the sessions a parent spawned, oldest first", () => {
+    const store = openStore();
+    const parent = store.create(makeRecord({ spawnDepth: 0 }));
+    const a = store.create(makeRecord({ parentId: parent.id, spawnDepth: 1, createdAt: "2026-01-01T00:00:01.000Z" }));
+    const b = store.create(makeRecord({ parentId: parent.id, spawnDepth: 1, createdAt: "2026-01-01T00:00:02.000Z" }));
+    store.create(makeRecord());
+    expect(store.childrenOf(parent.id).map((s) => s.id)).toEqual([a.id, b.id]);
+    expect(store.childrenOf(a.id)).toEqual([]);
+  });
+});

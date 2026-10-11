@@ -11,7 +11,13 @@ import {
 } from "@agentclientprotocol/sdk";
 import { createHttpStream } from "@aaroncx/engine/transport";
 import { PROMPT_IN_FLIGHT_ERROR_CODE } from "@aaroncx/engine";
-import { ERROR_NOTIFICATION_METHOD, MonadErrorNotificationSchema } from "@aaroncx/protocol";
+import {
+  ACCESS_NOTIFICATION_METHOD,
+  ERROR_NOTIFICATION_METHOD,
+  MonadErrorNotificationSchema,
+  MonadLinkNotificationSchema,
+  PEER_MESSAGE_NOTIFICATION_METHOD,
+} from "@aaroncx/protocol";
 import type { DaemonHandle } from "./daemon.ts";
 import type { Renderer } from "./render.ts";
 
@@ -45,6 +51,14 @@ export async function connectAcp(
     })
     .onNotification(ERROR_NOTIFICATION_METHOD, MonadErrorNotificationSchema, (ctx) => {
       renderer.onError(ctx.params);
+    })
+    // monad Link: messages this session receives and sessions that read it
+    // (decision record 0012), shown live like any other event.
+    .onNotification(PEER_MESSAGE_NOTIFICATION_METHOD, MonadLinkNotificationSchema, (ctx) => {
+      renderer.onPeerMessage(ctx.params);
+    })
+    .onNotification(ACCESS_NOTIFICATION_METHOD, MonadLinkNotificationSchema, (ctx) => {
+      renderer.onAccess(ctx.params);
     })
     .onRequest(methods.client.session.requestPermission, (ctx) => permissions.ask(ctx.params))
     .connect(stream);

@@ -144,6 +144,23 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<{ path
 }
 
 /**
+ * Creates the detached worktree a Link spawn with `worktree: true` runs in:
+ * the repository containing `cwd`, at its current HEAD, under the same
+ * $MONAD_HOME/worktrees/<repoKey>/<sessionId> layout as review worktrees, so
+ * `monad gc` cleans it up the same way once the session is closed. Fails
+ * when `cwd` is not inside a git checkout with at least one commit.
+ */
+export async function createSpawnWorktree(input: {
+  cwd: string;
+  sessionId: string;
+  env?: Record<string, string | undefined>;
+}): Promise<{ path: string }> {
+  const repoRoot = (await git(["rev-parse", "--show-toplevel"], input.cwd)).trim();
+  const sha = (await git(["rev-parse", "--verify", "HEAD^{commit}"], input.cwd)).trim();
+  return await createWorktree({ repoRoot, sha, sessionId: input.sessionId, env: input.env });
+}
+
+/**
  * Removes a worktree through git so the main repo's bookkeeping stays clean;
  * falls back to deleting the directory plus `git worktree prune` when git
  * refuses (already-broken registration, dirty tree in a force removal).

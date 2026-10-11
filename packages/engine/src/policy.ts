@@ -5,7 +5,16 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
-import type { PermissionResolutionMeta, SessionId, SessionMode } from "@aaroncx/protocol";
+import {
+  LINK_READ_ONLY_TOOL_NAMES,
+  LINK_TOOL_NAMES,
+  type LinkToolName,
+  type PermissionResolutionMeta,
+  SESSIONS_MCP_SERVER_NAME,
+  type SessionId,
+  type SessionMode,
+  type TrustLevel,
+} from "@aaroncx/protocol";
 
 /** A client able to answer a permission request (an attached CLI, editor, ...). */
 export interface PermissionClient {
@@ -467,6 +476,48 @@ export function isMonadChecksTool(params: RequestPermissionRequest): boolean {
     return false;
   }
   return MONAD_CHECKS_TOOL_NAMES.has(name.slice(MONAD_CHECKS_TOOL_PREFIX.length));
+}
+
+const MONAD_SESSIONS_TOOL_PREFIX = `mcp__${SESSIONS_MCP_SERVER_NAME}__`;
+const MONAD_SESSIONS_TOOLS = new Set<string>(LINK_TOOL_NAMES);
+const MONAD_SESSIONS_READ_ONLY_TOOLS = new Set<string>(LINK_READ_ONLY_TOOL_NAMES);
+
+/**
+ * The Link tool a permission request is for, or undefined when monad cannot
+ * prove it is one (monad Link, decision record 0012). The same three
+ * conditions as isMonadChecksTool, all from the vendor: an MCP call kind, a
+ * vendor-set name with the `mcp__monad-sessions__` prefix, and a suffix the
+ * monad-sessions server actually serves.
+ *
+ * A fourth, from monad's own record: the session is trusted. Only a trusted
+ * session is ever handed a monad-sessions mount, so in an untrusted session
+ * a call by that name is NOT monad's (it can only be a same-named server
+ * from the user's own vendor configuration, record 0006 fact 8) and falls
+ * through to the mode's policy like any unknown tool. An absent trust level
+ * is untrusted.
+ */
+export function monadSessionsTool(
+  params: RequestPermissionRequest,
+  trust: TrustLevel | undefined,
+): LinkToolName | undefined {
+  if (trust !== "trusted") {
+    return undefined;
+  }
+  const kind = params.toolCall?.kind;
+  if (typeof kind !== "string" || !MCP_TOOL_CALL_KINDS.has(kind)) {
+    return undefined;
+  }
+  const name = permissionToolNameTrusted(params);
+  if (name === undefined || !name.startsWith(MONAD_SESSIONS_TOOL_PREFIX)) {
+    return undefined;
+  }
+  const suffix = name.slice(MONAD_SESSIONS_TOOL_PREFIX.length);
+  return MONAD_SESSIONS_TOOLS.has(suffix) ? (suffix as LinkToolName) : undefined;
+}
+
+/** True for the Link tools a review or fix session may call: reading history only. */
+export function isReadOnlyLinkTool(tool: LinkToolName): boolean {
+  return MONAD_SESSIONS_READ_ONLY_TOOLS.has(tool);
 }
 
 /**
@@ -983,6 +1034,11 @@ export interface PolicySessionContext {
   /** The session cwd; for review/fix sessions this is the worktree. */
   cwd: string;
   /**
+   * The session's trust level (decision record 0009). Link tools are only
+   * monad's own in a trusted session; absent is read as untrusted.
+   */
+  trust?: TrustLevel;
+  /**
    * The fix policy's execute allowlist as frozen on the session record at
    * fix-mode entry (decision record 0009). Absent means no list was frozen,
    * which is read as an empty one: default deny, every execute forwards.
@@ -1047,6 +1103,25 @@ export class ModeAwarePermissionPolicy implements PermissionPolicy {
       // plain "run the checks" needs a human keypress, and a scripted or
       // detached session cancels the call outright.
       return this.respond(sessionId, params, byForMode(mode), "allow_once");
+    }
+    const linkTool = monadSessionsTool(params, context?.trust);
+    if (linkTool !== undefined) {
+      // Link tools (decision record 0012). Interactive sessions get all of
+      // them without a keypress, like the checks plane. Review and fix get
+      // the read-only subset; the server does not even offer them the rest,
+      // so this is the second of two layers, and a refusal says why.
+      if (mode === "interactive" || isReadOnlyLinkTool(linkTool)) {
+        return this.respond(sessionId, params, byForMode(mode), "allow_once");
+      }
+      const by = mode === "review" ? ("policy:review" as const) : ("policy:fix" as const);
+      return this.respond(
+        sessionId,
+        params,
+        by,
+        "reject_once",
+        undefined,
+        `${linkTool} is not available in ${mode} mode; ${mode} sessions may only list, search and read other sessions (blocked by ${by})`,
+      );
     }
     if (context && mode !== "interactive") {
       const verdict =

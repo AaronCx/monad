@@ -29,6 +29,21 @@ export const VENDOR_MODE_FOR: Record<SessionMode, string> = {
 };
 
 /**
+ * The same layering for codex-acp, whose session modes are named after its
+ * sandbox levels rather than Claude Code's permission modes. Unlike the
+ * claude ids above these are NOT measured against a live adapter on this
+ * machine (codex-acp is not installed here), so the codex backend treats a
+ * refused set_mode as a logged degradation rather than a failed start:
+ * monad's own review policy is the real gate either way (decision 0007
+ * fact 2).
+ */
+export const CODEX_VENDOR_MODE_FOR: Record<SessionMode, string> = {
+  interactive: "auto",
+  review: "read-only",
+  fix: "auto",
+};
+
+/**
  * Wraps a Bun.spawn stdin FileSink into the WritableStream ndJsonStream
  * expects. Bun's spawn gives a FileSink, not a web WritableStream, so every
  * write is flushed immediately and close maps to end (decision record 0005).
@@ -68,6 +83,8 @@ export interface AcpClientBackendOptions {
   env?: Record<string, string | undefined>;
   /** Where child stderr goes. The vendor keeps stdout pure ACP. */
   stderr?: "inherit" | "ignore";
+  /** monad mode to vendor modeId. Default VENDOR_MODE_FOR (claude-agent-acp). */
+  vendorModes?: Record<SessionMode, string>;
 }
 
 const HOW_LONG_TO_WAIT_FOR_EXIT_MS = 3000;
@@ -201,7 +218,7 @@ export class AcpClientBackend implements SessionBackend {
   async setSessionMode(mode: SessionMode): Promise<void> {
     await this.connection.agent.request(methods.agent.session.setMode, {
       sessionId: this.requireVendorSessionId(),
-      modeId: VENDOR_MODE_FOR[mode],
+      modeId: (this.options.vendorModes ?? VENDOR_MODE_FOR)[mode],
     });
   }
 

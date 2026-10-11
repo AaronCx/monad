@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AccessPayloadSchema,
+  BackendIdSchema,
   DaemonInfoSchema,
   DaemonStatusSchema,
   ERROR_NOTIFICATION_METHOD,
@@ -7,9 +9,14 @@ import {
   EventRecordSchema,
   ListSessionsResponseSchema,
   MonadErrorNotificationSchema,
+  PeerMessagePayloadSchema,
   REPLAY_COUNT_META_KEY,
+  SendMessageRequestSchema,
+  SessionStatusSchema,
+  SearchHitSchema,
   SessionIdSchema,
   SessionRecordSchema,
+  UpdateSessionRequestSchema,
 } from "../src/index.ts";
 
 const now = new Date().toISOString();
@@ -31,9 +38,16 @@ describe("SessionIdSchema", () => {
     expect(SessionIdSchema.safeParse(Bun.randomUUIDv7()).success).toBe(true);
   });
 
-  test("rejects a uuid v4 and junk", () => {
-    expect(SessionIdSchema.safeParse(crypto.randomUUID()).success).toBe(false);
+  test("accepts a uuid v4: imported vendor sessions keep their own ids", () => {
+    expect(SessionIdSchema.safeParse(crypto.randomUUID()).success).toBe(true);
+  });
+
+  test("rejects junk and a uuid-shaped string with no RFC variant", () => {
     expect(SessionIdSchema.safeParse("not-a-uuid").success).toBe(false);
+    expect(SessionIdSchema.safeParse("").success).toBe(false);
+    expect(
+      SessionIdSchema.safeParse("019a0000-0000-7000-0000-000000000000").success,
+    ).toBe(false);
   });
 });
 
@@ -46,10 +60,42 @@ describe("SessionRecordSchema", () => {
     ).toBe(true);
   });
 
+  test("title, parent and spawn depth are optional and round trip", () => {
+    const parent = Bun.randomUUIDv7();
+    const record = {
+      ...makeSessionRecord(),
+      title: "fix the scroll clamp",
+      titleSource: "prompt",
+      parentId: parent,
+      spawnDepth: 1,
+    };
+    const parsed = SessionRecordSchema.parse(record);
+    expect(parsed.title).toBe("fix the scroll clamp");
+    expect(parsed.titleSource).toBe("prompt");
+    expect(parsed.parentId).toBe(parent);
+    expect(parsed.spawnDepth).toBe(1);
+  });
+
+  test("an unknown titleSource reads back as absent, not a failed record", () => {
+    const parsed = SessionRecordSchema.parse({
+      ...makeSessionRecord(),
+      title: "t",
+      titleSource: "guessed",
+    });
+    expect(parsed.title).toBe("t");
+    expect(parsed.titleSource).toBeUndefined();
+  });
+
+  test("a negative spawn depth is rejected", () => {
+    expect(
+      SessionRecordSchema.safeParse({ ...makeSessionRecord(), spawnDepth: -1 }).success,
+    ).toBe(false);
+  });
+
   test("rejects unknown status and backend", () => {
     const record = makeSessionRecord();
     expect(SessionRecordSchema.safeParse({ ...record, status: "paused" }).success).toBe(false);
-    expect(SessionRecordSchema.safeParse({ ...record, backend: "codex-acp" }).success).toBe(
+    expect(SessionRecordSchema.safeParse({ ...record, backend: "gemini" }).success).toBe(
       false,
     );
   });
@@ -69,6 +115,8 @@ describe("EventRecordSchema", () => {
       "turn_ended",
       "error",
       "closed",
+      "peer_message",
+      "access",
     ]);
   });
 
@@ -125,5 +173,86 @@ describe("daemon discovery and extension notification schemas", () => {
       agentSessionId: "vendor-123",
     });
     expect(parsed.agentSessionId).toBe("vendor-123");
+  });
+});
+
+describe("UpdateSessionRequestSchema", () => {
+  test("trims a title and accepts null to re-derive", () => {
+    expect(UpdateSessionRequestSchema.parse({ title: "  my session  " }).title).toBe(
+      "my session",
+    );
+    expect(UpdateSessionRequestSchema.parse({ title: null }).title).toBeNull();
+  });
+
+  test("rejects an empty or oversized title and unknown fields", () => {
+    expect(UpdateSessionRequestSchema.safeParse({ title: "   " }).success).toBe(false);
+    expect(UpdateSessionRequestSchema.safeParse({ title: "x".repeat(201) }).success).toBe(false);
+    expect(UpdateSessionRequestSchema.safeParse({ title: "a", mode: "fix" }).success).toBe(false);
+    expect(UpdateSessionRequestSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe("SearchHitSchema", () => {
+  test("accepts a hit with a seq range", () => {
+    expect(
+      SearchHitSchema.safeParse({
+        sessionId: Bun.randomUUIDv7(),
+        kind: "agent",
+        firstSeq: 3,
+        lastSeq: 9,
+        ts: now,
+        snippet: "the «scroll» clamp",
+        rank: -1.5,
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe("Link schemas", () => {
+  test("backends: two vendor adapters and two import sources", () => {
+    expect(BackendIdSchema.options).toEqual([
+      "claude-acp",
+      "codex-acp",
+      "import:claude-code",
+      "import:codex",
+    ]);
+    expect(SessionStatusSchema.safeParse("imported").success).toBe(true);
+  });
+
+  test("a peer message names its sender, hop and delivery", () => {
+    const payload = {
+      messageId: "m1",
+      from: Bun.randomUUIDv7(),
+      fromTitle: "fix the clamp",
+      to: Bun.randomUUIDv7(),
+      text: "what did you change?",
+      hop: 1,
+      delivery: "queued" as const,
+    };
+    expect(PeerMessagePayloadSchema.parse(payload)).toEqual(payload);
+    expect(PeerMessagePayloadSchema.safeParse({ ...payload, from: "human" }).success).toBe(true);
+    expect(PeerMessagePayloadSchema.safeParse({ ...payload, from: "someone" }).success).toBe(false);
+    expect(PeerMessagePayloadSchema.safeParse({ ...payload, hop: -1 }).success).toBe(false);
+  });
+
+  test("an access event keeps extra fields and records refusals", () => {
+    const parsed = AccessPayloadSchema.parse({
+      op: "search",
+      by: "human",
+      role: "target",
+      query: "scroll",
+      hits: 3,
+      refused: undefined,
+    });
+    expect(parsed).toMatchObject({ op: "search", hits: 3 });
+    expect(AccessPayloadSchema.safeParse({ op: "steal", by: "human", role: "caller" }).success).toBe(
+      false,
+    );
+  });
+
+  test("a CLI message is trimmed, non-empty and bounded", () => {
+    expect(SendMessageRequestSchema.parse({ text: "  hi  " }).text).toBe("hi");
+    expect(SendMessageRequestSchema.safeParse({ text: "   " }).success).toBe(false);
+    expect(SendMessageRequestSchema.safeParse({ text: "x".repeat(32_001) }).success).toBe(false);
   });
 });

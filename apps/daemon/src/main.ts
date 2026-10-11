@@ -1,20 +1,25 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  createSpawnWorktree,
   daemonInfoPath,
   daemonPidPath,
   deriveMountToken,
+  deriveSessionsMountToken,
   ensureAuthToken,
   monadStateDir,
+  RepoResolver,
   SessionManager,
   SessionStore,
 } from "@aaroncx/engine";
 import { createAcpHttpServer } from "@aaroncx/engine/transport";
-import { createClaudeBackend } from "@aaroncx/backends";
+import { backendUnavailable, createClaudeBackend } from "@aaroncx/backends";
+import { LinkService, loadLinkConfig } from "@aaroncx/link";
 import type { DaemonInfo } from "@aaroncx/protocol";
 import { createDaemonAgentFactory } from "./acp-agent.ts";
 import { createControlHandler } from "./control.ts";
 import { createMcpRoute, isMcpMountPath } from "./mcp.ts";
+import { createSessionsMcpRoute, isSessionsMountPath } from "./mcp-sessions.ts";
 
 const VERSION = "0.1.0";
 
@@ -94,7 +99,18 @@ const logDir = join(stateDir, "logs");
 mkdirSync(logDir, { recursive: true, mode: 0o700 });
 
 const token = ensureAuthToken(join(stateDir, "token"));
-const store = new SessionStore({ dbPath: flags.db ?? join(stateDir, "monad.db") });
+const repos = new RepoResolver();
+const store = new SessionStore({ dbPath: flags.db ?? join(stateDir, "monad.db"), repoResolver: repos });
+// monad Link scope and limits (decision record 0012). Read once at start; a
+// malformed file is the defaults plus this warning, never a crash.
+const linkConfig = loadLinkConfig();
+if (linkConfig.warning) {
+  console.warn(`monadd: ${linkConfig.warning} (${linkConfig.path})`);
+}
+// The manager and Link reference each other (the backend hook asks Link
+// whether a session gets the sessions mount); Link is built right after the
+// manager, and backends never start before then.
+const linkRef: { service?: LinkService } = {};
 // The bound port is only known after listen(); backends start later (first
 // session/new at the earliest), so the checksMcp thunk is safe by then.
 const bound: { port?: number } = {};
@@ -111,8 +127,24 @@ const manager = new SessionManager({
       bound.port === undefined
         ? undefined
         : { port: bound.port, mountToken: deriveMountToken(token, sessionId) },
+    // The monad-sessions mount goes to a session only when Link says so:
+    // trusted, Link enabled, in link.json's scope (decision record 0012).
+    // Its own derived token, never the daemon token or the checks token.
+    sessionsMcp: (record) =>
+      bound.port === undefined || !linkRef.service?.mountAllowed(record)
+        ? undefined
+        : { port: bound.port, mountToken: deriveSessionsMountToken(token, record.id) },
   }),
 });
+const link = new LinkService({
+  manager,
+  store,
+  config: linkConfig.config,
+  repos,
+  backendUnavailable: (backend) => backendUnavailable(backend),
+  createWorktree: async (cwd, sessionId) => (await createSpawnWorktree({ cwd, sessionId })).path,
+});
+linkRef.service = link;
 
 const startedAt = new Date();
 // A client that dies without an HTTP DELETE (SIGKILL, network drop) is
@@ -121,18 +153,20 @@ const startedAt = new Date();
 // waiting path exactly like a graceful disconnect. MONAD_SSE_GRACE_MS
 // shortens the reconnect grace window in tests.
 const sseGraceEnv = Number(process.env.MONAD_SSE_GRACE_MS ?? "");
-// Non-ACP paths: /mcp/<sessionId> first (per-session checks MCP mounts,
-// which authenticate themselves against that session's mount token and
-// refuse the daemon token), then the authenticated /v1/* control API.
+// Non-ACP paths: /mcp/<sessionId> and /mcp-sessions/<sessionId> first
+// (per-session MCP mounts, each authenticating itself against its own
+// derived token and refusing the daemon token), then the authenticated
+// /v1/* control API.
 const mcpRoute = createMcpRoute({ manager, daemonToken: token });
-const controlHandler = createControlHandler({ manager, version: VERSION, startedAt });
+const sessionsRoute = createSessionsMcpRoute({ manager, link, daemonToken: token });
+const controlHandler = createControlHandler({ manager, link, version: VERSION, startedAt });
 const server = createAcpHttpServer(createDaemonAgentFactory({ manager, version: VERSION }), {
   authToken: token,
   // The mount route does its own bearer check; the blanket daemon-token
   // check must not run in front of it (decision record 0009).
-  selfAuthenticated: isMcpMountPath,
+  selfAuthenticated: (pathname) => isMcpMountPath(pathname) || isSessionsMountPath(pathname),
   fallback: (req, res) => {
-    if (mcpRoute(req, res)) {
+    if (mcpRoute(req, res) || sessionsRoute(req, res)) {
       return;
     }
     controlHandler(req, res);
@@ -147,6 +181,19 @@ const server = createAcpHttpServer(createDaemonAgentFactory({ manager, version: 
 // deliberate decision, not a flag.
 const { port } = await server.listen(flags.port, "127.0.0.1");
 bound.port = port;
+// A previous daemon that died mid-turn (SIGKILL, crash, power loss) left
+// running or waiting_for_permission on the record; nothing is in flight in
+// this process, so those are stale. Put them back to idle (with an error
+// event each) first, or their peer queues, sessions_wait and spawned-session
+// slots stay stuck. This runs after listen so a drain it enables starts its
+// backend with the mounts' port known.
+const recovered = manager.recoverInterruptedTurns();
+if (recovered.length > 0) {
+  console.log(`monadd: ${recovered.length} session(s) were mid-turn when the last daemon stopped; set to idle`);
+}
+// Peer messages queued before a restart are still in the log; idle targets
+// get their oldest one now, the rest at later turn boundaries.
+manager.resumePeerQueues();
 
 const infoPath = daemonInfoPath();
 const pidPath = daemonPidPath();
@@ -165,6 +212,10 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`monadd: ${signal} received, shutting down`);
   try {
+    // No queued peer message may start a turn from here on: the cancels
+    // below end turns, and a turn started at one of those boundaries would
+    // log its prompt (marking the message delivered) and then be killed.
+    manager.beginShutdown();
     // Cancel in-flight turns (this also resolves held permission requests
     // with a cancelled outcome) before closing backends.
     for (const record of manager.list()) {

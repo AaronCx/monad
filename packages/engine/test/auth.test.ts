@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   checkBearer,
   deriveMountToken,
+  deriveSessionsMountToken,
   ensureAuthToken,
   timingSafeStringEqual,
 } from "../src/auth.ts";
@@ -106,5 +107,35 @@ describe("deriveMountToken", () => {
     expect(checkBearer(`Bearer ${derived}`, derived)).toBe(true);
     expect(checkBearer(`Bearer ${daemonToken}`, derived)).toBe(false);
     expect(checkBearer(`Bearer ${deriveMountToken(daemonToken, sessionB)}`, derived)).toBe(false);
+  });
+});
+
+describe("deriveSessionsMountToken", () => {
+  const daemonToken = "a".repeat(64);
+  const sessionA = "01a0349e-5ca2-7000-8c96-83988af10447";
+  const sessionB = "01a0348d-42e3-7000-8337-4c5d2aa7dd9d";
+
+  test("is HMAC-SHA256 of the daemon token over its own label", async () => {
+    const { createHmac } = await import("node:crypto");
+    expect(deriveSessionsMountToken(daemonToken, sessionA)).toBe(
+      createHmac("sha256", daemonToken).update(`sessions-mount:${sessionA}`).digest("hex"),
+    );
+  });
+
+  test("never equals the same session's checks mount token", () => {
+    // Decision record 0012: the labels keep the two mounts' credentials
+    // apart, so one can never be replayed against the other.
+    expect(deriveSessionsMountToken(daemonToken, sessionA)).not.toBe(
+      deriveMountToken(daemonToken, sessionA),
+    );
+  });
+
+  test("differs per session and per daemon token", () => {
+    expect(deriveSessionsMountToken(daemonToken, sessionA)).not.toBe(
+      deriveSessionsMountToken(daemonToken, sessionB),
+    );
+    expect(deriveSessionsMountToken(daemonToken, sessionA)).not.toBe(
+      deriveSessionsMountToken("b".repeat(64), sessionA),
+    );
   });
 });

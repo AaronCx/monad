@@ -1,8 +1,11 @@
 // @aaroncx/engine: sessions, event log, policy, auth, transport adapter.
 export * from "./auth.ts";
+export * from "./indexer.ts";
 export * from "./paths.ts";
+export * from "./peer.ts";
 export * from "./playbooks/review.ts";
 export * from "./policy.ts";
+export * from "./repos.ts";
 export * from "./session.ts";
 export * from "./store.ts";
 export * from "./transport/index.ts";

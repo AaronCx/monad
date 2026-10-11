@@ -306,6 +306,8 @@ describe("monadd over the HTTP transport", () => {
       expect(list.sessions[0]?.sessionId).toBe(sessionId);
       expect(list.sessions[0]?.cwd).toBe(home);
       expect(list.sessions[0]?._meta?.[SESSION_STATUS_META_KEY]).toBe("idle");
+      // monad Link: the title is derived from the first prompt ("hello").
+      expect(list.sessions[0]?.title).toBe("hello");
     },
     30_000,
   );

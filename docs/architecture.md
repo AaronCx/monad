@@ -59,12 +59,30 @@ the process table. The vendor therefore never holds the daemon token. Each sessi
 mount takes a token derived for that session alone, so reading it buys running that session's
 own checks and nothing else. Decision record 0009 has the derivation and the measurements.
 
+monad Link makes sessions readers of each other, so prompt injection would become an
+exfiltration path if the boundary were left to prompts. It is the daemon's: only a trusted
+session is handed the monad-sessions mount (an untrusted one has no entry at all), review and
+fix sessions get read-only tools, everything returned is redacted and fenced as quoted history,
+a peer message is only ever a prompt (it can never answer a permission or change a mode), and
+every cross-session access is an event on both sessions' logs. Decision record 0012 has the
+trust table and the peer rules.
+
 ## Persistence
 
 Sessions persist as an append-only event log in SQLite (one file under `~/.monad`, WAL mode).
 Attaching to a session is a replay of its log plus a live subscription to new events. The
 event log is monad's own source of truth: the ACP HTTP transport does not replay messages a
 disconnected client missed, so the daemon does.
+
+monad Link derives three things from the log, in the same transaction as every append: an
+SQLite FTS5 full-text index (prompts, agent text coalesced per turn, tool call titles and paths,
+errors; every row carries its session id and seq range, and all text is passed through the
+secrets redactor before it is written), the repositories each session touched (resolved from
+tool call paths to their git toplevel, never guessed from the launch directory alone), and the
+session title (the first prompt's first line, or one set by hand). All three are rebuildable
+from the log: `index_state` records how far each session is indexed, and a database that is
+behind (or older than the index generation in `PRAGMA user_version`) is caught up at open
+through the same code path.
 
 ## Layout
 
@@ -76,13 +94,17 @@ disconnected client missed, so the daemon does.
   control API types.
 - `packages/engine` (`@aaroncx/engine`): sessions, event log, policy, transport adapter. The
   transport module is the only place allowed to import the SDK's experimental exports.
-- `packages/backends` (`@aaroncx/backends`): ACP client adapter (M1); native AI SDK loop (M2+).
+- `packages/backends` (`@aaroncx/backends`): ACP client adapter for claude-agent-acp and
+  codex-acp, and the one builder of the mcpServers array each vendor session is handed.
+- `packages/link` (`@aaroncx/link`): monad Link. LinkService (list, search, read, message, spawn,
+  wait), the normalized transcript, quoting and redaction of results, the link.json loader, and
+  the monad-sessions MCP server (decision record 0012).
 - `packages/checks` (`@aaroncx/checks`): placeholder in M1. The LastGate check engine port
   lands here in M2.
 - `packages/github` (`@aaroncx/github`): placeholder in M1. The LastGate GitHub App port lands
   here in M3.
 
-## Wire surface (M1)
+## Wire surface
 
 One HTTP server on 127.0.0.1 (default port 7331), bearer token from `~/.monad/token` on
 every request:
@@ -91,10 +113,32 @@ every request:
   `initialize` (advertises `loadSession` and `sessionCapabilities.list`), `session/new`,
   `session/load`, `session/list`, `session/prompt`, `session/cancel`.
 - `/v1/sessions`, `/v1/status`: the control API, plain JSON.
-- `/mcp/<sessionId>` (M2): that session's monad-checks tools over Streamable HTTP. This is the
-  one route the daemon token does NOT open. It takes only that session's derived mount token,
+- `PATCH /v1/sessions/<id>` (Link): `{ "title": "..." }` sets a manual title that prompt
+  derivation never overwrites; `{ "title": null }` re-derives it from the first prompt.
+  `session/list` over ACP carries the title in `SessionInfo.title`.
+- `/mcp/<sessionId>` (M2): that session's monad-checks tools over Streamable HTTP. The daemon
+  token does NOT open it. It takes only that session's derived mount token,
   `HMAC-SHA256(daemonToken, "mcp-mount:" + sessionId)`, because the credential is handed to the
   vendor agent and must not be monad's master one (decision record 0009).
+- `/mcp-sessions/<sessionId>` (Link): that session's monad-sessions tools (sessions_list,
+  sessions_search, sessions_read, sessions_message, sessions_spawn, sessions_wait) over
+  Streamable HTTP, offered per the trust table in decision record 0012. Its own derived token,
+  `HMAC-SHA256(daemonToken, "sessions-mount:" + sessionId)`: the daemon token, the checks mount
+  token and other sessions' tokens are all 401. A session Link may not reach (untrusted, Link
+  disabled, out of link.json's scope) is 403 even with the right token; a closed or imported one
+  is 404.
+- `GET /v1/sessions?repo=&status=&since=&limit=&imported=` (Link): with any of these filters,
+  the sessions that match, most recently active first, plus the repos each touched; with none,
+  every session oldest first as before.
+- `GET /v1/search?q=&repo=&since=&limit=` (Link): full-text hits with session id, seq range and
+  a redacted snippet.
+- `GET /v1/sessions/<id>/transcript?from=&limit=` (Link): one page of the normalized, redacted
+  transcript and where the next page starts.
+- `POST /v1/sessions/<id>/messages` (Link): `{ "text": "..." }` sends a peer message from the
+  human; it starts the session's next turn, or is queued for its next turn boundary.
+
+  The four Link routes run the same LinkService the MCP server does, with the human as the
+  caller, and every read they make is an access event on the session read.
 
 Attach semantics: `session/load` replays the log to the calling connection in seq order
 (`update` events verbatim, `prompt` events as `user_message_chunk` updates), then the
@@ -110,13 +154,18 @@ tool call id is held under a synthetic one rather than dropped, and that id is w
 resolution carries in the log.
 
 monad extensions on top of ACP, all under the `monad.sh` prefix: the `_meta` keys
-`monad.sh/replayCount` (session/load response) and `monad.sh/status` (session/list entries),
-plus the `_monad.sh/error` notification carrying appended error events (for example a failed
-vendor context restore) to live clients. Unknown notifications are dropped by SDK-based
+`monad.sh/replayCount` (session/load response), `monad.sh/status` (session/list entries) and
+`monad.sh/peer` (on a prompt a peer message delivered: `{ messageId, from, hop }`), plus three
+notifications to live clients: `_monad.sh/error` carrying appended error events (for example a
+failed vendor context restore), and `_monad.sh/peer_message` and `_monad.sh/access` carrying
+Link's peer_message and access events (decision record 0012). All three are sent on replay too
+and none counts toward the replay divider. Unknown notifications are dropped by SDK-based
 clients, so non-monad editors are unaffected.
 
 Environment overrides: `MONAD_HOME` moves the state directory, `MONAD_BACKEND_CMD` swaps the
-vendor agent command (integration tests run a fake ACP agent), `MONAD_DAEMON_BIN` tells the
-CLI what to spawn for `monad daemon start`.
+vendor agent command (integration tests run a fake ACP agent), `MONAD_CODEX_CMD` names the
+codex-acp command line for Link spawns that ask for it, `MONAD_DAEMON_BIN` tells the CLI what
+to spawn for `monad daemon start`. `~/.monad/link.json` scopes Link (enabled, a repo allowlist,
+limits); absent means every trusted session on this daemon.
 
 This document grows as code lands. Decision records live in `docs/decisions/`.

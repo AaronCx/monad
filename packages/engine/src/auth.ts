@@ -47,6 +47,23 @@ export function deriveMountToken(daemonToken: string, sessionId: string): string
 }
 
 /**
+ * Derives the bearer token for one session's /mcp-sessions/<sessionId> mount
+ * (monad Link, decision record 0012).
+ *
+ * Same construction as deriveMountToken under its own label, so the two
+ * mounts never share a credential: a session's checks token does not open
+ * its sessions mount, and the sessions token does not open the checks mount.
+ * The separation matters because the two are handed out under different
+ * rules: every session with HTTP MCP support gets a checks mount, while only
+ * a trusted session gets a sessions mount, and a token that opened both
+ * would let an untrusted session's checks credential reach other sessions'
+ * history.
+ */
+export function deriveSessionsMountToken(daemonToken: string, sessionId: string): string {
+  return createHmac("sha256", daemonToken).update(`sessions-mount:${sessionId}`).digest("hex");
+}
+
+/**
  * Constant-time string comparison. Both sides are hashed first so inputs of
  * different lengths take the same time as equal-length ones.
  */
