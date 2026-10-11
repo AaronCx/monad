@@ -583,17 +583,22 @@ describe("sessions_spawn", () => {
     const deliveries = children.map((id) => h.link.message(caller, id, "go again").delivery);
     deliveries.push(h.link.message({ kind: "human" }, children[0] as string, "and this").delivery);
     expect(deliveries).toEqual(["turn", "turn", "queued", "queued", "queued"]);
-    await Bun.sleep(20);
-    expect(runningSpawned()).toBe(2);
+    await waitFor(() => runningSpawned() === 2, "two children running");
 
     // Each slot that frees lets exactly one waiting child run; never more than two at once.
+    // Each step waits on the queue itself rather than a fixed sleep: a slow CI
+    // runner can take longer than any sleep to drain one message.
     const turnsOf = (id: string) => h.backends.get(id)?.prompts.length ?? 0;
+    const queuedTotal = () =>
+      children.reduce((sum, id) => sum + h.manager.queuedPeerMessages(id).length, 0);
     let peak = runningSpawned();
     for (let step = 0; step < 3; step += 1) {
       const busy = children.find((id) => h.store.get(id)?.status === "running");
       expect(busy).toBeDefined();
+      const before = queuedTotal();
       h.backends.get(busy as string)?.endTurn();
-      await Bun.sleep(20);
+      await waitFor(() => queuedTotal() === before - 1, `step ${step} drains one message`);
+      await waitFor(() => runningSpawned() === 2, `step ${step} back to two running`);
       peak = Math.max(peak, runningSpawned());
     }
     expect(peak).toBe(2);
