@@ -585,6 +585,11 @@ export class LinkService {
       throw this.refuse(caller, "wait", "invalid", "until must be idle, closed or waiting_for_permission");
     }
     const target = this.requireVisible(caller, "wait", targetId);
+    if (caller.kind === "session" && caller.id === target.id) {
+      // The caller's own turn is in flight while it waits, so this could
+      // only ever time out, holding the call open for nothing.
+      throw this.refuse(caller, "wait", "refused", "a session cannot wait on itself");
+    }
     const timeout = clampInt(timeoutMs, MAX_WAIT_MS, 0, MAX_WAIT_MS);
     this.logCaller(caller, { op: "wait", target: target.id, until });
     this.logTarget(caller, target.id, { op: "wait", until });

@@ -485,6 +485,9 @@ describe("sessions_wait", () => {
     const forClose = h.link.wait(caller, target.id, "closed", 5_000);
     await h.manager.close(target.id);
     expect(await forClose).toMatchObject({ reached: true, status: "closed" });
+
+    // Waiting on yourself could only time out; it is refused at once.
+    await expectLinkError(h.link.wait(caller, caller.id, "idle", 5_000), "refused", "itself");
   });
 });
 
