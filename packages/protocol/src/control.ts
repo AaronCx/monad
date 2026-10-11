@@ -1,10 +1,12 @@
 import { z } from "zod";
 import { EventRecordSchema } from "./events.ts";
+import { SearchKindSchema } from "./search.ts";
 import {
   BackendIdSchema,
   SessionIdSchema,
   SessionModeSchema,
   SessionRecordSchema,
+  TimestampSchema,
   TrustLevelSchema,
 } from "./session.ts";
 
@@ -187,3 +189,58 @@ export const UpdateSessionResponseSchema = z.object({
   session: SessionRecordSchema,
 });
 export type UpdateSessionResponse = z.infer<typeof UpdateSessionResponseSchema>;
+
+/**
+ * monad Link over the control API (decision record 0012). The CLI, and later
+ * the phone, reach sessions through the same LinkService the monad-sessions
+ * MCP server uses, with the human as the caller.
+ */
+
+/** Longest peer message accepted, from a session or from the CLI. */
+export const MAX_PEER_MESSAGE_LENGTH = 32_000;
+
+/** One hit of GET /v1/search. The snippet is redacted. */
+export const LinkSearchHitSchema = z.object({
+  sessionId: SessionIdSchema,
+  title: z.string().optional(),
+  kind: SearchKindSchema,
+  firstSeq: z.number().int().positive(),
+  lastSeq: z.number().int().positive(),
+  ts: TimestampSchema,
+  snippet: z.string(),
+});
+export type LinkSearchHit = z.infer<typeof LinkSearchHitSchema>;
+
+/** Response of GET /v1/search?q=&repo=&since=&limit=. */
+export const SearchResponseSchema = z.object({
+  hits: z.array(LinkSearchHitSchema),
+});
+export type SearchResponse = z.infer<typeof SearchResponseSchema>;
+
+/**
+ * Response of GET /v1/sessions/<id>/transcript?from=&limit=: one page of the
+ * normalized, redacted transcript. nextFromSeq is null at the end of the log.
+ */
+export const TranscriptResponseSchema = z.object({
+  sessionId: SessionIdSchema,
+  title: z.string().optional(),
+  text: z.string(),
+  entries: z.number().int().nonnegative(),
+  fromSeq: z.number().int().nonnegative(),
+  toSeq: z.number().int().nonnegative().nullable(),
+  nextFromSeq: z.number().int().positive().nullable(),
+});
+export type TranscriptResponse = z.infer<typeof TranscriptResponseSchema>;
+
+/** Body of POST /v1/sessions/<id>/messages. */
+export const SendMessageRequestSchema = z.strictObject({
+  text: z.string().trim().min(1).max(MAX_PEER_MESSAGE_LENGTH),
+});
+export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>;
+
+/** Response of POST /v1/sessions/<id>/messages. */
+export const SendMessageResponseSchema = z.object({
+  messageId: z.string(),
+  delivery: z.enum(["turn", "queued"]),
+});
+export type SendMessageResponse = z.infer<typeof SendMessageResponseSchema>;

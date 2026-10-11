@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AccessPayloadSchema,
+  BackendIdSchema,
   DaemonInfoSchema,
   DaemonStatusSchema,
   ERROR_NOTIFICATION_METHOD,
@@ -7,7 +9,10 @@ import {
   EventRecordSchema,
   ListSessionsResponseSchema,
   MonadErrorNotificationSchema,
+  PeerMessagePayloadSchema,
   REPLAY_COUNT_META_KEY,
+  SendMessageRequestSchema,
+  SessionStatusSchema,
   SearchHitSchema,
   SessionIdSchema,
   SessionRecordSchema,
@@ -90,7 +95,7 @@ describe("SessionRecordSchema", () => {
   test("rejects unknown status and backend", () => {
     const record = makeSessionRecord();
     expect(SessionRecordSchema.safeParse({ ...record, status: "paused" }).success).toBe(false);
-    expect(SessionRecordSchema.safeParse({ ...record, backend: "codex-acp" }).success).toBe(
+    expect(SessionRecordSchema.safeParse({ ...record, backend: "gemini" }).success).toBe(
       false,
     );
   });
@@ -110,6 +115,8 @@ describe("EventRecordSchema", () => {
       "turn_ended",
       "error",
       "closed",
+      "peer_message",
+      "access",
     ]);
   });
 
@@ -198,5 +205,54 @@ describe("SearchHitSchema", () => {
         rank: -1.5,
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("Link schemas", () => {
+  test("backends: two vendor adapters and two import sources", () => {
+    expect(BackendIdSchema.options).toEqual([
+      "claude-acp",
+      "codex-acp",
+      "import:claude-code",
+      "import:codex",
+    ]);
+    expect(SessionStatusSchema.safeParse("imported").success).toBe(true);
+  });
+
+  test("a peer message names its sender, hop and delivery", () => {
+    const payload = {
+      messageId: "m1",
+      from: Bun.randomUUIDv7(),
+      fromTitle: "fix the clamp",
+      to: Bun.randomUUIDv7(),
+      text: "what did you change?",
+      hop: 1,
+      delivery: "queued" as const,
+    };
+    expect(PeerMessagePayloadSchema.parse(payload)).toEqual(payload);
+    expect(PeerMessagePayloadSchema.safeParse({ ...payload, from: "human" }).success).toBe(true);
+    expect(PeerMessagePayloadSchema.safeParse({ ...payload, from: "someone" }).success).toBe(false);
+    expect(PeerMessagePayloadSchema.safeParse({ ...payload, hop: -1 }).success).toBe(false);
+  });
+
+  test("an access event keeps extra fields and records refusals", () => {
+    const parsed = AccessPayloadSchema.parse({
+      op: "search",
+      by: "human",
+      role: "target",
+      query: "scroll",
+      hits: 3,
+      refused: undefined,
+    });
+    expect(parsed).toMatchObject({ op: "search", hits: 3 });
+    expect(AccessPayloadSchema.safeParse({ op: "steal", by: "human", role: "caller" }).success).toBe(
+      false,
+    );
+  });
+
+  test("a CLI message is trimmed, non-empty and bounded", () => {
+    expect(SendMessageRequestSchema.parse({ text: "  hi  " }).text).toBe("hi");
+    expect(SendMessageRequestSchema.safeParse({ text: "   " }).success).toBe(false);
+    expect(SendMessageRequestSchema.safeParse({ text: "x".repeat(32_001) }).success).toBe(false);
   });
 });

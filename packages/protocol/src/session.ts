@@ -11,10 +11,17 @@ export const SessionIdSchema = z.uuid();
 export type SessionId = z.infer<typeof SessionIdSchema>;
 
 /**
- * The agent backend driving a session. M1 ships exactly one; M4 widens this
- * to an enum (codex-acp, gemini, native loop).
+ * The agent backend driving a session. claude-acp and codex-acp are vendor
+ * ACP adapters monad spawns per session (Link's sessions_spawn may pick
+ * either). The import:* values mark sessions read in from a vendor's own
+ * local logs (Link phase 4): they are searchable and readable, never run.
  */
-export const BackendIdSchema = z.literal("claude-acp");
+export const BackendIdSchema = z.enum([
+  "claude-acp",
+  "codex-acp",
+  "import:claude-code",
+  "import:codex",
+]);
 export type BackendId = z.infer<typeof BackendIdSchema>;
 
 /**
@@ -52,11 +59,17 @@ export type SessionPr = z.infer<typeof SessionPrSchema>;
 export const TrustLevelSchema = z.enum(["trusted", "untrusted"]);
 export type TrustLevel = z.infer<typeof TrustLevelSchema>;
 
+/**
+ * `imported` marks a session read in from a vendor log (Link phase 4). It is
+ * terminal like `closed`: an imported session is never attached, prompted,
+ * messaged or spawned into.
+ */
 export const SessionStatusSchema = z.enum([
   "idle",
   "running",
   "waiting_for_permission",
   "closed",
+  "imported",
 ]);
 export type SessionStatus = z.infer<typeof SessionStatusSchema>;
 
