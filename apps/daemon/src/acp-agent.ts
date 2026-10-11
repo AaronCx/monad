@@ -249,6 +249,8 @@ export function createDaemonAgentFactory(deps: DaemonAgentDeps): AcpAgentFactory
         sessions: deps.manager.list().map((record) => ({
           sessionId: record.id,
           cwd: record.cwd,
+          // ACP SessionInfo.title: the derived or manual monad Link title.
+          title: record.title ?? null,
           updatedAt: record.updatedAt,
           _meta: { [SESSION_STATUS_META_KEY]: record.status },
         })),

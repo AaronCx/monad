@@ -66,6 +66,16 @@ Attaching to a session is a replay of its log plus a live subscription to new ev
 event log is monad's own source of truth: the ACP HTTP transport does not replay messages a
 disconnected client missed, so the daemon does.
 
+monad Link derives three things from the log, in the same transaction as every append: an
+SQLite FTS5 full-text index (prompts, agent text coalesced per turn, tool call titles and paths,
+errors; every row carries its session id and seq range, and all text is passed through the
+secrets redactor before it is written), the repositories each session touched (resolved from
+tool call paths to their git toplevel, never guessed from the launch directory alone), and the
+session title (the first prompt's first line, or one set by hand). All three are rebuildable
+from the log: `index_state` records how far each session is indexed, and a database that is
+behind (or older than the index generation in `PRAGMA user_version`) is caught up at open
+through the same code path.
+
 ## Layout
 
 - `apps/daemon` (`@aaroncx/monadd`, binary `monadd`): owns sessions, the event log, the
@@ -91,6 +101,9 @@ every request:
   `initialize` (advertises `loadSession` and `sessionCapabilities.list`), `session/new`,
   `session/load`, `session/list`, `session/prompt`, `session/cancel`.
 - `/v1/sessions`, `/v1/status`: the control API, plain JSON.
+- `PATCH /v1/sessions/<id>` (Link): `{ "title": "..." }` sets a manual title that prompt
+  derivation never overwrites; `{ "title": null }` re-derives it from the first prompt.
+  `session/list` over ACP carries the title in `SessionInfo.title`.
 - `/mcp/<sessionId>` (M2): that session's monad-checks tools over Streamable HTTP. This is the
   one route the daemon token does NOT open. It takes only that session's derived mount token,
   `HMAC-SHA256(daemonToken, "mcp-mount:" + sessionId)`, because the credential is handed to the

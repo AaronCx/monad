@@ -70,6 +70,10 @@ export {
   findingRule,
 } from "./render";
 
+// Secret redaction for text handed beyond the secrets check (monad Link)
+export { findSecretSpans, redactSecrets, redactSecretsInWindow } from "./redact";
+export type { RedactionResult, SecretSpan } from "./redact";
+
 // Checks
 export { statusFromFindings } from "./checks/status";
 export { detectLinter } from "./checks/lint";

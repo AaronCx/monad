@@ -2,4 +2,5 @@
 export * from "./control.ts";
 export * from "./events.ts";
 export * from "./meta.ts";
+export * from "./search.ts";
 export * from "./session.ts";

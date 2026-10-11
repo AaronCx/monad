@@ -165,3 +165,25 @@ export const SetModeResponseSchema = z.object({
   session: SessionRecordSchema,
 });
 export type SetModeResponse = z.infer<typeof SetModeResponseSchema>;
+
+/**
+ * Longest title accepted over the control API. Derived titles stop at 80
+ * characters; a human naming a session gets more room, but not unbounded.
+ */
+export const MAX_SESSION_TITLE_LENGTH = 200;
+
+/**
+ * Body of PATCH /v1/sessions/<id>. A string sets a manual title, which prompt
+ * derivation never overwrites. null drops the manual title and re-derives one
+ * from the session's first prompt.
+ */
+export const UpdateSessionRequestSchema = z.strictObject({
+  title: z.string().trim().min(1).max(MAX_SESSION_TITLE_LENGTH).nullable(),
+});
+export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequestSchema>;
+
+/** Response of PATCH /v1/sessions/<id>. */
+export const UpdateSessionResponseSchema = z.object({
+  session: SessionRecordSchema,
+});
+export type UpdateSessionResponse = z.infer<typeof UpdateSessionResponseSchema>;
