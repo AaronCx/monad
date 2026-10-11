@@ -225,17 +225,29 @@ spawned with their status. Its `text` is markdown whose first line is a one-line
 (`idle: last asked "..."; repos monad (feat/x, 3 changed); 1 pending permission`), and that line
 is what `sessions_list`, `GET /v1/sessions` and `monad ls` show as the session's last handoff.
 Every string in it is redacted: it quotes the session's asks and errors, and other sessions read
-it. It is indexed for search (kind `handoff`).
+it. Each quoted ask, error and permission title is redacted BEFORE it is cut to length, and the
+summary line again before its own cut: a token cut first loses the tail its pattern needs and
+would survive as a prefix (the title derivation follows the same rule). An ask that a peer
+message or a spawn delivered is quoted without its provenance header, which alone is longer
+than the summary line's 80-character quote, and names its sender in a short form instead
+(`(from session 01a12d53) ...`). It is indexed for search (kind `handoff`).
 
 When one is written:
 
-- **Idle.** An idle stretch is everything after a session's last prompt. Ten minutes after the
-  stretch's last turn boundary (`MONAD_HANDOFF_IDLE_MS` overrides, for tests), if the session is
-  still idle with no turn in flight, one handoff is written, and never a second for the same
-  stretch: whether the stretch has one is read from the log (a handoff after its prompt), not
-  kept in memory. A new prompt ends the stretch. `HandoffScheduler` drives this from the
-  SessionManager's change listener, the same one `sessions_wait` uses. A session holding a
-  permission is not idle, so it is handed off when it closes or when someone asks.
+- **Idle.** An idle stretch is everything after a session's last turn boundary (the turn_ended
+  or error that ended its last turn). Ten minutes after it (`MONAD_HANDOFF_IDLE_MS` overrides,
+  for tests), if the session is still idle with no turn in flight, one handoff is written, and
+  never a second for the same stretch: whether the stretch has one is read from the log (a
+  handoff after its boundary), not kept in memory. A handoff written before the boundary does
+  not count: `monad handoff <id>` run mid-turn is a snapshot of the session mid-turn, so the
+  stretch after that turn still gets its own. An error logged while the session sits idle is a
+  boundary too, so the stretch it starts gets a fresh handoff. A new prompt ends the stretch.
+  Building a handoff awaits git, so the stretch is checked again synchronously right before the
+  append, and an idle handoff whose stretch ended meanwhile (a prompt arrived, or the session
+  closed) is dropped rather than logged after the prompt or after `closed`. `HandoffScheduler`
+  drives this from the SessionManager's change listener, the same one `sessions_wait` uses. A
+  session holding a permission is not idle, so it is handed off when it closes or when someone
+  asks.
 - **Close.** The manager runs a before-close hook ahead of teardown, and the scheduler writes the
   closing handoff there, so it still sees what the session was holding; only close's own teardown
   (held requests resolved as cancelled, then `closed`) follows it. A hook that fails never keeps
@@ -280,8 +292,20 @@ Its final agent text (the last run of text after any tool call) is redacted and 
 TARGET's log as a `summary` event (`SummaryPayload`: text, summarizer id, the seq range it was
 shown), indexed for search (kind `summary`), and the summarizer session is closed. One summary
 per target runs at a time, a session caller's summaries share the message and spawn rate bucket,
-and a turn that runs past ten minutes is cancelled. Summarizer sessions are recognized by their
-directory, so they never get handoffs of their own, across restarts too.
+at most `limits.maxConcurrentSummaries` (default 2) summaries run at once daemon-wide before a
+session's call is refused (the human's count toward it but are never refused by it; a
+summarizer is not a spawned child, so the spawned-session cap does not see it), and a turn that
+runs past ten minutes is cancelled. `monad handoff --summarize` waits that long plus a margin
+(Bun's fetch would otherwise give up on the held response after five idle minutes).
+
+Summarizer sessions are recognized by their directory, so they never get handoffs of their own,
+across restarts too, and Link never hands one to a session: they are absent from list, search,
+read, wait and summarize for a session caller, and from list and search for the human too. A
+summarizer's one prompt is a quoted copy of its target's transcript, so a read of it would be a
+read of the target with the access event on the wrong log, a search hit on it would duplicate a
+hit on the target, and the repos its own tool calls touched could slip the target past
+link.json's scope. The human may still read one with `monad show`, and that read is also
+recorded on the summarized session's log (`via` the summarizer).
 
 ## Repo notes: memory that only a person or an explicit call writes
 

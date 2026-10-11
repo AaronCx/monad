@@ -65,7 +65,8 @@ session is handed the monad-sessions mount (an untrusted one has no entry at all
 fix sessions get read-only tools, everything returned is redacted and fenced as quoted history,
 a peer message is only ever a prompt (it can never answer a permission or change a mode), and
 every cross-session access is an event on both sessions' logs. The on-demand summary is written
-by a separate session that is untrusted (so it has no Link mount) and read-only. Decision record
+by a separate session that is untrusted (so it has no Link mount) and read-only, and Link never
+returns that summarizer session to another session. Decision record
 0012 has the trust table and the peer rules.
 
 ## Persistence
