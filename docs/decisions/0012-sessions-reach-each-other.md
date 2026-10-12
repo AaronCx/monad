@@ -144,6 +144,14 @@ A session's search leaves out its own log: its question matches its own query be
 ranked first its own prompt and reply took hits two and five. The human's search, which has no
 log of its own, is unchanged.
 
+The cap has a cost: a caller that has found the right long session sees only three regions of it.
+`session_id` on `sessions_search` (`?session=` on `/v1/search`, `--session` on `monad search`)
+searches one session with no cap, under the same scope check and access logging, so a caller can
+locate every relevant range before reading. And because a multi-word query is an implicit AND in
+FTS5, a long question in plain words can match no single row; when the strict query returns
+nothing, search retries with the terms joined by OR, and bm25 still ranks rows matching more terms
+first.
+
 None of this makes prompt injection impossible. The claim is narrower and enforceable: whatever a
 quoted session says, the reader receives it marked as someone else's recorded words with known
 secrets removed, and the daemon decides what any session may do next.
