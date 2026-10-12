@@ -615,6 +615,32 @@ describe("what is skipped", () => {
     expect(env.h.store.get(CODEX_ID)).toBeUndefined();
   });
 
+  test("a log whose id is a monad session's own id never touches that session", async () => {
+    const env = setup();
+    const ran = env.h.manager.createRecord({ cwd: env.home });
+    const before = env.h.store.get(ran.id);
+    const events = env.h.store.replay(ran.id).length;
+    // A Claude Code log and a Codex rollout carrying the id of a session
+    // monad runs (a planted file, or a vendor id that happens to collide).
+    const dir = join(env.root, "planted");
+    mkdirSync(dir);
+    const claude = join(dir, `${ran.id}.jsonl`);
+    const codex = join(dir, `rollout-2026-02-05T21-42-28-${ran.id}.jsonl`);
+    writeFileSync(claude, readFileSync(env.mainLog, "utf8").replaceAll(MAIN_ID, ran.id));
+    writeFileSync(codex, readFileSync(env.codexLog, "utf8").replaceAll(CODEX_ID, ran.id));
+    const summary = await env.importer.run([dir]);
+    expect(summary).toMatchObject({ eventsAppended: 0, sessionsCreated: 0, sessionsReset: 0 });
+    expect(summary.skipped.map((skip) => [skip.path, skip.reason]).sort()).toEqual(
+      [
+        [claude, `session id ${ran.id} belongs to a session monad ran`],
+        [codex, `session id ${ran.id} belongs to a session monad ran`],
+      ].sort(),
+    );
+    expect(env.h.store.replay(ran.id)).toHaveLength(events);
+    expect(env.h.store.get(ran.id)).toEqual(before);
+    expect(env.h.store.importStateForSession(ran.id)).toBeUndefined();
+  });
+
   test("a log monad ran stays skipped after a failed restore replaced its vendor id", async () => {
     const env = setup();
     const ran = env.h.manager.createRecord({ cwd: env.home });
