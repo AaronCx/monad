@@ -15,7 +15,8 @@ import {
   type SessionId,
   SessionStatusSchema,
 } from "@aaroncx/protocol";
-import { quoteHistory, redactDeep } from "./quote.ts";
+import { redactSecrets } from "@aaroncx/checks";
+import { quoteHistory } from "./quote.ts";
 import { LinkError, type LinkService, MAX_WAIT_MS } from "./service.ts";
 
 /**
@@ -33,9 +34,16 @@ import { LinkError, type LinkService, MAX_WAIT_MS } from "./service.ts";
  * The trust table is applied twice, both times from the session record as it
  * is NOW (LinkService.toolsFor re-reads it): tools/list offers only the tools
  * the session may call, and tools/call refuses anything else. Every result's
- * text is redacted and fenced as quoted history (quote.ts), and its
- * structuredContent carries metadata only (ids, seqs, titles, statuses),
- * redacted too, never another session's transcript text.
+ * text is redacted and fenced as quoted history (quote.ts).
+ *
+ * Results carry text content ONLY, never structuredContent. Claude Code (the
+ * MCP client inside claude-agent-acp) hands the model a tool's
+ * structuredContent IN PLACE OF its text content when both are present,
+ * measured live on 2026-10-11 (claude-agent-acp 0.70.0): with a
+ * metadata-only structuredContent the model saw sessions_read as
+ * {"entries":120} and sessions_search as ids without snippets, never the
+ * transcript or the fenced text. Every id, seq and status a caller needs is
+ * in the text instead.
  */
 
 export interface SessionsMcpBinding {
@@ -213,7 +221,6 @@ const TOOL_DEFINITIONS: Record<
 interface ToolResult {
   [key: string]: unknown;
   content: Array<{ type: "text"; text: string }>;
-  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }
 
@@ -260,9 +267,16 @@ function optionalBoolean(args: Args, key: string): boolean | undefined {
   return value;
 }
 
-/** A plain (non-history) result: monad's own words, redacted all the same. */
-function plain(text: string, structured: Record<string, unknown>): ToolResult {
-  return { content: [{ type: "text", text }], structuredContent: redactDeep(structured) };
+/**
+ * A text-only result. No structuredContent: see the header comment. A plain
+ * (non-history) result is monad's own words, redacted all the same.
+ */
+function textResult(text: string): ToolResult {
+  return { content: [{ type: "text", text }] };
+}
+
+function plain(text: string): ToolResult {
+  return textResult(redactSecrets(text).text);
 }
 
 async function callTool(binding: SessionsMcpBinding, name: string, args: Args): Promise<ToolResult> {
@@ -294,22 +308,7 @@ async function callTool(binding: SessionsMcpBinding, name: string, args: Args): 
         { label: `the session list (${sessions.length} sessions)` },
         lines.length > 0 ? lines.join("\n") : "no sessions",
       );
-      return {
-        content: [{ type: "text", text }],
-        structuredContent: redactDeep({
-          sessions: sessions.map((s) => ({
-            id: s.id,
-            title: s.title ?? null,
-            backend: s.backend,
-            status: s.status,
-            mode: s.mode,
-            repos: s.repos,
-            updated_at: s.updatedAt,
-            parent_id: s.parentId ?? null,
-            last_handoff: s.lastHandoff ?? null,
-          })),
-        }),
-      };
+      return textResult(text);
     }
     case "sessions_search": {
       const query = requiredString(args, "query");
@@ -326,20 +325,7 @@ async function callTool(binding: SessionsMcpBinding, name: string, args: Args): 
         { label: `a search of session history for ${JSON.stringify(query)} (${hits.length} hits)` },
         lines.length > 0 ? lines.join("\n") : "no hits",
       );
-      return {
-        content: [{ type: "text", text }],
-        // Metadata only: snippets stay in the fenced text.
-        structuredContent: redactDeep({
-          hits: hits.map((hit) => ({
-            session_id: hit.sessionId,
-            title: hit.title ?? null,
-            kind: hit.kind,
-            first_seq: hit.firstSeq,
-            last_seq: hit.lastSeq,
-            ts: hit.ts,
-          })),
-        }),
-      };
+      return textResult(text);
     }
     case "sessions_read": {
       const page = service.read(caller, requiredString(args, "session_id"), {
@@ -356,17 +342,7 @@ async function callTool(binding: SessionsMcpBinding, name: string, args: Args): 
         { sessionId: page.sessionId, title: page.title, fromSeq: first, toSeq: page.toSeq ?? first },
         body,
       )}\n${footer}`;
-      return {
-        content: [{ type: "text", text }],
-        structuredContent: redactDeep({
-          session_id: page.sessionId,
-          title: page.title ?? null,
-          from_seq: page.fromSeq,
-          to_seq: page.toSeq,
-          next_from_seq: page.nextFromSeq,
-          entries: page.entries.length,
-        }),
-      };
+      return textResult(text);
     }
     case "sessions_message": {
       const result = service.message(caller, requiredString(args, "to"), requiredString(args, "text"));
@@ -374,10 +350,7 @@ async function callTool(binding: SessionsMcpBinding, name: string, args: Args): 
         result.delivery === "turn"
           ? "it started that session's next turn"
           : "that session is busy, so it is queued for its next turn boundary";
-      return plain(`Message ${result.messageId} delivered: ${how}.`, {
-        message_id: result.messageId,
-        delivery: result.delivery,
-      });
+      return plain(`Message ${result.messageId} delivered: ${how}.`);
     }
     case "sessions_spawn": {
       const backend = optionalString(args, "backend");
@@ -396,16 +369,8 @@ async function callTool(binding: SessionsMcpBinding, name: string, args: Args): 
         worktree: optionalBoolean(args, "worktree"),
       });
       return plain(
-        `Spawned session ${result.sessionId} (${result.backend}, ${result.mode}) in ${result.cwd}; its first turn is running.`,
-        {
-          session_id: result.sessionId,
-          cwd: result.cwd,
-          backend: result.backend,
-          mode: result.mode,
-          worktree: result.worktree,
-          parent_id: result.parentId ?? null,
-          spawn_depth: result.spawnDepth,
-        },
+        `Spawned session ${result.sessionId} (${result.backend}, ${result.mode}) in ${result.cwd}` +
+          `${result.worktree ? " (a new worktree)" : ""}, spawn depth ${result.spawnDepth}; its first turn is running.`,
       );
     }
     case "sessions_wait": {
@@ -418,15 +383,11 @@ async function callTool(binding: SessionsMcpBinding, name: string, args: Args): 
         throw new McpError(ErrorCode.InvalidParams, "timeout_ms is required");
       }
       const result = await service.wait(caller, requiredString(args, "session_id"), until, timeoutMs);
+      const stop = result.lastTurnStopReason ? ` Its last turn ended with ${result.lastTurnStopReason}.` : "";
       return plain(
         result.reached
-          ? `Reached ${until}: the session is ${result.status}.`
-          : `Did not reach ${until}: the session is ${result.status}.`,
-        {
-          reached: result.reached,
-          status: result.status,
-          last_turn_stop_reason: result.lastTurnStopReason ?? null,
-        },
+          ? `Reached ${until}: the session is ${result.status}.${stop}`
+          : `Did not reach ${until}: the session is ${result.status}.${stop}`,
       );
     }
     case "sessions_summarize": {
@@ -435,16 +396,7 @@ async function callTool(binding: SessionsMcpBinding, name: string, args: Args): 
         { sessionId: summary.sessionId, title: summary.title, fromSeq: summary.fromSeq, toSeq: summary.toSeq },
         summary.text,
       );
-      return {
-        content: [{ type: "text", text: `${text}\nStored on ${summary.sessionId} as summary event seq ${summary.seq}.` }],
-        structuredContent: redactDeep({
-          session_id: summary.sessionId,
-          summary_seq: summary.seq,
-          summarizer_session_id: summary.summarizerSessionId,
-          from_seq: summary.fromSeq,
-          to_seq: summary.toSeq,
-        }),
-      };
+      return textResult(`${text}\nStored on ${summary.sessionId} as summary event seq ${summary.seq}.`);
     }
     case "notes_read": {
       const result = service.notesRead(caller, requiredString(args, "repo"));
@@ -456,15 +408,11 @@ async function callTool(binding: SessionsMcpBinding, name: string, args: Args): 
         { label: `the repo notes for ${result.repo} (${result.notes.length} notes)` },
         lines.length > 0 ? lines.join("\n") : "no notes yet",
       );
-      return {
-        content: [{ type: "text", text }],
-        // Metadata only: the notes themselves stay in the fenced text.
-        structuredContent: redactDeep({ repo: result.repo, count: result.notes.length }),
-      };
+      return textResult(text);
     }
     case "notes_append": {
       const result = service.notesAppend(caller, requiredString(args, "repo"), requiredString(args, "text"));
-      return plain(`Noted for ${result.repo} at ${result.note.ts}.`, { repo: result.repo, ts: result.note.ts });
+      return plain(`Noted for ${result.repo} at ${result.note.ts}.`);
     }
     default:
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);

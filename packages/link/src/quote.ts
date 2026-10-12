@@ -70,9 +70,8 @@ export function quoteHistory(origin: QuoteOrigin, body: string): string {
 
 /**
  * Redacts every string inside a JSON-shaped value, keys included, without
- * changing its shape. Used on every structuredContent Link returns, so the
- * structured side of a result never carries what the fenced text had
- * removed.
+ * changing its shape. Used on the handoff and summary payloads Link writes,
+ * which other sessions read.
  */
 export function redactDeep<T>(value: T): T {
   return redactValue(value) as T;
