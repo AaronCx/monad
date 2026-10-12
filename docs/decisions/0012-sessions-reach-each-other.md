@@ -380,7 +380,7 @@ with a deterministic RFC 9562 version 8 id hashed from the parent id and the fil
 `import:codex`, status `imported`, trust `trusted` (it only decides who may read it), the log's cwd
 and timestamps. Each line becomes the events a live session would have logged: the human's text a
 `prompt`, assistant text an `agent_message_chunk`, a tool use a `tool_call` (title from the tool
-and its target, ACP kind, the input with every string cut to 4 KiB, locations from its paths), a
+and its target, redacted before it is cut so no token prefix survives the cut, ACP kind, the input with every string cut to 4 KiB, locations from its paths), a
 tool result a `tool_call_update` (completed or failed, output cut to 4 KiB), a turn end
 `turn_ended`, an API error `error`. Every payload carries `_meta["monad.sh/imported"] = { source,
 line, vendor }`. Skipped: thinking (as for live sessions), Claude Code's bookkeeping lines, meta

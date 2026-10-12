@@ -731,6 +731,65 @@ describe("redaction", () => {
     expect(page.text).not.toContain(PLANTED_TOKEN);
     expect(JSON.stringify(env.h.link.list({ kind: "human" }))).not.toContain(PLANTED_TOKEN);
   });
+
+  test("a token crossing a tool title's cut is redacted, not cut into a prefix that survives", async () => {
+    const env = setup();
+    const prefix = PLANTED_TOKEN.slice(0, 8);
+    expect(prefix).toBe("ghp_aB3d");
+    // Each token starts before its title's cut (Bash and shell 120
+    // characters, WebFetch 100) and ends after it.
+    const command = `echo ${"x".repeat(70)} && curl -H "Authorization: token ${PLANTED_TOKEN}" https://api.github.com`;
+    const url = `https://example.com/${"p".repeat(60)}?access_token=${PLANTED_TOKEN}`;
+    appendFileSync(
+      env.mainLog,
+      claudeLine(env, {
+        type: "assistant",
+        timestamp: "2026-07-29T16:40:00.000Z",
+        message: {
+          id: "msg_cut",
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_cut_bash", name: "Bash", input: { command } },
+            { type: "tool_use", id: "toolu_cut_fetch", name: "WebFetch", input: { url, prompt: "read it" } },
+          ],
+        },
+      }),
+    );
+    appendFileSync(
+      env.codexLog,
+      `${JSON.stringify({
+        timestamp: "2026-02-06T02:50:00.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "shell",
+          arguments: JSON.stringify({ command: ["bash", "-lc", command] }),
+          call_id: "call_cut",
+        },
+      })}\n`,
+    );
+    await env.importer.run([env.logs]);
+    const titles = [
+      ...updates(env.h.store.replay(MAIN_ID), "tool_call"),
+      ...updates(env.h.store.replay(CODEX_ID), "tool_call"),
+    ]
+      .filter((u) => String(u.toolCallId).includes("cut"))
+      .map((u) => String(u.title));
+    expect(titles).toHaveLength(3);
+    for (const title of titles) {
+      // Cut after the token was redacted (the placeholder itself may be cut):
+      // no part of the token is left.
+      expect(title).toEndWith("...");
+      expect(title).toMatch(/token[ =]\[R/);
+      expect(title).not.toContain("ghp_");
+    }
+    for (const id of [MAIN_ID, CODEX_ID]) {
+      for (const row of ftsRows(env, id)) {
+        expect(row.text).not.toContain(prefix);
+      }
+      expect(env.h.link.read({ kind: "human" }, id).text).not.toContain(prefix);
+    }
+  });
 });
 
 describe("an imported session is read-only", () => {

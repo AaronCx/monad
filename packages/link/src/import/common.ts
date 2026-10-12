@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, resolve as resolvePath } from "node:path";
+import { redactSecrets } from "@aaroncx/checks";
 import type { ImportedEventInput } from "@aaroncx/engine";
 import { IMPORTED_META_KEY, type ImportedMeta, type SessionId } from "@aaroncx/protocol";
 
@@ -110,9 +111,16 @@ export function truncateDeep(value: unknown, depth = 0): unknown {
   return out;
 }
 
-/** One line, collapsed whitespace, at most `max` characters (code points). */
+/**
+ * One line, collapsed whitespace, at most `max` characters (code points),
+ * redacted BEFORE it is cut. Every tool title an importer builds goes
+ * through here, and a title is indexed and shown to readers: cut first, a
+ * token crossing the cut would leave a prefix that no longer matches its
+ * pattern (a ghp_ token needs all 36 characters) and so survives the
+ * redaction applied later. The same rule as phase 1's derived titles.
+ */
 export function oneLine(text: string, max = 120): string {
-  const collapsed = text.replace(/\s+/g, " ").trim();
+  const collapsed = redactSecrets(text).text.replace(/\s+/g, " ").trim();
   const points = Array.from(collapsed);
   return points.length <= max ? collapsed : `${points.slice(0, max).join("")}...`;
 }
