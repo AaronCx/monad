@@ -128,6 +128,12 @@ answer. Tool OUTPUT is never returned: it is the bulk of any log and the likelie
 secret or injected text to sit. Pages are bounded by entry count (default 200, at most 1000) and
 48 KiB of text.
 
+Search returns at most three hits per session (`SEARCH_HITS_PER_SESSION`, its best ranked rows),
+applied before the limit. A hit is a pointer to a session to read, and bm25 ranks a short row (a
+tool call naming one file) above a long discussion, so without the cap one busy session's edits
+to the same file filled every slot: in acceptance run 1, 30 hits for "meshyy scrolling" came from
+8 sessions and the session that did the work was not among them.
+
 None of this makes prompt injection impossible. The claim is narrower and enforceable: whatever a
 quoted session says, the reader receives it marked as someone else's recorded words with known
 secrets removed, and the daemon decides what any session may do next.

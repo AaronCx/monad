@@ -244,6 +244,13 @@ export const MAX_WAIT_MS = 600_000;
 /** Events read per transcript page, an upper bound on work per call. */
 const TRANSCRIPT_EVENT_WINDOW = 20_000;
 
+/**
+ * Hits a search returns from any one session (its best ranked). A hit is a
+ * pointer into a session to read, so three from one session say all a
+ * fourth would; the slots go to other sessions instead.
+ */
+export const SEARCH_HITS_PER_SESSION = 3;
+
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 500;
 
@@ -410,6 +417,12 @@ export class LinkService {
       // log, and a duplicate of a hit on the target itself (whose summary
       // is indexed on its own log).
       excludeSessionIds: this.summarizerIds(),
+      // Hits name sessions to read, so they should name as many distinct
+      // sessions as they can: measured live (acceptance run 1), 30 hits for
+      // "meshyy scrolling" came from 8 sessions, ten of them one session's
+      // edits to the same file, and the session that did the work was not
+      // among them.
+      maxPerSession: SEARCH_HITS_PER_SESSION,
     });
     const titles = new Map<string, string | undefined>();
     const results: LinkSearchHit[] = hits.map((hit) => {

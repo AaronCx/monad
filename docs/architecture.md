@@ -157,7 +157,8 @@ every request:
   every session oldest first as before. Either way `handoffs` maps each session to its last
   handoff's first line.
 - `GET /v1/search?q=&repo=&since=&limit=` (Link): full-text hits with session id, seq range and
-  a redacted snippet.
+  a redacted snippet, at most three per session (its best ranked), so the hits name as many
+  sessions as they can.
 - `GET /v1/sessions/<id>/transcript?from=&limit=` (Link): one page of the normalized, redacted
   transcript and where the next page starts.
 - `POST /v1/sessions/<id>/messages` (Link): `{ "text": "..." }` sends a peer message from the

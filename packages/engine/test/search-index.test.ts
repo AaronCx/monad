@@ -416,6 +416,42 @@ describe("full-text index fed on append", () => {
     expect(store.search("scroll", { limit: 1 })).toHaveLength(1);
   });
 
+  test("maxPerSession keeps one session's many short rows from crowding out the others", () => {
+    // Measured live (acceptance run 1): short tool rows (the same file path
+    // edited over and over) outrank a long discussion under bm25, so one busy
+    // session filled every hit slot and the session that did the work was
+    // not returned at all.
+    const dir = tempDir("monad-fts-");
+    const store = openStore(join(dir, "monad.db"));
+    const busy = store.create(makeRecord());
+    const worker = store.create(makeRecord());
+    for (let i = 0; i < 12; i += 1) {
+      store.append(
+        busy.id,
+        "update",
+        tool(busy.id, { title: "Edit ScrollBelief.swift", locations: [{ path: "/meshyy/ScrollBelief.swift" }] }),
+      );
+    }
+    store.append(
+      worker.id,
+      "prompt",
+      prompt(
+        worker.id,
+        "the meshyy scroll bar goes yellow and says no previous window; the wheel lands on the tmux status row " +
+          "after a reconnect, and the alt screen belief is lost too, so look at how meshyy routes the swipe",
+      ),
+    );
+    const uncapped = store.search("meshyy scroll", { limit: 10 });
+    expect(new Set(uncapped.map((h) => h.sessionId))).toEqual(new Set([busy.id]));
+    const capped = store.search("meshyy scroll", { limit: 10, maxPerSession: 3 });
+    expect(capped.filter((h) => h.sessionId === busy.id)).toHaveLength(3);
+    expect(capped.map((h) => h.sessionId)).toContain(worker.id);
+    // Best ranked first within the cap, and the limit still applies after it.
+    expect(store.search("meshyy scroll", { limit: 2, maxPerSession: 3 })).toHaveLength(2);
+    expect(store.search("meshyy scroll", { maxPerSession: Number.NaN })).toHaveLength(13);
+    expect(store.search("meshyy scroll", { limit: 20, maxPerSession: 0 })).toHaveLength(2);
+  });
+
   test("a non-finite or out-of-range limit falls back or clamps instead of throwing", () => {
     const dir = tempDir("monad-fts-");
     const store = openStore(join(dir, "monad.db"));

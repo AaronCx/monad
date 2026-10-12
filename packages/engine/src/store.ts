@@ -69,7 +69,22 @@ export interface SearchOptions {
   excludeSessionIds?: SessionId[];
   /** Only these row kinds. An empty list matches nothing. */
   kinds?: SearchKind[];
+  /**
+   * At most this many hits from any one session (its best ranked), applied
+   * before the limit, so one session's many near-identical rows (the same
+   * file path edited twenty times) cannot crowd every other session out.
+   * Unset means no cap.
+   */
+  maxPerSession?: number;
 }
+
+/**
+ * How many ranked rows a capped search reads before applying the
+ * per-session cap and the limit. bm25 ordering already scores every match,
+ * so reading more rows costs little; the bound keeps a query that matches
+ * most of the index from building a huge result array.
+ */
+const CAPPED_SEARCH_SCAN = 5000;
 
 /** Snippet highlight markers around each matched term. */
 export const SNIPPET_OPEN = "\u00ab";
@@ -940,9 +955,11 @@ export class SessionStore {
     // the default; binding NaN to LIMIT would throw "datatype mismatch".
     const requested = Number(options.limit);
     const limit = Number.isFinite(requested) ? Math.min(Math.max(Math.trunc(requested), 1), 200) : 20;
+    const requestedCap = Number(options.maxPerSession);
+    const perSession = Number.isFinite(requestedCap) ? Math.max(Math.trunc(requestedCap), 1) : undefined;
     const params: Record<string, string | number> = {
       match,
-      limit,
+      limit: perSession === undefined ? limit : CAPPED_SEARCH_SCAN,
       open: SNIPPET_OPEN,
       close: SNIPPET_CLOSE,
     };
@@ -987,6 +1004,16 @@ export class SessionStore {
         return [];
       }
       throw error;
+    }
+    if (perSession !== undefined) {
+      const taken = new Map<string, number>();
+      rows = rows
+        .filter((row) => {
+          const count = taken.get(row.session_id) ?? 0;
+          taken.set(row.session_id, count + 1);
+          return count < perSession;
+        })
+        .slice(0, limit);
     }
     return rows.map((row) => ({
       sessionId: row.session_id,

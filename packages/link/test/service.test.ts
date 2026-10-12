@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { peerMetaOf } from "@aaroncx/engine";
 import type { RequestPermissionRequest, RequestPermissionResponse } from "@agentclientprotocol/sdk";
-import { LinkError } from "../src/service.ts";
+import { LinkError, SEARCH_HITS_PER_SESSION } from "../src/service.ts";
 import {
   accessEvents,
   agentChunk,
@@ -805,6 +805,24 @@ describe("sessions_read and sessions_search", () => {
     await Bun.sleep(5);
     h.link.read({ kind: "session", id: reader.id }, target.id);
     expect(h.store.get(target.id)?.updatedAt).toBe(before);
+  });
+
+  test("a search returns at most three hits per session, so a busy session cannot hide the others", async () => {
+    const h = harness();
+    const reader = { kind: "session" as const, id: (await h.session()).id };
+    const busy = await h.session();
+    const worker = await h.session();
+    h.history(
+      busy.id,
+      Array.from({ length: 10 }, (_, i) => ["prompt", userPrompt(busy.id, `quokka ${i}`)] as const),
+    );
+    h.history(worker.id, [
+      ["prompt", userPrompt(worker.id, `the quokka ${"discussion ".repeat(60)}`)],
+    ]);
+    expect(SEARCH_HITS_PER_SESSION).toBe(3);
+    const hits = h.link.search(reader, "quokka", { limit: 5 });
+    expect(hits.filter((hit) => hit.sessionId === busy.id)).toHaveLength(3);
+    expect(hits.map((hit) => hit.sessionId)).toContain(worker.id);
   });
 
   test("a search query is redacted in the access record", async () => {
