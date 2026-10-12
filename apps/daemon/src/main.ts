@@ -14,7 +14,7 @@ import {
 } from "@aaroncx/engine";
 import { createAcpHttpServer } from "@aaroncx/engine/transport";
 import { backendUnavailable, createClaudeBackend } from "@aaroncx/backends";
-import { HandoffScheduler, handoffIdleMs, LinkService, loadLinkConfig } from "@aaroncx/link";
+import { HandoffScheduler, handoffIdleMs, Importer, ImportWatcher, LinkService, loadLinkConfig } from "@aaroncx/link";
 import type { DaemonInfo } from "@aaroncx/protocol";
 import { createDaemonAgentFactory } from "./acp-agent.ts";
 import { createControlHandler } from "./control.ts";
@@ -145,6 +145,11 @@ const link = new LinkService({
   createWorktree: async (cwd, sessionId) => (await createSpawnWorktree({ cwd, sessionId })).path,
 });
 linkRef.service = link;
+// Link phase 4: Aaron's own Claude Code and Codex logs, read in place into
+// imported sessions (searchable, readable, never run). On demand through
+// POST /v1/import (`monad import`); continuously only when link.json says
+// import.watch: true. import.enabled: false turns both off.
+const importer = new Importer({ store, config: linkConfig.config.import });
 
 const startedAt = new Date();
 // A client that dies without an HTTP DELETE (SIGKILL, network drop) is
@@ -159,7 +164,7 @@ const sseGraceEnv = Number(process.env.MONAD_SSE_GRACE_MS ?? "");
 // /v1/* control API.
 const mcpRoute = createMcpRoute({ manager, daemonToken: token });
 const sessionsRoute = createSessionsMcpRoute({ manager, link, daemonToken: token });
-const controlHandler = createControlHandler({ manager, link, version: VERSION, startedAt });
+const controlHandler = createControlHandler({ manager, link, importer, version: VERSION, startedAt });
 const server = createAcpHttpServer(createDaemonAgentFactory({ manager, version: VERSION }), {
   authToken: token,
   // The mount route does its own bearer check; the blanket daemon-token
@@ -214,6 +219,25 @@ const handoffs = new HandoffScheduler({
 });
 handoffs.start();
 
+const importWatcher =
+  linkConfig.config.import.enabled && linkConfig.config.import.watch
+    ? new ImportWatcher({
+        importer,
+        onRun: (summary) => {
+          if (summary.eventsAppended > 0 || summary.sessionsReset > 0) {
+            console.log(
+              `monadd: imported ${summary.eventsAppended} event(s): ${summary.sessionsCreated} new session(s), ` +
+                `${summary.sessionsUpdated} updated, ${summary.sessionsReset} re-read from the start`,
+            );
+          }
+        },
+        onError: (error) => {
+          console.warn(`monadd: import failed: ${error instanceof Error ? error.message : String(error)}`);
+        },
+      })
+    : undefined;
+importWatcher?.start();
+
 const infoPath = daemonInfoPath();
 const pidPath = daemonPidPath();
 const info: DaemonInfo = { port, pid: process.pid, startedAt: startedAt.toISOString() };
@@ -238,6 +262,7 @@ async function shutdown(signal: string): Promise<void> {
     // Pending idle handoffs are in the log's terms (no handoff after the
     // stretch's prompt), so the next daemon's catch-up writes them.
     handoffs.stop();
+    importWatcher?.stop();
     // Cancel in-flight turns (this also resolves held permission requests
     // with a cancelled outcome) before closing backends.
     for (const record of manager.list()) {

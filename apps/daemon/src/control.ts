@@ -1,12 +1,14 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { runReviewPlaybook, type SessionManager } from "@aaroncx/engine";
-import { LinkError, type LinkErrorCode, type LinkService } from "@aaroncx/link";
+import { ImportDisabledError, type Importer, LinkError, type LinkErrorCode, type LinkService } from "@aaroncx/link";
 import {
   AppendNoteRequestSchema,
   type AppendNoteResponse,
   type DaemonStatus,
   HandoffRequestSchema,
   type HandoffResponse,
+  ImportRequestSchema,
+  type ImportSummary,
   type ListSessionsResponse,
   type NotesResponse,
   ReviewRequestSchema,
@@ -41,6 +43,11 @@ export interface ControlDeps {
    * could get wrong.
    */
   link: LinkService;
+  /**
+   * The vendor log importer (Link phase 4). Absent in tests that do not
+   * exercise it, and then POST /v1/import is 503.
+   */
+  importer?: Importer;
   version: string;
   startedAt: Date;
 }
@@ -172,8 +179,14 @@ async function handleSetMode(
     sendJson(res, 400, { error: `invalid mode request: ${parsed.error.message}` });
     return;
   }
-  if (!deps.manager.get(sessionId)) {
+  const existing = deps.manager.get(sessionId);
+  if (!existing) {
     sendJson(res, 404, { error: `no session ${sessionId}` });
+    return;
+  }
+  if (existing.status === "imported") {
+    // An imported log has no backend and no policy to switch (Link phase 4).
+    sendJson(res, 409, { error: `session ${sessionId} is an imported log and has no mode to switch` });
     return;
   }
   try {
@@ -440,6 +453,38 @@ async function handleHandoff(
   }
 }
 
+/**
+ * POST /v1/import { paths? }: one import run over the configured roots, or
+ * over the given paths only (Link phase 4). Answers with the run's summary.
+ * Runs are serialized, so a request that arrives during a watcher run waits
+ * for it and then scans again.
+ */
+async function handleImport(deps: ControlDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: unknown;
+  try {
+    const raw = await readBody(req);
+    body = raw.trim() === "" ? {} : JSON.parse(raw);
+  } catch (error) {
+    sendJson(res, 400, { error: `unreadable body: ${errorMessage(error)}` });
+    return;
+  }
+  const parsed = ImportRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: `invalid import request: ${parsed.error.message}` });
+    return;
+  }
+  if (!deps.importer) {
+    sendJson(res, 503, { error: "this daemon has no importer" });
+    return;
+  }
+  try {
+    const summary: ImportSummary = await deps.importer.run(parsed.data.paths);
+    sendJson(res, 200, summary);
+  } catch (error) {
+    sendJson(res, error instanceof ImportDisabledError ? 409 : 500, { error: errorMessage(error) });
+  }
+}
+
 /** GET /v1/notes?repo=P: a repository's notes, the human as reader. */
 function handleReadNotes(deps: ControlDeps, res: ServerResponse, params: URLSearchParams): void {
   const repo = params.get("repo");
@@ -488,6 +533,10 @@ export function createControlHandler(deps: ControlDeps) {
       }
       if (pathname === "/v1/notes") {
         void handleAppendNote(deps, req, res);
+        return;
+      }
+      if (pathname === "/v1/import") {
+        void handleImport(deps, req, res);
         return;
       }
       const handoffMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/handoff$/);

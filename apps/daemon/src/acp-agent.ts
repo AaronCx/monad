@@ -267,14 +267,20 @@ export function createDaemonAgentFactory(deps: DaemonAgentDeps): AcpAgentFactory
         return { _meta: { [REPLAY_COUNT_META_KEY]: replayCount } };
       })
       .onRequest(methods.agent.session.list, () => ({
-        sessions: deps.manager.list().map((record) => ({
-          sessionId: record.id,
-          cwd: record.cwd,
-          // ACP SessionInfo.title: the derived or manual monad Link title.
-          title: record.title ?? null,
-          updatedAt: record.updatedAt,
-          _meta: { [SESSION_STATUS_META_KEY]: record.status },
-        })),
+        // Imported vendor logs (Link phase 4) are history, not sessions an
+        // ACP client can load or prompt, so an editor's session picker never
+        // offers one. They are listed by the control API (`monad ls --all`).
+        sessions: deps.manager
+          .list()
+          .filter((record) => record.status !== "imported")
+          .map((record) => ({
+            sessionId: record.id,
+            cwd: record.cwd,
+            // ACP SessionInfo.title: the derived or manual monad Link title.
+            title: record.title ?? null,
+            updatedAt: record.updatedAt,
+            _meta: { [SESSION_STATUS_META_KEY]: record.status },
+          })),
       }))
       .onRequest(methods.agent.session.prompt, async (ctx) => {
         const sessionId = ctx.params.sessionId;
