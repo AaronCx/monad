@@ -30,6 +30,16 @@
  *                  tool over the injected monad-checks http entry (real
  *                  fetch with the bearer header), then end the message with
  *                  a canned ReviewReport json block
+ *   --link         monad Link behavior: a prompt whose text is
+ *                  `link:<tool> <json arguments>` calls that tool over the
+ *                  injected monad-sessions http entry (real fetch with its
+ *                  bearer header) and replies with the tool's text result.
+ *                  With no monad-sessions entry it replies
+ *                  "link failed: no monad-sessions entry was injected".
+ *   --mcp-log P    also append { method, cwd, mcpServers } for every
+ *                  session/new and session/load to the file P, whatever the
+ *                  cwd is (review worktrees are git checkouts, which the
+ *                  per-cwd recording deliberately skips)
  */
 import { appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -48,6 +58,9 @@ const noLoad = process.argv.includes("--no-load");
 const failLoad = process.argv.includes("--fail-load");
 const noMcpHttp = process.argv.includes("--no-mcp-http");
 const reviewBehavior = process.argv.includes("--review");
+const linkBehavior = process.argv.includes("--link");
+const mcpLogIndex = process.argv.indexOf("--mcp-log");
+const mcpLogPath = mcpLogIndex === -1 ? undefined : process.argv[mcpLogIndex + 1];
 
 interface HttpMcpEntry {
   url: string;
@@ -57,23 +70,112 @@ interface HttpMcpEntry {
 /** The monad-checks http entry each session was handed, for --review. */
 const mcpEntryBySession = new Map<string, HttpMcpEntry>();
 
+/** The monad-sessions http entry each session was handed, for --link. */
+const sessionsEntryBySession = new Map<string, HttpMcpEntry>();
+
 /** Session cwds, so session/set_mode (which has no cwd) can be recorded. */
 const cwdBySession = new Map<string, string>();
 
-function rememberChecksEntry(sessionId: string, mcpServers: unknown): void {
+function findHttpEntry(mcpServers: unknown, name: string): HttpMcpEntry | undefined {
   if (!Array.isArray(mcpServers)) {
-    return;
+    return undefined;
   }
   const entry = mcpServers.find(
     (server): server is { type: string; name: string; url: string; headers: HttpMcpEntry["headers"] } =>
       typeof server === "object" &&
       server !== null &&
       (server as { type?: unknown }).type === "http" &&
-      (server as { name?: unknown }).name === "monad-checks",
+      (server as { name?: unknown }).name === name,
   );
-  if (entry) {
-    mcpEntryBySession.set(sessionId, { url: entry.url, headers: entry.headers ?? [] });
+  return entry ? { url: entry.url, headers: entry.headers ?? [] } : undefined;
+}
+
+function rememberChecksEntry(sessionId: string, mcpServers: unknown): void {
+  const checks = findHttpEntry(mcpServers, "monad-checks");
+  if (checks) {
+    mcpEntryBySession.set(sessionId, checks);
   }
+  const sessions = findHttpEntry(mcpServers, "monad-sessions");
+  if (sessions) {
+    sessionsEntryBySession.set(sessionId, sessions);
+  }
+}
+
+/** One MCP tools/call over an injected http entry, like the real vendor makes. */
+async function callMcpTool(
+  entry: HttpMcpEntry,
+  name: string,
+  args: unknown,
+): Promise<{ text: string; isError: boolean }> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+  };
+  for (const header of entry.headers) {
+    headers[header.name] = header.value;
+  }
+  const response = await fetch(entry.url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    return { text: `HTTP ${response.status}: ${text.slice(0, 200)}`, isError: true };
+  }
+  const dataLine = text.split("\n").find((line) => line.startsWith("data:"));
+  const parsed = JSON.parse(dataLine ? dataLine.slice("data:".length).trim() : text) as {
+    result?: { content?: Array<{ text?: string }>; isError?: boolean };
+    error?: { message?: string };
+  };
+  if (parsed.error) {
+    return { text: `error: ${parsed.error.message ?? "unknown"}`, isError: true };
+  }
+  return {
+    text: (parsed.result?.content ?? []).map((block) => block.text ?? "").join("\n"),
+    isError: parsed.result?.isError === true,
+  };
+}
+
+/**
+ * --link: `link:<tool> <json>` calls a monad-sessions tool and replies with
+ * its result, framed by a tool_call and its update like a real vendor turn.
+ */
+async function runLinkTurn(cx: AgentContext, sessionId: string, text: string): Promise<void> {
+  const match = text.match(/^link:(\S+)\s*([\s\S]*)$/);
+  const tool = match?.[1] ?? "";
+  const entry = sessionsEntryBySession.get(sessionId);
+  if (!entry) {
+    await notifyUpdate(cx, sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "link failed: no monad-sessions entry was injected" },
+    });
+    return;
+  }
+  const toolCallId = `link_${crypto.randomUUID()}`;
+  await notifyUpdate(cx, sessionId, {
+    sessionUpdate: "tool_call",
+    toolCallId,
+    title: `mcp__monad-sessions__${tool}`,
+    kind: "other",
+    status: "pending",
+    rawInput: {},
+  });
+  let result: { text: string; isError: boolean };
+  try {
+    result = await callMcpTool(entry, tool, match?.[2]?.trim() ? JSON.parse(match[2]) : {});
+  } catch (error) {
+    result = { text: `link failed: ${error instanceof Error ? error.message : String(error)}`, isError: true };
+  }
+  await notifyUpdate(cx, sessionId, {
+    sessionUpdate: "tool_call_update",
+    toolCallId,
+    status: result.isError ? "failed" : "completed",
+  });
+  await notifyUpdate(cx, sessionId, {
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text: result.text },
+  });
 }
 
 /**
@@ -197,6 +299,13 @@ async function runReviewTurn(cx: AgentContext, params: PromptRequest): Promise<v
  * daemon MCP tests use plain temp-dir cwds, which are recorded.
  */
 function recordMcpServers(cwd: string, method: string, mcpServers: unknown): void {
+  if (mcpLogPath) {
+    try {
+      appendFileSync(mcpLogPath, `${JSON.stringify({ method, cwd, mcpServers: mcpServers ?? [] })}\n`);
+    } catch {
+      // Recording must never break the protocol flow.
+    }
+  }
   try {
     if (existsSync(join(cwd, ".git"))) {
       return;
@@ -349,7 +458,10 @@ const app = agent({ name: "fake-agent" })
     if (!sessions.has(ctx.params.sessionId)) {
       throw RequestError.invalidParams(undefined, `unknown session ${ctx.params.sessionId}`);
     }
-    if (reviewBehavior) {
+    const text = promptText(ctx.params);
+    if (linkBehavior && text.startsWith("link:")) {
+      await runLinkTurn(ctx.client, ctx.params.sessionId, text);
+    } else if (reviewBehavior) {
       await runReviewTurn(ctx.client, ctx.params);
     } else {
       await runTurn(ctx.client, ctx.params);

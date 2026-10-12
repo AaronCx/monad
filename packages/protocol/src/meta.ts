@@ -37,3 +37,35 @@ export const MonadErrorNotificationSchema = z.looseObject({
   message: z.string(),
 });
 export type MonadErrorNotification = z.infer<typeof MonadErrorNotificationSchema>;
+
+/**
+ * _meta key on a prompt that a peer message (or a spawn) delivered:
+ * { messageId, from, hop }. It is how the daemon knows which queued
+ * peer_message a prompt delivered (so a restart does not deliver it twice)
+ * and what hop the target's turn is at (so its own sends carry hop + 1).
+ */
+export const PEER_META_KEY = "monad.sh/peer";
+
+export const PeerPromptMetaSchema = z.object({
+  messageId: z.string(),
+  from: z.string(),
+  hop: z.number().int().nonnegative(),
+});
+export type PeerPromptMeta = z.infer<typeof PeerPromptMetaSchema>;
+
+/**
+ * Extension notifications carrying a session's peer_message and access
+ * events to attached clients, live and on replay, so a human watching a
+ * session sees every message it receives and every session that reads it
+ * (decision record 0012). Like _monad.sh/error they are not session/update
+ * notifications and do not count toward the replay divider.
+ */
+export const PEER_MESSAGE_NOTIFICATION_METHOD = "_monad.sh/peer_message";
+export const ACCESS_NOTIFICATION_METHOD = "_monad.sh/access";
+
+/** Params of both notifications: the event payload plus its session and seq. */
+export const MonadLinkNotificationSchema = z.looseObject({
+  sessionId: z.string(),
+  seq: z.number().int().optional(),
+});
+export type MonadLinkNotification = z.infer<typeof MonadLinkNotificationSchema>;

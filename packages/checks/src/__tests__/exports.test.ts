@@ -91,6 +91,10 @@ describe("Engine public exports", () => {
       "detectLinter",
       "parseTscOutput",
       "parseTestCounts",
+      // Link redaction, decision record 0012.
+      "findSecretSpans",
+      "redactSecrets",
+      "redactSecretsInWindow",
     ];
     for (const key of expected) {
       expect(runtimeKeys).toContain(key);

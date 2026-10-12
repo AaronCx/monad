@@ -1,5 +1,5 @@
 import type { ContentBlock, SessionNotification, SessionUpdate } from "@agentclientprotocol/sdk";
-import type { MonadErrorNotification } from "@aaroncx/protocol";
+import type { MonadErrorNotification, MonadLinkNotification } from "@aaroncx/protocol";
 
 /**
  * Plain stdout rendering for run and attach. No TUI framework in M1.
@@ -21,7 +21,60 @@ export interface RendererOptions {
 
 type BufferedItem =
   | { type: "update"; params: SessionNotification }
-  | { type: "error"; params: MonadErrorNotification };
+  | { type: "error"; params: MonadErrorNotification }
+  | { type: "peer"; params: MonadLinkNotification }
+  | { type: "access"; params: MonadLinkNotification };
+
+/** Longest peer message body printed on its line; `monad show` has the rest. */
+const PEER_PREVIEW = 300;
+
+function str(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function shortId(value: unknown): string {
+  const id = str(value);
+  if (id === undefined) {
+    return "?";
+  }
+  return id === "human" ? "the human" : id.slice(0, 8);
+}
+
+function oneLine(text: string, max: number): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  const points = Array.from(collapsed);
+  return points.length <= max ? collapsed : `${points.slice(0, max).join("")}...`;
+}
+
+/**
+ * One line for a peer message a watched session received (monad Link). The
+ * body is shown as data, after a label the daemon's payload decides.
+ */
+export function formatPeerMessage(params: MonadLinkNotification): string {
+  const from = params.from === "human" ? "the human" : `session ${shortId(params.from)}`;
+  const title = str(params.fromTitle) ? ` ${JSON.stringify(params.fromTitle)}` : "";
+  const how = params.delivery === "queued" ? "queued for the next turn" : "delivered as a turn";
+  return `peer message from ${from}${title} (hop ${String(params.hop ?? "?")}, ${how}): ${oneLine(
+    str(params.text) ?? "",
+    PEER_PREVIEW,
+  )}`;
+}
+
+/** One line for an access event: who did what to this session, or it to whom. */
+export function formatAccess(params: MonadLinkNotification): string {
+  const op = str(params.op) ?? "?";
+  const parts =
+    params.role === "caller"
+      ? [`access: this session ran ${op}`, ...(str(params.target) ? [`on ${shortId(params.target)}`] : [])]
+      : [`access: ${params.by === "human" ? "the human" : `session ${shortId(params.by)}`} ran ${op} on this session`];
+  if (str(params.query)) {
+    parts.push(`for ${JSON.stringify(params.query)}`);
+  }
+  if (str(params.refused)) {
+    parts.push(`(refused: ${params.refused})`);
+  }
+  return parts.join(" ");
+}
 
 function contentText(block: ContentBlock): string {
   if (block.type === "text") {
@@ -65,6 +118,24 @@ export class Renderer {
     this.renderError(params);
   }
 
+  /** Handles one _monad.sh/peer_message notification (monad Link). */
+  onPeerMessage(params: MonadLinkNotification): void {
+    if (this.buffer) {
+      this.buffer.push({ type: "peer", params });
+      return;
+    }
+    this.renderLink("peer", params);
+  }
+
+  /** Handles one _monad.sh/access notification (monad Link). */
+  onAccess(params: MonadLinkNotification): void {
+    if (this.buffer) {
+      this.buffer.push({ type: "access", params });
+      return;
+    }
+    this.renderLink("access", params);
+  }
+
   /**
    * Called once the replay count is known (0 for run). Flushes the buffer;
    * anything beyond the count is live.
@@ -77,8 +148,10 @@ export class Renderer {
     for (const item of buffered) {
       if (item.type === "update") {
         this.renderUpdate(item.params);
-      } else {
+      } else if (item.type === "error") {
         this.renderError(item.params);
+      } else {
+        this.renderLink(item.type, item.params);
       }
     }
   }
@@ -196,6 +269,16 @@ export class Renderer {
         // plan, available_commands_update, usage_update, mode and config
         // changes: stored in the daemon's log, not rendered in M1.
         return;
+    }
+  }
+
+  private renderLink(type: "peer" | "access", params: MonadLinkNotification): void {
+    this.ensureLine();
+    const prefix = this.inReplay() ? this.dim("[replay] ") : "";
+    if (type === "peer") {
+      process.stdout.write(`${prefix}${formatPeerMessage(params)}\n`);
+    } else {
+      process.stdout.write(`${prefix}${this.dim(formatAccess(params))}\n`);
     }
   }
 

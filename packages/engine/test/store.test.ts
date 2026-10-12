@@ -176,3 +176,55 @@ describe("SessionStore sessions", () => {
     expect(() => store.setStatus(Bun.randomUUIDv7(), "idle")).toThrow(/unknown session/);
   });
 });
+
+describe("SessionStore Link bookkeeping", () => {
+  test("an access event is logged but does not move updatedAt", async () => {
+    const store = openStore();
+    const record = store.create(makeRecord({ updatedAt: "2026-01-01T00:00:00.000Z" }));
+    store.append(record.id, "access", { op: "read", by: "human", role: "target" });
+    expect(store.get(record.id)?.updatedAt).toBe("2026-01-01T00:00:00.000Z");
+    expect(store.replay(record.id).map((e) => e.kind)).toEqual(["access"]);
+    store.append(record.id, "peer_message", { text: "hi" });
+    expect(store.get(record.id)?.updatedAt).not.toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  test("handoff and summary events are logged but do not move updatedAt either", () => {
+    // Link phase 3: an idle session's handoff is written ten minutes after
+    // its last turn. If that counted as activity, every handoff would make
+    // the session look freshly active and reorder `monad ls` by when monad
+    // wrote about it.
+    const store = openStore();
+    const record = store.create(makeRecord({ updatedAt: "2026-01-01T00:00:00.000Z" }));
+    store.append(record.id, "handoff", { reason: "idle", text: "idle: nothing new" });
+    store.append(record.id, "summary", { text: "a summary" });
+    expect(store.get(record.id)?.updatedAt).toBe("2026-01-01T00:00:00.000Z");
+    expect(store.replay(record.id).map((e) => e.kind)).toEqual(["handoff", "summary"]);
+  });
+
+  test("lastEventOfKinds and lastEventsOfKind read the newest events without a full replay", () => {
+    const store = openStore();
+    const record = store.create(makeRecord());
+    const asks = ["one", "two", "three", "four"].map((text) =>
+      store.append(record.id, "prompt", { prompt: [{ type: "text", text }] }),
+    );
+    const ended = store.append(record.id, "turn_ended", { stopReason: "end_turn" });
+    store.append(record.id, "access", { op: "read", by: "human", role: "target" });
+    expect(store.lastEventOfKinds(record.id, ["prompt", "turn_ended", "error"])).toEqual(ended);
+    expect(store.lastEventOfKinds(record.id, ["error"])).toBeUndefined();
+    expect(store.lastEventOfKinds(record.id, [])).toBeUndefined();
+    expect(store.lastEventsOfKind(record.id, "prompt", 3).map((e) => e.seq)).toEqual(
+      asks.slice(1).map((e) => e.seq),
+    );
+    expect(store.lastEventsOfKind(record.id, "error", 3)).toEqual([]);
+  });
+
+  test("childrenOf returns the sessions a parent spawned, oldest first", () => {
+    const store = openStore();
+    const parent = store.create(makeRecord({ spawnDepth: 0 }));
+    const a = store.create(makeRecord({ parentId: parent.id, spawnDepth: 1, createdAt: "2026-01-01T00:00:01.000Z" }));
+    const b = store.create(makeRecord({ parentId: parent.id, spawnDepth: 1, createdAt: "2026-01-01T00:00:02.000Z" }));
+    store.create(makeRecord());
+    expect(store.childrenOf(parent.id).map((s) => s.id)).toEqual([a.id, b.id]);
+    expect(store.childrenOf(a.id)).toEqual([]);
+  });
+});
