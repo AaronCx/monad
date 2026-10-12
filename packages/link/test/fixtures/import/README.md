@@ -12,7 +12,8 @@ Small synthetic vendor logs modeled on the real formats on the Mac mini
   a slash command and its output, a task notification, the human's ask, an
   assistant message split across lines (thinking, text, tool_use), tool
   results (one failed), a turn end, a queued prompt, an API error line, a
-  compaction summary, and a sidechain line that belongs to a subagent.
+  compaction summary, a sidechain line that belongs to a subagent, and an
+  older Claude Code's `summary` line.
 - `claude/project/<id>/subagents/agent-a1.jsonl` (+ `.meta.json`): a
   subagent, and `workflows/wf_1/agent-w1.jsonl`: a workflow agent. The
   workflow's `journal.jsonl` is not a transcript and must be ignored.

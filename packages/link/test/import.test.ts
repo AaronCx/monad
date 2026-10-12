@@ -186,6 +186,8 @@ describe("Claude Code logs", () => {
     expect(all).not.toContain("Caveat: The messages below");
     expect(all).not.toContain("Set model to Opus");
     expect(all).not.toContain("a sidechain prompt");
+    // An older Claude Code's summary line is client bookkeeping too.
+    expect(all).not.toContain("Older Claude Code session summary");
     // Thinking is omitted, as for a live session.
     expect(all).not.toContain("secret scratch work");
 
