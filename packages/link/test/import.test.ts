@@ -420,7 +420,7 @@ describe("incremental, idempotent re-import", () => {
 });
 
 describe("what is skipped", () => {
-  test("a Claude Code log of a session monad ran is skipped, subagents included", async () => {
+  test("a log of a session monad ran is skipped, subagents included", async () => {
     const env = setup();
     const ran = env.h.manager.createRecord({ cwd: env.home });
     env.h.store.setAgentSessionId(ran.id, MAIN_ID);
@@ -431,6 +431,11 @@ describe("what is skipped", () => {
       Array(3).fill("monad ran this session; its own log is the canonical one"),
     );
     expect(env.h.store.get(MAIN_ID)).toBeUndefined();
+    // The same rule for a Codex session monad ran through codex-acp.
+    const codex = env.h.manager.createRecord({ cwd: env.home, backend: "codex-acp" });
+    env.h.store.setAgentSessionId(codex.id, CODEX_ID);
+    expect((await env.importer.run([env.codexLog])).skippedCount).toBe(1);
+    expect(env.h.store.get(CODEX_ID)).toBeUndefined();
   });
 
   test("the same log in two places is imported once; a copy takes over when the original is gone", async () => {

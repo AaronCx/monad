@@ -328,11 +328,11 @@ export class Importer {
       return;
     }
     // A session monad ran is filed under monad's own log; the vendor's copy
-    // of it (and its subagents) would be the same work twice.
-    if (
-      candidate.vendor === "claude-code" &&
-      (monadRan.has(sessionId) || (candidate.parentId !== undefined && monadRan.has(candidate.parentId)))
-    ) {
+    // of it (and its subagents) would be the same work twice. Measured for
+    // Claude Code (claude-agent-acp's session id is its log's file stem);
+    // applied to Codex too, where codex-acp's id is unmeasured (record 0012)
+    // but a match can only mean the same session.
+    if (monadRan.has(sessionId) || (candidate.parentId !== undefined && monadRan.has(candidate.parentId))) {
       this.skip(totals, path, "monad ran this session; its own log is the canonical one");
       return;
     }

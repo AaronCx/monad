@@ -411,9 +411,10 @@ changing. Imported events keep the log's timestamps and move `updatedAt` only fo
 imported session sorts by when it last did something, not by when monad read it. The
 `imports` table is not derived: it survives an index generation bump, as the events do.
 
-**Skips, and why.** A Claude Code log whose id is the `agentSessionId` of a session monad ran (and
-that log's subagents) is skipped: monad's own log of it is canonical, and importing the vendor's
-copy would file the same work twice. An id that belongs to a session monad ran is never touched.
+**Skips, and why.** A log whose id is the `agentSessionId` of a session monad ran (and that log's
+subagents) is skipped: monad's own log of it is canonical, and importing the vendor's copy would
+file the same work twice. Measured for Claude Code, where claude-agent-acp's session id is the
+log's file stem; applied to Codex logs too, where a match can only mean the same session. An id that belongs to a session monad ran is never touched.
 The same log in two places is imported once: a second path with an imported id is skipped while
 the first exists, and when the first is gone (Claude Code purged it) a copy whose prefix matches
 what was read takes over from the same offset. Each run returns a summary: files scanned and
