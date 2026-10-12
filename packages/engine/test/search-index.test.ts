@@ -432,14 +432,15 @@ describe("full-text index fed on append", () => {
         tool(busy.id, { title: "Edit ScrollBelief.swift", locations: [{ path: "/meshyy/ScrollBelief.swift" }] }),
       );
     }
+    // The worker's one row is a tool row too (prose would rank above every
+    // tool row; see the next test), but a long one, so bm25 ranks it last.
     store.append(
       worker.id,
-      "prompt",
-      prompt(
-        worker.id,
-        "the meshyy scroll bar goes yellow and says no previous window; the wheel lands on the tmux status row " +
-          "after a reconnect, and the alt screen belief is lost too, so look at how meshyy routes the swipe",
-      ),
+      "update",
+      tool(worker.id, {
+        title: "Read the meshyy scroll divergence audit notes for the reconnect and alt screen work",
+        locations: [{ path: "/meshyy/docs/qa/scroll-divergence-audit-notes-for-the-reconnect-work.md" }],
+      }),
     );
     const uncapped = store.search("meshyy scroll", { limit: 10 });
     expect(new Set(uncapped.map((h) => h.sessionId))).toEqual(new Set([busy.id]));
@@ -450,6 +451,52 @@ describe("full-text index fed on append", () => {
     expect(store.search("meshyy scroll", { limit: 2, maxPerSession: 3 })).toHaveLength(2);
     expect(store.search("meshyy scroll", { maxPerSession: Number.NaN })).toHaveLength(13);
     expect(store.search("meshyy scroll", { limit: 20, maxPerSession: 0 })).toHaveLength(2);
+  });
+
+  test("what a session said ranks above tool call rows that name the same words", () => {
+    // Measured live (acceptance run 1, 2026-10-12): bm25 normalizes by row
+    // length, so short tool rows (a Read of a brief whose file name holds
+    // both words) took the first sixteen hits for "meshyy scroll", and the
+    // session whose prompts reported the bug came seventeenth. The agent
+    // read the sessions that had only opened a file.
+    const dir = tempDir("monad-fts-");
+    const store = openStore(join(dir, "monad.db"));
+    const readers = [store.create(makeRecord()), store.create(makeRecord()), store.create(makeRecord())];
+    for (const reader of readers) {
+      store.append(
+        reader.id,
+        "update",
+        tool(reader.id, { title: "Read meshyy-scroll-brief.md", locations: [{ path: "/cc/meshyy-scroll-brief.md" }] }),
+      );
+    }
+    const worker = store.create(makeRecord());
+    store.append(
+      worker.id,
+      "prompt",
+      prompt(
+        worker.id,
+        "scrolling in tmux over meshyy still does nothing on my phone, and now the status bar flashes yellow " +
+          "with no previous window; over ssh it is fine. this is the fourth time I have reported the meshyy scroll bug",
+      ),
+    );
+    store.append(
+      worker.id,
+      "update",
+      chunk(
+        worker.id,
+        "Found it: the wheel lands on tmux's status row, which tmux binds to previous and next window, so the " +
+          "meshyy scroll bridge now clamps wheel rows off the bottom row. Two divergences stay deferred.",
+      ),
+    );
+    const hits = store.search("meshyy scroll", { limit: 10 });
+    expect(hits.slice(0, 2).map((h) => h.sessionId)).toEqual([worker.id, worker.id]);
+    expect(hits.slice(0, 2).map((h) => h.kind).sort()).toEqual(["agent", "prompt"]);
+    expect(hits.slice(2).every((h) => h.kind === "tool")).toBe(true);
+    expect(new Set(hits.slice(2).map((h) => h.sessionId))).toEqual(new Set(readers.map((r) => r.id)));
+    // The same order holds under the per-session cap Link applies.
+    expect(store.search("meshyy scroll", { limit: 1, maxPerSession: 3 })[0]?.sessionId).toBe(worker.id);
+    // A query only tool rows match still finds them.
+    expect(store.search("brief", { limit: 10 }).map((h) => h.kind)).toEqual(["tool", "tool", "tool"]);
   });
 
   test("a non-finite or out-of-range limit falls back or clamps instead of throwing", () => {

@@ -134,6 +134,13 @@ tool call naming one file) above a long discussion, so without the cap one busy 
 to the same file filled every slot: in acceptance run 1, 30 hits for "meshyy scrolling" came from
 8 sessions and the session that did the work was not among them.
 
+The cap alone was not enough. Tool call rows (a title and a few paths) are most of the index and,
+being short, win bm25 for any query that names a file or a topic; rerun on 2026-10-12, the first
+sixteen capped hits for "meshyy scroll" were all tool rows (Reads of a brief whose file name holds
+both words), `096c02c8`'s prompts came seventeenth, and the agent read the sessions that had only
+opened a file. So hits on what sessions said (prompts, agent text, errors, handoffs, summaries) come
+before hits on tool rows, each tier in bm25 order. A query only tool rows match still finds them.
+
 None of this makes prompt injection impossible. The claim is narrower and enforceable: whatever a
 quoted session says, the reader receives it marked as someone else's recorded words with known
 secrets removed, and the daemon decides what any session may do next.

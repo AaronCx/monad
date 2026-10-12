@@ -940,8 +940,19 @@ export class SessionStore {
   /**
    * Full-text search over every session's index. The query is free text
    * (see toFtsQuery for exactly how it is read); it never reaches MATCH as
-   * written. Hits are ordered by bm25 relevance, then newest first, and each
-   * carries the seq range of the log it came from.
+   * written. Hits from what sessions said (prompts, agent text, errors,
+   * handoffs, summaries) come before hits on tool call rows, each tier
+   * ordered by bm25 relevance, then newest first; each hit carries the seq
+   * range of the log it came from.
+   *
+   * The tiers exist because bm25 normalizes by row length. A tool call row is
+   * a title and a few paths, so a query naming a file or a topic matches it
+   * almost exactly, and most of the index is such rows. Measured live
+   * (acceptance run 1): for "meshyy scroll", every one of the first sixteen
+   * hits was a tool row (Reads of a brief whose file name holds both words,
+   * edits to ScrollOracle*.swift), and the session whose prompts reported
+   * the bug and whose replies explained each fix was seventeenth, behind
+   * sessions that had only opened a file. The agent read those instead.
    */
   search(query: string, options: SearchOptions = {}): SearchHit[] {
     const match = toFtsQuery(query);
@@ -1037,7 +1048,7 @@ export class SessionStore {
                 bm25(search_fts) AS rank
          FROM search_fts
          WHERE ${where.join(" AND ")}
-         ORDER BY rank ASC, ts DESC
+         ORDER BY (kind = 'tool') ASC, rank ASC, ts DESC
          LIMIT $limit`,
       )
       .all(params);
