@@ -1,3 +1,4 @@
+import { redactSecrets } from "@aaroncx/checks";
 import { peerMetaOf, toolCallPaths } from "@aaroncx/engine";
 import type { EventRecord } from "@aaroncx/protocol";
 
@@ -74,8 +75,13 @@ function seqLabel(first: number, last: number): string {
   return first === last ? `[seq ${first}]` : `[seq ${first}-${last}]`;
 }
 
+/**
+ * A one-line preview, redacted BEFORE it is cut: a token crossing the cut
+ * would otherwise leave a prefix its pattern no longer matches, which the
+ * redaction of the whole page (quote.ts) would then let through.
+ */
 function oneLine(text: string, max: number): string {
-  const collapsed = text.replace(/\s+/g, " ").trim();
+  const collapsed = redactSecrets(text).text.replace(/\s+/g, " ").trim();
   const points = Array.from(collapsed);
   return points.length <= max ? collapsed : `${points.slice(0, max).join("")}...`;
 }

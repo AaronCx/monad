@@ -27,6 +27,18 @@ const chunk = (text: string) => update({ sessionUpdate: "agent_message_chunk", c
 const all = { fromSeq: 0, limit: 200, maxBytes: 48 * 1024, hasMore: false };
 
 describe("normalizeTranscript", () => {
+  test("a token crossing a preview's cut is redacted, not cut into a prefix that survives", () => {
+    const token = ["ghp_", "aB3dE5fG7hJ9", "kL1mN3pQ5rS7", "tU9vW1xY3zA5"].join("");
+    const text = `${"word ".repeat(37)}token ${token} end`;
+    const events = log([
+      ["peer_message", { messageId: "m", from: Bun.randomUUIDv7(), to: SESSION, text, hop: 1, delivery: "queued" }],
+      ["summary", { text, summarizerSessionId: Bun.randomUUIDv7(), fromSeq: 1, toSeq: 1 }],
+    ]);
+    const page = normalizeTranscript(events, all);
+    expect(page.text).toContain("[REDAC");
+    expect(page.text).not.toContain("ghp_");
+  });
+
   test("a turn reads as prompt, coalesced agent text, collapsed tool calls and the turn end", () => {
     const events = log([
       ["prompt", { sessionId: SESSION, prompt: [{ type: "text", text: "fix the clamp" }] }],
