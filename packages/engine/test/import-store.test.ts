@@ -99,12 +99,41 @@ describe("SessionStore imports", () => {
 
   test("the events and the import state commit together or not at all", () => {
     const store = openStore();
-    // No such session and nothing to create it from: the event insert fails
-    // its foreign key, and the state written in the same transaction goes too.
+    // A batch that fails on its SECOND event, after the session row and the
+    // first event were written: none of it lands, the state included.
+    const unserializable = { kind: "prompt" as const, ts: "2026-07-29T15:01:01.000Z", payload: { n: 1n } };
     expect(() =>
-      store.appendImported({ sessionId: ID, events: [prompt("x", "2026-07-29T15:01:00.000Z")], state: state(10) }),
+      store.appendImported({
+        sessionId: ID,
+        create: importedRecord(),
+        events: [prompt("first", "2026-07-29T15:01:00.000Z"), unserializable],
+        state: state(10),
+      }),
     ).toThrow();
+    expect(store.get(ID)).toBeUndefined();
+    expect(store.replay(ID)).toEqual([]);
     expect(store.importState("/logs/a.jsonl")).toBeUndefined();
+    expect(store.search("first")).toEqual([]);
+
+    // The same after a batch that did commit: the log and the state stay
+    // exactly where that batch left them, so the next run neither repeats
+    // nor skips a line.
+    store.appendImported({
+      sessionId: ID,
+      create: importedRecord(),
+      events: [prompt("committed", "2026-07-29T15:01:00.000Z")],
+      state: state(10),
+    });
+    expect(() =>
+      store.appendImported({
+        sessionId: ID,
+        events: [prompt("second", "2026-07-29T15:02:00.000Z"), unserializable],
+        state: state(20),
+      }),
+    ).toThrow();
+    expect(store.replay(ID).map((event) => event.kind)).toEqual(["prompt"]);
+    expect(store.importState("/logs/a.jsonl")).toEqual(state(10));
+    expect(store.search("second")).toEqual([]);
   });
 
   test("a reset drops what was read from the file and keeps what monad wrote about the session", () => {
