@@ -329,3 +329,44 @@ export const AppendNoteResponseSchema = z.object({
   note: RepoNoteSchema,
 });
 export type AppendNoteResponse = z.infer<typeof AppendNoteResponseSchema>;
+
+/**
+ * Body of POST /v1/import (Link phase 4). Without paths the importer scans
+ * its configured roots (~/.claude/projects, ~/.codex/sessions and link.json
+ * import.roots); with paths it scans only those (files or directories), so
+ * `monad import --path P` imports one place without touching the rest.
+ */
+export const ImportRequestSchema = z.strictObject({
+  paths: z.array(z.string().min(1)).max(64).optional(),
+});
+export type ImportRequest = z.infer<typeof ImportRequestSchema>;
+
+/** One log file the importer recognized and did not import, and why. */
+export const ImportSkipSchema = z.object({
+  path: z.string(),
+  reason: z.string(),
+});
+export type ImportSkip = z.infer<typeof ImportSkipSchema>;
+
+/**
+ * Response of POST /v1/import: what one import run did. filesScanned counts
+ * every recognized vendor log it looked at (unchanged ones included);
+ * sessionsCreated and sessionsUpdated count sessions that gained events;
+ * sessionsReset counts sessions whose file was truncated or replaced and so
+ * were re-imported from the start. skipped lists recognized files left out
+ * with the reason (at most the first 100; skippedCount is the total).
+ */
+export const ImportSummarySchema = z.object({
+  roots: z.array(z.string()),
+  filesScanned: z.number().int().nonnegative(),
+  filesUnchanged: z.number().int().nonnegative(),
+  sessionsCreated: z.number().int().nonnegative(),
+  sessionsUpdated: z.number().int().nonnegative(),
+  sessionsReset: z.number().int().nonnegative(),
+  eventsAppended: z.number().int().nonnegative(),
+  linesMalformed: z.number().int().nonnegative(),
+  skipped: z.array(ImportSkipSchema),
+  skippedCount: z.number().int().nonnegative(),
+  durationMs: z.number().nonnegative(),
+});
+export type ImportSummary = z.infer<typeof ImportSummarySchema>;

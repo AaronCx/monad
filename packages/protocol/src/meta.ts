@@ -69,3 +69,19 @@ export const MonadLinkNotificationSchema = z.looseObject({
   seq: z.number().int().optional(),
 });
 export type MonadLinkNotification = z.infer<typeof MonadLinkNotificationSchema>;
+
+/**
+ * _meta key on every payload the importer appends to an imported session's
+ * log (Link phase 4): { source, line, vendor }, the vendor log file and the
+ * 1-based line the event was read from. It marks the event as history monad
+ * read, not something a monad session did, and lets a reader find the
+ * original line.
+ */
+export const IMPORTED_META_KEY = "monad.sh/imported";
+
+export const ImportedMetaSchema = z.object({
+  source: z.string(),
+  line: z.number().int().positive(),
+  vendor: z.enum(["claude-code", "codex"]),
+});
+export type ImportedMeta = z.infer<typeof ImportedMetaSchema>;
