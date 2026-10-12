@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -159,6 +160,42 @@ describe("SessionStore imports", () => {
     store.setAgentSessionId(ran.id, "vendor-1");
     store.appendImported({ sessionId: ID, create: importedRecord(), events: [], state: state(0) });
     expect([...store.agentSessionIds()]).toEqual(["vendor-1"]);
+    // A restore whose session/load failed started a fresh vendor session:
+    // the old vendor log is still monad's work.
+    store.setAgentSessionId(ran.id, "vendor-2");
+    expect(store.get(ran.id)?.agentSessionId).toBe("vendor-2");
+    expect([...store.agentSessionIds()].sort()).toEqual(["vendor-1", "vendor-2"]);
+  });
+
+  test("a database from before the id history recovers replaced ids from the error events", () => {
+    const dir = mkdtempSync(join(tmpdir(), "monad-import-store-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "monad.db");
+    const old = new SessionStore({ dbPath });
+    const now = new Date().toISOString();
+    const id = Bun.randomUUIDv7();
+    old.create({
+      id,
+      cwd: "/tmp",
+      backend: "claude-acp",
+      mode: "interactive",
+      status: "idle",
+      trust: "trusted",
+      createdAt: now,
+      updatedAt: now,
+    });
+    old.setAgentSessionId(id, "vendor-new");
+    // What claude.ts logs when session/load fails and it starts afresh.
+    old.append(id, "error", { message: "vendor session/load failed", agentSessionId: "vendor-old" });
+    old.append(id, "error", { message: "unrelated" });
+    old.close();
+    const raw = new Database(dbPath);
+    raw.exec("DROP TABLE agent_session_ids;");
+    raw.close();
+
+    const reopened = new SessionStore({ dbPath });
+    stores.push(reopened);
+    expect([...reopened.agentSessionIds()].sort()).toEqual(["vendor-new", "vendor-old"]);
   });
 });
 

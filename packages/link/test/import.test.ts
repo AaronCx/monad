@@ -582,6 +582,21 @@ describe("what is skipped", () => {
     expect(env.h.store.get(CODEX_ID)).toBeUndefined();
   });
 
+  test("a log monad ran stays skipped after a failed restore replaced its vendor id", async () => {
+    const env = setup();
+    const ran = env.h.manager.createRecord({ cwd: env.home });
+    env.h.store.setAgentSessionId(ran.id, MAIN_ID);
+    // session/load failed and the restore started a fresh vendor session;
+    // MAIN_ID's log is still on disk and still monad's work.
+    env.h.store.setAgentSessionId(ran.id, randomUUID());
+    const summary = await env.importer.run([join(env.logs, "claude")]);
+    expect(summary).toMatchObject({ sessionsCreated: 0, skippedCount: 3 });
+    expect(new Set(summary.skipped.map((skip) => skip.reason))).toEqual(
+      new Set(["monad ran this session; its own log is the canonical one"]),
+    );
+    expect(env.h.store.get(MAIN_ID)).toBeUndefined();
+  });
+
   test("the same log in two places is imported once; a copy takes over when the original is gone", async () => {
     const env = setup();
     const copyDir = join(env.root, "backup");

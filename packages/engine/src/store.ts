@@ -344,8 +344,45 @@ export class SessionStore {
         // Column already present.
       }
     }
+    this.createAgentSessionHistory();
     this.createIndexTables();
     this.backfillIndex();
+  }
+
+  /**
+   * Every vendor session id each session has had (agent_session_ids). A
+   * restore whose vendor session/load fails starts a fresh vendor session
+   * and replaces agent_session_id, but the vendor's log of the old one is
+   * still on disk, and the importer must still know monad ran it (see
+   * agentSessionIds). Not derived: a database from before this table gets
+   * it filled once, from the current ids and from the error events that
+   * recorded a replaced id (claude.ts writes the old id into them).
+   */
+  private createAgentSessionHistory(): void {
+    this.db.transaction(() => {
+      const exists = this.db
+        .query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_ids'")
+        .get();
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_session_ids (
+          session_id TEXT NOT NULL REFERENCES sessions(id),
+          agent_session_id TEXT NOT NULL,
+          PRIMARY KEY (session_id, agent_session_id)
+        );
+      `);
+      if (!exists) {
+        this.db.exec(`
+          INSERT OR IGNORE INTO agent_session_ids (session_id, agent_session_id)
+            SELECT id, agent_session_id FROM sessions WHERE agent_session_id IS NOT NULL;
+          INSERT OR IGNORE INTO agent_session_ids (session_id, agent_session_id)
+            SELECT session_id, id FROM (
+              SELECT session_id,
+                CASE WHEN json_valid(payload) THEN json_extract(payload, '$.agentSessionId') END AS id
+              FROM events WHERE kind = 'error'
+            ) WHERE typeof(id) = 'text';
+        `);
+      }
+    })();
   }
 
   /**
@@ -518,16 +555,21 @@ export class SessionStore {
   }
 
   /**
-   * The vendor session ids of every session monad itself ran. The importer
-   * skips a Claude Code log with one of these ids: monad's own log of that
-   * session is the canonical one, and importing the vendor's copy would
-   * file the same work twice.
+   * The vendor session ids of every session monad itself ran, including ids
+   * a session had before a failed restore replaced them. The importer skips
+   * a vendor log with one of these ids: monad's own log of that session is
+   * the canonical one, and importing the vendor's copy would file the same
+   * work twice.
    */
   agentSessionIds(): Set<string> {
     return new Set(
       this.db
         .query<{ agent_session_id: string }, []>(
-          "SELECT agent_session_id FROM sessions WHERE agent_session_id IS NOT NULL AND backend NOT LIKE 'import:%'",
+          `SELECT agent_session_id FROM sessions
+             WHERE agent_session_id IS NOT NULL AND backend NOT LIKE 'import:%'
+           UNION
+           SELECT h.agent_session_id FROM agent_session_ids h JOIN sessions s ON s.id = h.session_id
+             WHERE s.backend NOT LIKE 'import:%'`,
         )
         .all()
         .map((row) => row.agent_session_id),
@@ -815,15 +857,21 @@ export class SessionStore {
     }
   }
 
+  /** Sets the session's vendor session id, keeping every earlier one in agent_session_ids. */
   setAgentSessionId(id: SessionId, agentSessionId: string): void {
-    const result = this.db
-      .query(
-        "UPDATE sessions SET agent_session_id = $agentSessionId, updated_at = $updatedAt WHERE id = $id",
-      )
-      .run({ id, agentSessionId, updatedAt: new Date().toISOString() });
-    if (result.changes === 0) {
-      throw new Error(`setAgentSessionId: unknown session ${id}`);
-    }
+    this.db.transaction(() => {
+      const result = this.db
+        .query(
+          "UPDATE sessions SET agent_session_id = $agentSessionId, updated_at = $updatedAt WHERE id = $id",
+        )
+        .run({ id, agentSessionId, updatedAt: new Date().toISOString() });
+      if (result.changes === 0) {
+        throw new Error(`setAgentSessionId: unknown session ${id}`);
+      }
+      this.db
+        .query("INSERT OR IGNORE INTO agent_session_ids (session_id, agent_session_id) VALUES ($id, $agentSessionId)")
+        .run({ id, agentSessionId });
+    })();
   }
 
   /**

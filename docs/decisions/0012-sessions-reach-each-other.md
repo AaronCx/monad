@@ -414,8 +414,9 @@ changing. Imported events keep the log's timestamps and move `updatedAt` only fo
 imported session sorts by when it last did something, not by when monad read it. The
 `imports` table is not derived: it survives an index generation bump, as the events do.
 
-**Skips, and why.** A log whose id is the `agentSessionId` of a session monad ran (and that log's
-subagents) is skipped: monad's own log of it is canonical, and importing the vendor's copy would
+**Skips, and why.** A log whose id is an `agentSessionId` a session monad ran has ever had (and that
+log's subagents) is skipped; the store keeps every id a session has had, because a restore whose
+vendor `session/load` fails starts a fresh vendor session and the old one's log stays on disk: monad's own log of it is canonical, and importing the vendor's copy would
 file the same work twice. Measured for Claude Code, where claude-agent-acp's session id is the
 log's file stem; applied to Codex logs too, where a match can only mean the same session. An id that belongs to a session monad ran is never touched.
 The same log in two places is imported once: one path owns the session, and a second path with
