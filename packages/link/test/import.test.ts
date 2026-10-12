@@ -432,6 +432,19 @@ describe("incremental, idempotent re-import", () => {
     expect(await env.importer.run([big.path])).toMatchObject({ filesUnchanged: 1, eventsAppended: 0 });
   });
 
+  test("runs never overlap: two started together read each line once", async () => {
+    const env = setup();
+    const big = bigLog(env, 2500);
+    const [a, b] = await Promise.all([env.importer.run([big.path]), env.importer.run([big.path])]);
+    // The second run waited for the first, then found nothing new.
+    expect(a.eventsAppended).toBe(2501);
+    expect(b).toMatchObject({ filesUnchanged: 1, eventsAppended: 0 });
+    const prompts = promptTexts(env.h.store.replay(big.id));
+    expect(prompts).toHaveLength(2500);
+    expect(new Set(prompts).size).toBe(2500);
+    expect(ftsRows(env, big.id).filter((row) => row.kind === "prompt")).toHaveLength(2500);
+  });
+
   test("a truncated file is re-imported from the start: no duplicate index rows or repo tags, access kept", async () => {
     const env = setup();
     await env.importer.run([env.logs]);
