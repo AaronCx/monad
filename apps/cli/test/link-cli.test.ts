@@ -1,5 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Subprocess } from "bun";
@@ -9,8 +19,10 @@ import { formatAccess, formatPeerMessage } from "../src/render.ts";
 import { SUMMARY_TIMEOUT_MS } from "@aaroncx/protocol";
 import {
   cmdHandoff,
+  formatImportSummary,
   formatSessionRow,
   parseHandoffFlags,
+  parseImportFlags,
   parseLsFlags,
   parseNotesFlags,
   parseSearchFlags,
@@ -75,6 +87,43 @@ describe("handoff and notes flag parsing", () => {
     expect(() => parseNotesFlags([])).toThrow("needs a repository path");
     expect(() => parseNotesFlags(["/r", "--append"])).toThrow("--append needs the note text");
     expect(() => parseNotesFlags(["/r", "--delete"])).toThrow("unknown flag --delete");
+  });
+});
+
+describe("import flag parsing and summary", () => {
+  test("import takes any number of --path, resolved against the current directory", () => {
+    expect(parseImportFlags([])).toEqual({ paths: [] });
+    expect(parseImportFlags(["--path", "/abs/logs", "--path", "rel"])).toEqual({
+      paths: ["/abs/logs", join(process.cwd(), "rel")],
+    });
+    expect(() => parseImportFlags(["--path"])).toThrow("--path needs a file or directory");
+    expect(() => parseImportFlags(["/abs"])).toThrow("unknown flag /abs");
+  });
+
+  test("the summary says what changed and what was skipped, and why", () => {
+    const base = {
+      roots: ["/logs"],
+      filesScanned: 3,
+      filesUnchanged: 1,
+      sessionsCreated: 1,
+      sessionsUpdated: 1,
+      sessionsReset: 1,
+      eventsAppended: 42,
+      linesMalformed: 2,
+      skipped: [{ path: "/logs/a.jsonl", reason: "monad ran this session; its own log is the canonical one" }],
+      skippedCount: 3,
+      durationMs: 1234,
+    };
+    expect(formatImportSummary(base)).toEqual([
+      "scanned 3 log file(s) under /logs in 1.2s",
+      "imported 42 event(s): 1 new session(s), 1 updated, 1 re-read from the start (truncated or replaced)",
+      "skipped 2 malformed line(s)",
+      "skipped /logs/a.jsonl: monad ran this session; its own log is the canonical one",
+      "... and 2 more skipped",
+    ]);
+    expect(
+      formatImportSummary({ ...base, eventsAppended: 0, sessionsReset: 0, linesMalformed: 0, skipped: [], skippedCount: 0 }),
+    ).toEqual(["scanned 3 log file(s) under /logs in 1.2s", "nothing new to import"]);
   });
 });
 
@@ -314,6 +363,40 @@ describe("monad search, show, send, ls and title against monadd", () => {
     // The fake agent echoes its prompt: the summarizer saw quoted, redacted history.
     expect(written.out).toContain("echo: Summarize monad session");
     expect(written.out).not.toContain(PLANTED_TOKEN);
+  }, 30_000);
+
+  test("import --path reads a Codex log into a session that shows and searches but never lists by default", async () => {
+    const fixture = new URL(
+      "../../../packages/link/test/fixtures/import/codex/2026/02/05/rollout-2026-02-05T21-42-28-019c30d4-0000-7462-95a2-4e1fda3b0001.jsonl",
+      import.meta.url,
+    ).pathname;
+    const logs = join(home, "codex-logs");
+    mkdirSync(logs);
+    writeFileSync(
+      join(logs, "rollout-2026-02-05T21-42-28-019c30d4-0000-7462-95a2-4e1fda3b0001.jsonl"),
+      readFileSync(fixture, "utf8")
+        .replaceAll("{{HOME}}", home)
+        .replaceAll("{{REPO_A}}", repo)
+        .replaceAll("{{REPO_B}}", repo),
+    );
+    const first = await monad("import", "--path", logs);
+    expect(first.code).toBe(0);
+    expect(first.out).toContain(`scanned 1 log file(s) under ${logs}`);
+    expect(first.out).toMatch(/imported \d+ event\(s\): 1 new session\(s\), 0 updated/);
+    const again = await monad("import", "--path", logs);
+    expect(again.out).toContain("nothing new to import");
+
+    const shown = await monad("show", "019c30d4-0000");
+    expect(shown.code).toBe(0);
+    expect(shown.out).toContain("user: Make the build green in repo B");
+    expect(shown.out).toContain("session created in");
+    expect((await monad("search", "build", "green")).out).toContain("019c30d4-0000-7462-95a2-4e1fda3b0001");
+    // Plain ls hides imported logs; --all shows them.
+    expect((await monad("ls")).out).not.toContain("019c30d4-0000");
+    expect((await monad("ls", "--all")).out).toContain("019c30d4-0000-7462-95a2-4e1fda3b0001  imported");
+    const send = await monad("send", "019c30d4-0000", "hello?");
+    expect(send.code).toBe(1);
+    expect(send.err).toContain("is imported");
   }, 30_000);
 
   test("errors are one line, not a stack", async () => {

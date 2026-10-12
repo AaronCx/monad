@@ -23,6 +23,7 @@ import {
 import { cmdGc } from "./gc.ts";
 import {
   cmdHandoff,
+  cmdImport,
   cmdLs,
   cmdNotes,
   cmdSearch,
@@ -30,6 +31,7 @@ import {
   cmdShow,
   cmdTitle,
   parseHandoffFlags,
+  parseImportFlags,
   parseLsFlags,
   parseNotesFlags,
   parseSearchFlags,
@@ -66,6 +68,9 @@ function usage(): string {
     "  handoff <id> [--summarize]       write a session's handoff now (--summarize:",
     "                                   also a model-written summary; spends tokens)",
     "  notes <repo> [--append text]     a repo's notes, or add one",
+    "  import [--path P ...]            read Claude Code and Codex logs into read-only",
+    "                                   sessions (default: ~/.claude/projects,",
+    "                                   ~/.codex/sessions and link.json import.roots)",
     "  daemon start|stop|status         manage monadd",
     "  acp-stdio                        stdio<->daemon ACP bridge for editors",
     "  --version                        print the version and exit",
@@ -349,6 +354,9 @@ try {
     }
     case "notes":
       await cmdNotes(await ensureDaemon(), parseNotesFlags(rest));
+      break;
+    case "import":
+      await cmdImport(await ensureDaemon(), parseImportFlags(rest));
       break;
     case "daemon":
       await cmdDaemon(rest);

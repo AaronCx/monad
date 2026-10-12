@@ -2,6 +2,8 @@ import { resolve as resolvePath } from "node:path";
 import {
   AppendNoteResponseSchema,
   HandoffResponseSchema,
+  type ImportSummary,
+  ImportSummarySchema,
   ListSessionsResponseSchema,
   NotesResponseSchema,
   type SessionRecord,
@@ -16,7 +18,7 @@ import { parseOlderThanDays } from "./gc.ts";
 
 /**
  * monad Link from the terminal (decision record 0012): search, show, send,
- * ls --repo/--all, title, handoff and notes. Every command is a thin call to a /v1 route,
+ * ls --repo/--all, title, handoff, notes and import. Every command is a thin call to a /v1 route,
  * which runs the daemon's one LinkService with the human as the caller, so
  * the CLI reaches exactly what an agent reaches, through the same checks,
  * and every read lands on the target's log as an access event.
@@ -403,5 +405,73 @@ export async function cmdNotes(handle: DaemonHandle, flags: NotesFlags): Promise
     for (const line of rest) {
       console.log(`    ${line}`);
     }
+  }
+}
+
+export interface ImportFlags {
+  /** Only these files or directories; empty means the daemon's configured roots. */
+  paths: string[];
+}
+
+/** monad import [--path P ...]: each --path is resolved against the current directory. */
+export function parseImportFlags(argv: string[]): ImportFlags {
+  const paths: string[] = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i] as string;
+    if (arg === "--path") {
+      paths.push(absolute(needValue(argv, ++i, arg, "a file or directory")));
+    } else {
+      throw new Error(`unknown flag ${arg}`);
+    }
+  }
+  return { paths };
+}
+
+/**
+ * How long `monad import` waits for the daemon. A first import of a large
+ * ~/.claude/projects reads every log once (about 2 s per 150 MB measured on
+ * the Mac mini), and Bun's fetch would give up on a response idle for five
+ * minutes.
+ */
+export const IMPORT_REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** The lines `monad import` prints for a run's summary. */
+export function formatImportSummary(summary: ImportSummary): string[] {
+  const seconds = (summary.durationMs / 1000).toFixed(1);
+  const lines = [`scanned ${summary.filesScanned} log file(s) under ${summary.roots.join(", ")} in ${seconds}s`];
+  if (summary.eventsAppended === 0 && summary.sessionsReset === 0) {
+    lines.push("nothing new to import");
+  } else {
+    const reset =
+      summary.sessionsReset > 0 ? `, ${summary.sessionsReset} re-read from the start (truncated or replaced)` : "";
+    lines.push(
+      `imported ${summary.eventsAppended} event(s): ${summary.sessionsCreated} new session(s), ${summary.sessionsUpdated} updated${reset}`,
+    );
+  }
+  if (summary.linesMalformed > 0) {
+    lines.push(`skipped ${summary.linesMalformed} malformed line(s)`);
+  }
+  for (const skip of summary.skipped) {
+    lines.push(`skipped ${skip.path}: ${skip.reason}`);
+  }
+  if (summary.skippedCount > summary.skipped.length) {
+    lines.push(`... and ${summary.skippedCount - summary.skipped.length} more skipped`);
+  }
+  return lines;
+}
+
+/**
+ * monad import: reads Claude Code and Codex logs into read-only sessions
+ * (Link phase 4). They show up in `monad search`, `monad show` and
+ * `monad ls --all`; they can never be attached or messaged.
+ */
+export async function cmdImport(handle: DaemonHandle, flags: ImportFlags): Promise<void> {
+  const summary = ImportSummarySchema.parse(
+    await sendJson(handle, "POST", "/v1/import", flags.paths.length > 0 ? { paths: flags.paths } : {}, {
+      timeoutMs: IMPORT_REQUEST_TIMEOUT_MS,
+    }),
+  );
+  for (const line of formatImportSummary(summary)) {
+    console.log(line);
   }
 }
