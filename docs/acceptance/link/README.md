@@ -87,6 +87,9 @@ Other things worth knowing:
 
 - A multi-word `sessions_search` query matches only rows holding every word (FTS5's implicit
   AND). In run 1 attempt 11 two long natural-language queries inside one session returned 0 hits.
+  Fixed after the runs: when no row matches every term, search falls back to rows matching any
+  term, ranked by bm25 (commit "fix(engine): fall back to any term when no row matches every
+  search term"). Run 1 was not rerun after this change.
 - Importing `~/.claude/projects` imports the importing operator's own transcripts. Acceptance
   runs on this Mac must exclude the orchestration's logs (run 1 explains how this was done).
 - Run 3's child reported the checks as failed: `typecheck` could not run (`turbo: command not
