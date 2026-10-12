@@ -287,6 +287,21 @@ describe("Claude Code logs", () => {
     );
   });
 
+  test("a subagent read again from the start keeps the description its parent gave it", async () => {
+    const env = setup();
+    await env.importer.run([env.logs]);
+    const subagentLog = join(dirname(env.mainLog), MAIN_ID, "subagents", "agent-a1.jsonl");
+    const child = env.h.store.childrenOf(MAIN_ID).find((record) => record.cwd === env.repoA);
+    expect(child?.title).toBe("Reproduce the scroll bug");
+    // Rewritten shorter, with a different first prompt: a reset.
+    const first = readFileSync(subagentLog, "utf8").split("\n")[0] ?? "";
+    writeFileSync(subagentLog, `${first.replace("Reproduce the scroll bug in", "A different prompt now, about")}\n`);
+    const summary = await env.importer.run([subagentLog]);
+    expect(summary.sessionsReset).toBe(1);
+    expect(env.h.store.get(child?.id ?? "")).toMatchObject({ title: "Reproduce the scroll bug", titleSource: "import" });
+    expect(promptTexts(env.h.store.replay(child?.id ?? ""))[0]).toStartWith("A different prompt now");
+  });
+
   test("tool output is cut to 4 KiB", async () => {
     const env = setup();
     appendFileSync(

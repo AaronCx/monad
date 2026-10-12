@@ -436,15 +436,18 @@ export class Importer {
     let titled = record?.titleSource === "import" || record?.titleSource === "manual";
     // A subagent is named by the description its parent gave it (redacted
     // and cut like any derived title), which says more than its prompt's
-    // first line.
-    const description = candidate.kind === "subagent" && !record ? subagentDescription(candidate.path) : undefined;
+    // first line. Read whenever the session has no imported or human title
+    // yet, so a session read again after a reset is named as it was.
+    const description = candidate.kind === "subagent" && !titled ? subagentDescription(candidate.path) : undefined;
     const subagentTitle =
       description === undefined ? undefined : deriveTitle({ prompt: [{ type: "text", text: description }] });
     // A session's log starts with session_created, as a live one does (it
     // tags the cwd's repository when the cwd is in one). A reset removed it,
     // so it is written again before the first event read back.
     let announce = !record || this.store.lastEventOfKind(sessionId, "session_created") === undefined;
-    let pendingTitle: string | undefined;
+    // A pending title outranks the first ask's, which consume() only
+    // derives while there is none.
+    let pendingTitle: string | undefined = subagentTitle;
     let firstCwd: string | undefined = record?.cwd;
     let firstTs: string | undefined = record?.createdAt;
     const ctx: LineContext = {
