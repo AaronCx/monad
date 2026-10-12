@@ -17,8 +17,9 @@ import { dirname, join, relative } from "node:path";
 import { importedSessionRefusal } from "@aaroncx/engine";
 import { type EventRecord, IMPORTED_META_KEY, SessionIdSchema } from "@aaroncx/protocol";
 import { ImportDisabledError, Importer } from "../src/import/importer.ts";
+import { ImportWatcher } from "../src/import/watch.ts";
 import { LinkError } from "../src/service.ts";
-import { type Harness, makeHarness, PLANTED_TOKEN } from "./helpers.ts";
+import { type Harness, makeHarness, PLANTED_TOKEN, waitFor } from "./helpers.ts";
 
 /**
  * The vendor log importer (monad Link phase 4, decision record 0012) against
@@ -587,3 +588,39 @@ describe("an imported session is read-only", () => {
   });
 });
 
+describe("the import watcher", () => {
+  test("imports at start, then again after appended lines settle", async () => {
+    const env = setup();
+    const importer = new Importer({
+      store: env.h.store,
+      config: { enabled: true, watch: true, roots: [join(env.logs, "claude")] },
+      home: env.home,
+    });
+    const runs: number[] = [];
+    const watcher = new ImportWatcher({
+      importer,
+      debounceMs: 100,
+      onRun: (summary) => runs.push(summary.eventsAppended),
+    });
+    watcher.start();
+    try {
+      await waitFor(() => runs.length >= 1, "the first run", 5_000);
+      expect(env.h.store.get(MAIN_ID)?.status).toBe("imported");
+      const before = env.h.store.replay(MAIN_ID).length;
+      appendFileSync(
+        env.mainLog,
+        claudeLine(env, {
+          type: "user",
+          timestamp: "2026-07-29T18:00:00.000Z",
+          message: { role: "user", content: "watched line" },
+        }),
+      );
+      await waitFor(() => env.h.store.replay(MAIN_ID).length === before + 1, "the watched line", 5_000);
+      // The run that read it reports exactly that line (its summary lands
+      // just after the store does).
+      await waitFor(() => runs.includes(1), "the watched run's summary", 5_000);
+    } finally {
+      watcher.stop();
+    }
+  });
+});

@@ -19,3 +19,4 @@ export {
   subagentSessionId,
 } from "./import/common.ts";
 export * from "./import/importer.ts";
+export * from "./import/watch.ts";
