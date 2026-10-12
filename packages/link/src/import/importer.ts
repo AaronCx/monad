@@ -421,13 +421,18 @@ export class Importer {
     let lineCount = state?.line ?? 0;
     let batch: ImportedEventInput[] = [];
 
-    const flush = () => {
+    // `atEnd` is false for a flush in the middle of the file. Its state then
+    // records the size as the bytes read so far, not the file's: the run may
+    // stop before the next flush (the daemon shutting down, a store error),
+    // and a state claiming the whole file would make the next run skip the
+    // file as unchanged, losing everything after this batch for good.
+    const flush = (atEnd: boolean) => {
       const save: ImportState = {
         sourcePath: candidate.path,
         sessionId,
         vendor: candidate.vendor,
         offset,
-        size: file.size,
+        size: atEnd ? file.size : offset,
         mtimeMs: file.mtimeMs,
         ino: file.ino,
         line: lineCount,
@@ -537,7 +542,7 @@ export class Importer {
         consume(data.subarray(start, newline), dataStart + newline + 1);
         start = newline + 1;
         if (batch.length >= IMPORT_BATCH) {
-          flush();
+          flush(false);
           await yieldToEventLoop();
         }
       }
@@ -553,7 +558,7 @@ export class Importer {
       state.mtimeMs !== file.mtimeMs ||
       state.ino !== file.ino;
     if (batch.length > 0 || moved) {
-      flush();
+      flush(true);
     }
   }
 }

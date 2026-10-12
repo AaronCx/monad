@@ -12,6 +12,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { importedSessionRefusal } from "@aaroncx/engine";
@@ -145,6 +146,30 @@ function ftsRows(env: Env, sessionId: string): Array<{ kind: string; text: strin
 
 function claudeLine(env: Env, fields: Record<string, unknown>): string {
   return `${JSON.stringify({ sessionId: MAIN_ID, cwd: env.home, isSidechain: false, ...fields })}\n`;
+}
+
+/** A Claude Code log of `lines` asks, more than one import batch, in a directory of its own. */
+function bigLog(env: Env, lines: number): { path: string; id: string } {
+  const id = randomUUID();
+  const dir = join(env.root, "big");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${id}.jsonl`);
+  const parts: string[] = [];
+  for (let i = 0; i < lines; i += 1) {
+    parts.push(
+      `${JSON.stringify({
+        sessionId: id,
+        cwd: env.home,
+        isSidechain: false,
+        type: "user",
+        timestamp: new Date(Date.UTC(2026, 6, 29, 15, 0, i)).toISOString(),
+        origin: { kind: "human" },
+        message: { role: "user", content: `ask number ${i}` },
+      })}\n`,
+    );
+  }
+  writeFileSync(path, parts.join(""));
+  return { path, id };
 }
 
 describe("Claude Code logs", () => {
@@ -374,6 +399,37 @@ describe("incremental, idempotent re-import", () => {
     expect(env.h.store.replay(MAIN_ID)).toHaveLength(before + 1);
     expect(promptTexts(env.h.store.replay(MAIN_ID)).at(-1)).toBe("half written ask about the scrollback");
     expect(env.h.store.importState(env.mainLog)?.offset).toBe(statSync(env.mainLog).size);
+  });
+
+  test("a run that stops partway through a file resumes where it stopped, reading each line once", async () => {
+    const env = setup();
+    const big = bigLog(env, 2500);
+    const store = env.h.store;
+    const appendImported = store.appendImported.bind(store);
+    // The run stops after its first committed batch (the daemon shutting
+    // down mid-import closes the store under it the same way).
+    let calls = 0;
+    store.appendImported = (batch) => {
+      calls += 1;
+      if (calls === 2) {
+        throw new Error("simulated stop");
+      }
+      return appendImported(batch);
+    };
+    const stopped = await env.importer.run([big.path]);
+    expect(stopped.skipped).toEqual([{ path: big.path, reason: "unreadable: simulated stop" }]);
+    expect(promptTexts(store.replay(big.id))).toHaveLength(1000);
+    store.appendImported = appendImported;
+
+    // The file did not change, but it was not read to the end: the next run
+    // is not fooled into skipping it as unchanged.
+    const resumed = await env.importer.run([big.path]);
+    expect(resumed).toMatchObject({ filesUnchanged: 0, sessionsReset: 0, eventsAppended: 1500 });
+    const prompts = promptTexts(store.replay(big.id));
+    expect(prompts).toHaveLength(2500);
+    expect(new Set(prompts).size).toBe(2500);
+    expect(prompts.at(-1)).toBe("ask number 2499");
+    expect(await env.importer.run([big.path])).toMatchObject({ filesUnchanged: 1, eventsAppended: 0 });
   });
 
   test("a truncated file is re-imported from the start: no duplicate index rows or repo tags, access kept", async () => {
