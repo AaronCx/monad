@@ -155,11 +155,11 @@ describe("trust table", () => {
 
     // Search is scoped the same way: out-of-scope history never comes back.
     h.history(b.id, [["prompt", userPrompt(b.id, "the zanzibar clamp broke")]]);
-    h.history(a.id, [["prompt", userPrompt(a.id, "zanzibar in scope")]]);
+    const c = await h.session(inScope);
+    h.history(c.id, [["prompt", userPrompt(c.id, "zanzibar in scope")]]);
     expect(h.link.search({ kind: "human" }, "zanzibar").map((hit) => hit.sessionId)).toContain(b.id);
     const scoped = h.link.search({ kind: "session", id: a.id }, "zanzibar").map((hit) => hit.sessionId);
-    expect(scoped).toContain(a.id);
-    expect(scoped).not.toContain(b.id);
+    expect(scoped).toEqual([c.id]);
     expect(accessEvents(h.store, b.id).filter((e) => e.op === "search" && e.by === a.id)).toEqual([]);
 
     // And so is spawn: a session in scope cannot start a child outside it.
@@ -823,6 +823,22 @@ describe("sessions_read and sessions_search", () => {
     const hits = h.link.search(reader, "quokka", { limit: 5 });
     expect(hits.filter((hit) => hit.sessionId === busy.id)).toHaveLength(3);
     expect(hits.map((hit) => hit.sessionId)).toContain(worker.id);
+  });
+
+  test("a session's search leaves out its own log; the human's search does not", async () => {
+    // Measured live (acceptance run 1): the asking session's own prompt and
+    // reply matched its query best and took hits two and five.
+    const h = harness();
+    const asker = await h.session();
+    const other = await h.session();
+    h.history(asker.id, [["prompt", userPrompt(asker.id, "what broke with the wombat scroll?")]]);
+    h.history(other.id, [["prompt", userPrompt(other.id, `the wombat scroll ${"report ".repeat(40)}`)]]);
+    const hits = h.link.search({ kind: "session", id: asker.id }, "wombat scroll");
+    expect(hits.map((hit) => hit.sessionId)).toEqual([other.id]);
+    expect(accessEvents(h.store, asker.id).filter((e) => e.role === "target")).toEqual([]);
+    expect(new Set(h.link.search({ kind: "human" }, "wombat scroll").map((hit) => hit.sessionId))).toEqual(
+      new Set([asker.id, other.id]),
+    );
   });
 
   test("a search query is redacted in the access record", async () => {

@@ -89,7 +89,7 @@ const TOOL_DEFINITIONS: Record<
   sessions_search: {
     name: "sessions_search",
     description:
-      "Full-text search over every session's history (prompts, agent replies, tool call titles and " +
+      "Full-text search over every other session's history (prompts, agent replies, tool call titles and " +
       "paths, errors). Returns hits with the session id and the seq range to read with sessions_read, " +
       "at most three per session, so the hits name as many sessions as they can. Prompts and replies " +
       "rank above tool call rows, best ranked first within each.",

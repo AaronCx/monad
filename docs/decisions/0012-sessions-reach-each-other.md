@@ -140,6 +140,9 @@ sixteen capped hits for "meshyy scroll" were all tool rows (Reads of a brief who
 both words), `096c02c8`'s prompts came seventeenth, and the agent read the sessions that had only
 opened a file. So hits on what sessions said (prompts, agent text, errors, handoffs, summaries) come
 before hits on tool rows, each tier in bm25 order. A query only tool rows match still finds them.
+A session's search leaves out its own log: its question matches its own query best, and with prose
+ranked first its own prompt and reply took hits two and five. The human's search, which has no
+log of its own, is unchanged.
 
 None of this makes prompt injection impossible. The claim is narrower and enforceable: whatever a
 quoted session says, the reader receives it marked as someone else's recorded words with known

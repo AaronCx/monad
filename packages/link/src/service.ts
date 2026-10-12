@@ -415,8 +415,12 @@ export class LinkService {
       // A summarizer's prompt is a quoted copy of its target's transcript:
       // a hit there would be a read of the target that lands on the wrong
       // log, and a duplicate of a hit on the target itself (whose summary
-      // is indexed on its own log).
-      excludeSessionIds: this.summarizerIds(),
+      // is indexed on its own log). A session's own log is not history it
+      // needs to search: its question matches its own query best, so it
+      // took the first slots (measured live, acceptance run 1: the caller's
+      // own prompt and reply were hits two and five of its search).
+      excludeSessionIds:
+        caller.kind === "session" ? [...this.summarizerIds(), caller.id] : this.summarizerIds(),
       // Hits name sessions to read, so they should name as many distinct
       // sessions as they can: measured live (acceptance run 1), 30 hits for
       // "meshyy scrolling" came from 8 sessions, ten of them one session's
