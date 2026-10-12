@@ -377,6 +377,7 @@ describe("titles", () => {
 describe("toFtsQuery", () => {
   test("terms are quoted, joined with AND, and the last bare term is a prefix", () => {
     expect(toFtsQuery("meshyy scroll")).toBe('"meshyy" "scroll"*');
+    expect(toFtsQuery("meshyy scroll", "any")).toBe('"meshyy" OR "scroll"*');
   });
 
   test("quoted phrases stay phrases and are not prefixed", () => {

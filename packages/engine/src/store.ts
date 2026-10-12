@@ -1007,6 +1007,15 @@ export class SessionStore {
     let rows: SearchRow[];
     try {
       rows = this.runSearch(where, params);
+      // Every term must match by default, so a long question in plain words
+      // finds nothing when no single row holds all of them (measured live,
+      // acceptance run 1: "deferred remaining not fixed dead window
+      // alt-screen belief" returned 0 hits). Only then, fall back to rows
+      // matching any term; bm25 still ranks rows that match more terms first.
+      const anyMatch = rows.length === 0 ? toFtsQuery(query, "any") : undefined;
+      if (anyMatch !== undefined && anyMatch !== match) {
+        rows = this.runSearch(where, { ...params, match: anyMatch });
+      }
     } catch (error) {
       // toFtsQuery's output should never be a bad MATCH expression; if one
       // ever is, a query the user typed is not a server error. Anything

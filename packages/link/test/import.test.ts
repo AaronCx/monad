@@ -518,7 +518,7 @@ describe("incremental, idempotent re-import", () => {
     );
     // Repo B was only reached by the dropped Bash call.
     expect(env.h.store.reposFor(MAIN_ID).map((repo) => repo.repoRoot)).toEqual([env.repoA]);
-    expect(env.h.store.search("status-row clamp", {})).toEqual([]);
+    expect(env.h.store.search('"status-row clamp"', {})).toEqual([]);
     // The record of who read it survives the reset.
     expect(env.h.store.replayKinds(MAIN_ID, ["access"])).toHaveLength(1);
     expect(env.h.store.get(MAIN_ID)?.title).toStartWith("Why does scrolling");
@@ -538,7 +538,7 @@ describe("incremental, idempotent re-import", () => {
     const summary = await env.importer.run([env.mainLog]);
     expect(summary).toMatchObject({ sessionsReset: 1, linesMalformed: 0 });
     expect(env.h.store.search("status-row brace").map((hit) => hit.sessionId)).toEqual([MAIN_ID]);
-    expect(env.h.store.search("status-row clamp")).toEqual([]);
+    expect(env.h.store.search('"status-row clamp"')).toEqual([]);
   });
 
   test("a file replaced by a new one (new inode) is re-imported, even when both its ends match", async () => {
@@ -570,7 +570,7 @@ describe("incremental, idempotent re-import", () => {
     const summary = await env.importer.run([env.mainLog]);
     expect(summary).toMatchObject({ sessionsReset: 1, linesMalformed: 0 });
     expect(env.h.store.search("status-row brace").map((hit) => hit.sessionId)).toEqual([MAIN_ID]);
-    expect(env.h.store.search("status-row clamp")).toEqual([]);
+    expect(env.h.store.search('"status-row clamp"')).toEqual([]);
 
     // The same file imported into an empty store is the reference.
     const fresh = setup();
@@ -592,7 +592,7 @@ describe("incremental, idempotent re-import", () => {
     expect(promptTexts(env.h.store.replay(CODEX_ID))).toEqual(["Make the tests green in repo B"]);
     expect(env.h.store.get(CODEX_ID)?.title).toBe("Make the tests green in repo B");
     expect(ftsRows(env, CODEX_ID)).toHaveLength(before);
-    expect(env.h.store.search("build green")).toEqual([]);
+    expect(env.h.store.search('"build green"')).toEqual([]);
   });
 });
 
@@ -711,7 +711,7 @@ describe("what is skipped", () => {
     expect(env.h.store.replay(MAIN_ID)).toHaveLength(events);
     expect(env.h.store.importState(env.mainLog)?.sessionId).toBe(MAIN_ID);
     expect(env.h.store.search("status-row clamp").map((hit) => hit.sessionId)).toEqual([MAIN_ID]);
-    expect(env.h.store.search("status-row brace")).toEqual([]);
+    expect(env.h.store.search('"status-row brace"')).toEqual([]);
   });
 
   test("a copy imported first gives way to the original when the original grows", async () => {

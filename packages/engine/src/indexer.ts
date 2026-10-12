@@ -441,7 +441,7 @@ function hasToken(text: string): boolean {
  * Elements join with spaces, which FTS5 reads as AND. Returns undefined when
  * nothing searchable is left, and the caller returns no hits.
  */
-export function toFtsQuery(input: string): string | undefined {
+export function toFtsQuery(input: string, join: "all" | "any" = "all"): string | undefined {
   // NUL never belongs in a query; the rest of the control range is harmless
   // inside a quoted string. A lone UTF-16 surrogate (JSON `"\ud800"` decodes
   // to one) is not: bun:sqlite encodes it together with the code unit after
@@ -486,5 +486,5 @@ export function toFtsQuery(input: string): string | undefined {
       const quoted = quoteTerm(part.value);
       return index === parts.length - 1 && !part.phrase ? `${quoted}*` : quoted;
     })
-    .join(" ");
+    .join(join === "all" ? " " : " OR ");
 }

@@ -176,6 +176,23 @@ describe("full-text index fed on append", () => {
     expect(hits.map((h) => h.firstSeq)).toContain(second);
   });
 
+  test("a query no single row matches in full falls back to rows matching any term", () => {
+    // Measured live (acceptance run 1): a long question in plain words
+    // returned 0 hits because every word had to be in one row.
+    const dir = tempDir("monad-fts-");
+    const store = openStore(join(dir, "monad.db"));
+    const record = store.create(makeRecord());
+    const both = store.append(record.id, "prompt", prompt(record.id, "the wombat clamp is deferred")).seq;
+    const one = store.append(record.id, "error", { message: "wombat only" }).seq;
+    // All terms present somewhere in one row: no fallback, the strict hit alone.
+    expect(store.search("wombat clamp").map((h) => h.firstSeq)).toEqual([both]);
+    // No row holds all of them: rows with any term, more terms ranked first.
+    const loose = store.search("wombat clamp deferred kangaroo").map((h) => h.firstSeq);
+    expect(loose[0]).toBe(both);
+    expect(loose).toContain(one);
+    expect(store.search("kangaroo platypus")).toEqual([]);
+  });
+
   test("tool titles and paths are searchable, errors too", () => {
     const dir = tempDir("monad-fts-");
     const store = openStore(join(dir, "monad.db"));
