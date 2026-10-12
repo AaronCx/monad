@@ -43,6 +43,22 @@ import { ensureFixBranch, fixBranchName, readFileAtRef } from "./worktree.ts";
 export const PROMPT_IN_FLIGHT_ERROR_CODE = -32001;
 
 /**
+ * The refusal for anything that would drive an imported session (monad Link
+ * phase 4, decision record 0012): attach, prompt, a mode switch, cancel,
+ * close, starting a backend. An imported session is history read in from a
+ * vendor's own log. monad never ran it and has no backend for it, so there
+ * is nothing to drive, and a status change (cancel's idle, close's closed)
+ * would make it look like a session monad could run. It stays readable and
+ * searchable through Link.
+ */
+export function importedSessionRefusal(record: SessionRecord): RequestError {
+  return RequestError.invalidRequest(
+    { sessionId: record.id, backend: record.backend },
+    `session ${record.id} is an imported ${record.backend.replace(/^import:/, "")} log: it can be read and searched (monad show, monad search) but never attached, prompted or changed`,
+  );
+}
+
+/**
  * A monad client attached to a session: it receives every appended event
  * live and can answer permission requests.
  */
@@ -331,7 +347,7 @@ export class SessionManager {
    * still starting queues behind it instead of racing it.
    */
   async activate(id: SessionId, options?: { afterCreated?: () => void }): Promise<SessionRecord> {
-    const record = this.mustGet(id);
+    const record = this.mustGetRunnable(id);
     if (record.mode === "fix") {
       // A session created directly in fix mode never passes through setMode,
       // so freeze its allowlist here too. Both paths are idempotent.
@@ -364,7 +380,7 @@ export class SessionManager {
    * (decision record 0009).
    */
   async setMode(id: SessionId, mode: SessionMode): Promise<SessionRecord> {
-    this.mustGet(id);
+    this.mustGetRunnable(id);
     this.store.setMode(id, mode);
     if (mode === "fix") {
       await this.freezeExecAllowlist(id);
@@ -423,7 +439,7 @@ export class SessionManager {
    * first, for it to answer in sequence).
    */
   attach(id: SessionId, client: SessionClient): AttachResult {
-    const record = this.mustGet(id);
+    const record = this.mustGetRunnable(id);
     const session = this.ensureLive(id);
     session.subscribers.add(client);
     session.lastActive = client;
@@ -465,8 +481,8 @@ export class SessionManager {
     client?: SessionClient,
     options?: { beforeTurnEnded?: (stopReason: string) => void },
   ): Promise<PromptResponse> {
+    this.mustGetRunnable(id);
     const session = this.ensureLive(id);
-    this.mustGet(id);
     if (client) {
       this.markActive(id, client);
     }
@@ -629,6 +645,10 @@ export class SessionManager {
 
   /** Cancels the in-flight turn and resolves any held permission request. */
   async cancel(id: SessionId): Promise<void> {
+    const record = this.store.get(id);
+    if (record?.status === "imported") {
+      throw importedSessionRefusal(record);
+    }
     const session = this.live.get(id);
     this.policy.cancel(id);
     if (session?.backend) {
@@ -648,7 +668,10 @@ export class SessionManager {
    */
   async close(id: SessionId): Promise<void> {
     const record = this.store.get(id);
-    if (this.beforeClose && record && record.status !== "closed" && record.status !== "imported") {
+    if (record?.status === "imported") {
+      throw importedSessionRefusal(record);
+    }
+    if (this.beforeClose && record && record.status !== "closed") {
       try {
         await this.beforeClose(id);
       } catch {
@@ -899,7 +922,7 @@ export class SessionManager {
       return session.backend;
     }
     if (!session.backendStarting) {
-      const record = this.mustGet(id);
+      const record = this.mustGetRunnable(id);
       const hooks: BackendHooks = {
         onUpdate: (params) => {
           this.appendAndPublish(id, "update", params);
@@ -930,6 +953,15 @@ export class SessionManager {
     const record = this.store.get(id);
     if (!record) {
       throw RequestError.resourceNotFound(id);
+    }
+    return record;
+  }
+
+  /** mustGet, refusing an imported session: nothing may drive one. */
+  private mustGetRunnable(id: SessionId): SessionRecord {
+    const record = this.mustGet(id);
+    if (record.status === "imported") {
+      throw importedSessionRefusal(record);
     }
     return record;
   }

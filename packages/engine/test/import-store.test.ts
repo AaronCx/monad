@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionRecord } from "@aaroncx/protocol";
+import { importedSessionRefusal, SessionManager } from "../src/session.ts";
 import { type ImportState, SessionStore } from "../src/store.ts";
 
 /**
@@ -161,3 +162,37 @@ describe("SessionStore imports", () => {
   });
 });
 
+describe("SessionManager and an imported session", () => {
+  test("nothing drives it: attach, prompt, mode, cancel, close and activate are refused", async () => {
+    const store = openStore();
+    let backends = 0;
+    const manager = new SessionManager({
+      store,
+      createBackend: () => {
+        backends += 1;
+        return { prompt: async () => ({ stopReason: "end_turn" as const }), cancel: async () => {}, close: async () => {} };
+      },
+    });
+    store.appendImported({
+      sessionId: ID,
+      create: importedRecord(),
+      events: [prompt("history", "2026-07-29T15:01:00.000Z")],
+      state: state(10),
+    });
+    const message = importedSessionRefusal(importedRecord()).message;
+    const client = { onEvent() {}, requestPermission: async () => ({ outcome: { outcome: "cancelled" as const } }) };
+    expect(() => manager.attach(ID, client)).toThrow(message);
+    await expect(manager.prompt(ID, { sessionId: ID, prompt: [{ type: "text", text: "go" }] })).rejects.toThrow(
+      message,
+    );
+    await expect(manager.setMode(ID, "review")).rejects.toThrow(message);
+    await expect(manager.cancel(ID)).rejects.toThrow(message);
+    await expect(manager.close(ID)).rejects.toThrow(message);
+    await expect(manager.activate(ID)).rejects.toThrow(message);
+    expect(store.get(ID)).toMatchObject({ status: "imported", mode: "interactive" });
+    expect(store.replay(ID)).toHaveLength(1);
+    expect(backends).toBe(0);
+    // Reading it is fine, and titling it by hand too.
+    expect(manager.setTitle(ID, "named").title).toBe("named");
+  });
+});
