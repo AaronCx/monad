@@ -597,6 +597,34 @@ describe("what is skipped", () => {
     expect(env.h.store.replay(MAIN_ID)).toHaveLength(events + 1);
   });
 
+  test("after the original is gone, a shorter or a different copy does not take over", async () => {
+    const env = setup();
+    await env.importer.run([env.mainLog]);
+    const events = env.h.store.replay(MAIN_ID).length;
+    const original = readFileSync(env.mainLog, "utf8");
+    // An older backup (the first 12 lines), and a same-length file whose
+    // content differs from what was read.
+    const shorter = join(env.root, "older", `${MAIN_ID}.jsonl`);
+    const different = join(env.root, "different", `${MAIN_ID}.jsonl`);
+    mkdirSync(dirname(shorter));
+    mkdirSync(dirname(different));
+    writeFileSync(shorter, `${original.split("\n").slice(0, 12).join("\n")}\n`);
+    writeFileSync(different, original.replace("status-row clamp", "status-row brace"));
+    rmSync(env.mainLog);
+    for (const copy of [shorter, different]) {
+      const summary = await env.importer.run([copy]);
+      expect(summary).toMatchObject({ eventsAppended: 0, sessionsReset: 0 });
+      expect(summary.skipped).toEqual([
+        { path: copy, reason: `already imported from ${env.mainLog} (now gone), and this file differs from it` },
+      ]);
+    }
+    // The session is what was read from the original, and still its.
+    expect(env.h.store.replay(MAIN_ID)).toHaveLength(events);
+    expect(env.h.store.importState(env.mainLog)?.sessionId).toBe(MAIN_ID);
+    expect(env.h.store.search("status-row clamp").map((hit) => hit.sessionId)).toEqual([MAIN_ID]);
+    expect(env.h.store.search("status-row brace")).toEqual([]);
+  });
+
   test("a copy imported first gives way to the original when the original grows", async () => {
     const env = setup();
     const copy = join(env.root, "copies", `${MAIN_ID}.jsonl`);
