@@ -1,5 +1,15 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  type Stats,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve as resolvePath, sep } from "node:path";
 import { deriveTitle, expandHome, type ImportedEventInput, type ImportState, type SessionStore } from "@aaroncx/engine";
@@ -188,6 +198,16 @@ function fingerprint(fd: number, offset: number): string {
   return hash.digest("hex");
 }
 
+/** A regular file's stat, or undefined when there is none at `path`. */
+function statIfFile(path: string): Stats | undefined {
+  try {
+    const stat = statSync(path);
+    return stat.isFile() ? stat : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -356,19 +376,25 @@ export class Importer {
     if (!state) {
       // A file never read before whose session another file already holds:
       // the same log in two places (a copy, or a backup next to the
-      // original). One source owns a session. A copy takes over only when
-      // the owner is gone and the copy starts with exactly what was read
-      // from it, and then it continues from where the owner left off.
+      // original). One source owns a session. This file takes it over, and
+      // continues from where the owner left off, only when it starts with
+      // exactly what was read from the owner and either the owner is gone
+      // (Claude Code purged it) or this file has more than the owner and
+      // the owner has nothing new (a copy was imported first and the live
+      // original kept growing; staying with the copy would freeze the
+      // session at the copy's snapshot).
       const owner = this.store.importStateForSession(sessionId);
       if (owner) {
-        if (existsSync(owner.sourcePath)) {
-          this.skip(totals, path, `already imported from ${owner.sourcePath}`);
-          return;
-        }
-        if (size >= owner.offset && fingerprint(fd, owner.offset) === owner.head) {
-          state = { ...owner, sourcePath: path, ino: stat.ino };
-          this.store.moveImportState(owner.sourcePath, state);
-        } else {
+        const ownerStat = statIfFile(owner.sourcePath);
+        const matches = size >= owner.offset && fingerprint(fd, owner.offset) === owner.head;
+        if (ownerStat) {
+          const ownerIdle =
+            ownerStat.size === owner.size && ownerStat.mtimeMs === owner.mtimeMs && ownerStat.ino === owner.ino;
+          if (!(ownerIdle && size > owner.size && matches)) {
+            this.skip(totals, path, `already imported from ${owner.sourcePath}`);
+            return;
+          }
+        } else if (!matches) {
           this.skip(
             totals,
             path,
@@ -376,6 +402,8 @@ export class Importer {
           );
           return;
         }
+        state = { ...owner, sourcePath: path, ino: stat.ino };
+        this.store.moveImportState(owner.sourcePath, state);
       } else if (existing) {
         // Imported events with no import state (a reset interrupted between
         // its two steps): start the session over rather than append twice.

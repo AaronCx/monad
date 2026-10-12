@@ -597,6 +597,42 @@ describe("what is skipped", () => {
     expect(env.h.store.replay(MAIN_ID)).toHaveLength(events + 1);
   });
 
+  test("a copy imported first gives way to the original when the original grows", async () => {
+    const env = setup();
+    const copy = join(env.root, "copies", `${MAIN_ID}.jsonl`);
+    mkdirSync(dirname(copy));
+    copyFileSync(env.mainLog, copy);
+    await env.importer.run([copy]);
+    const events = env.h.store.replay(MAIN_ID).length;
+
+    // The live session keeps going in the original.
+    appendFileSync(
+      env.mainLog,
+      claudeLine(env, {
+        type: "user",
+        timestamp: "2026-07-29T17:30:00.000Z",
+        origin: { kind: "human" },
+        message: { role: "user", content: "now check the zebra stripes" },
+      }) +
+        claudeLine(env, {
+          type: "assistant",
+          timestamp: "2026-07-29T17:30:01.000Z",
+          message: { id: "msg_z", role: "assistant", content: [{ type: "text", text: "Stripes look right." }] },
+        }),
+    );
+    const grown = await env.importer.run([env.mainLog]);
+    expect(grown).toMatchObject({ eventsAppended: 2, sessionsReset: 0, skippedCount: 0 });
+    expect(env.h.store.search("zebra stripes").map((hit) => hit.sessionId)).toEqual([MAIN_ID]);
+    expect(env.h.store.importState(env.mainLog)?.sessionId).toBe(MAIN_ID);
+    expect(env.h.store.importState(copy)).toBeUndefined();
+
+    // From now on the original owns it, and the older copy stays out.
+    const both = await env.importer.run([dirname(copy), env.mainLog]);
+    expect(both).toMatchObject({ eventsAppended: 0, filesUnchanged: 1 });
+    expect(both.skipped).toEqual([{ path: copy, reason: `already imported from ${env.mainLog}` }]);
+    expect(env.h.store.replay(MAIN_ID)).toHaveLength(events + 2);
+  });
+
   test("import.enabled: false turns the importer off", async () => {
     const env = setup({ importEnabled: false });
     await expect(env.importer.run([env.logs])).rejects.toBeInstanceOf(ImportDisabledError);
