@@ -1,0 +1,163 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { SessionRecord } from "@aaroncx/protocol";
+import { type ImportState, SessionStore } from "../src/store.ts";
+
+/**
+ * The store side of Link phase 4: imported events keep the vendor log's
+ * timestamps and go through the ordinary indexer, a batch and its import
+ * state commit together, and a reset forgets what was read from the file
+ * while keeping what monad wrote about the session.
+ */
+
+let dirs: string[] = [];
+let stores: SessionStore[] = [];
+
+function openStore(): SessionStore {
+  const dir = mkdtempSync(join(tmpdir(), "monad-import-store-"));
+  dirs.push(dir);
+  const store = new SessionStore({ dbPath: join(dir, "monad.db") });
+  stores.push(store);
+  return store;
+}
+
+afterEach(() => {
+  for (const store of stores) {
+    store.close();
+  }
+  stores = [];
+  for (const dir of dirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  dirs = [];
+});
+
+const ID = "6f0c8a52-3b1d-4e7a-9c2f-5d8e1a4b7c90";
+
+function importedRecord(): SessionRecord {
+  return {
+    id: ID,
+    cwd: "/nowhere",
+    backend: "import:claude-code",
+    mode: "interactive",
+    status: "imported",
+    trust: "trusted",
+    createdAt: "2026-07-29T15:00:00.000Z",
+    updatedAt: "2026-07-29T15:00:00.000Z",
+  };
+}
+
+function state(offset: number): ImportState {
+  return {
+    sourcePath: "/logs/a.jsonl",
+    sessionId: ID,
+    vendor: "claude-code",
+    offset,
+    size: offset,
+    mtimeMs: 1,
+    ino: 2,
+    line: offset,
+    head: "h",
+  };
+}
+
+function prompt(text: string, ts: string) {
+  return { kind: "prompt" as const, ts, payload: { sessionId: ID, prompt: [{ type: "text", text }] } };
+}
+
+describe("SessionStore imports", () => {
+  test("a batch keeps the log's timestamps, is indexed, and moves updated_at only forward", () => {
+    const store = openStore();
+    const appended = store.appendImported({
+      sessionId: ID,
+      create: importedRecord(),
+      events: [prompt("why is scrolling broken", "2026-07-29T15:01:00.000Z")],
+      state: state(10),
+    });
+    expect(appended.map((event) => event.ts)).toEqual(["2026-07-29T15:01:00.000Z"]);
+    expect(store.get(ID)).toMatchObject({ status: "imported", updatedAt: "2026-07-29T15:01:00.000Z" });
+    // The ordinary indexer ran: searchable, and titled from the prompt.
+    expect(store.search("scrolling").map((hit) => hit.sessionId)).toEqual([ID]);
+    expect(store.get(ID)?.title).toBe("why is scrolling broken");
+    expect(store.importState("/logs/a.jsonl")).toEqual(state(10));
+    expect(store.importStateForSession(ID)?.sourcePath).toBe("/logs/a.jsonl");
+
+    // An out-of-order older line never moves updated_at back.
+    store.appendImported({ sessionId: ID, events: [prompt("older", "2026-07-29T14:00:00.000Z")], state: state(20) });
+    expect(store.get(ID)?.updatedAt).toBe("2026-07-29T15:01:00.000Z");
+    // An import title replaces the derived one; a manual one is never replaced.
+    store.appendImported({ sessionId: ID, title: "the real ask", events: [], state: state(20) });
+    expect(store.get(ID)).toMatchObject({ title: "the real ask", titleSource: "import" });
+    store.setTitle(ID, "mine", "manual");
+    store.appendImported({ sessionId: ID, title: "another", events: [], state: state(20) });
+    expect(store.get(ID)).toMatchObject({ title: "mine", titleSource: "manual" });
+  });
+
+  test("the events and the import state commit together or not at all", () => {
+    const store = openStore();
+    // No such session and nothing to create it from: the event insert fails
+    // its foreign key, and the state written in the same transaction goes too.
+    expect(() =>
+      store.appendImported({ sessionId: ID, events: [prompt("x", "2026-07-29T15:01:00.000Z")], state: state(10) }),
+    ).toThrow();
+    expect(store.importState("/logs/a.jsonl")).toBeUndefined();
+  });
+
+  test("a reset drops what was read from the file and keeps what monad wrote about the session", () => {
+    const store = openStore();
+    store.appendImported({
+      sessionId: ID,
+      create: importedRecord(),
+      events: [prompt("scrolling is broken", "2026-07-29T15:01:00.000Z")],
+      state: state(10),
+    });
+    store.append(ID, "access", { op: "read", by: "human", role: "target", target: ID });
+    store.append(ID, "summary", {
+      text: "summary of the scroll work",
+      summarizerSessionId: Bun.randomUUIDv7(),
+      fromSeq: 1,
+      toSeq: 1,
+    });
+    store.resetImported(ID);
+
+    expect(store.replay(ID).map((event) => event.kind)).toEqual(["access", "summary"]);
+    expect(store.importState("/logs/a.jsonl")).toBeUndefined();
+    expect(store.get(ID)).toMatchObject({ status: "imported" });
+    expect(store.get(ID)?.title).toBeUndefined();
+    // The kept summary is indexed again, once; the dropped prompt is gone.
+    expect(store.search("scrolling").map((hit) => hit.kind)).toEqual(["summary"]);
+    store.appendImported({
+      sessionId: ID,
+      events: [prompt("scrolling is broken", "2026-07-29T15:01:00.000Z")],
+      state: state(10),
+    });
+    expect(
+      store
+        .search("scrolling")
+        .map((hit) => hit.kind)
+        .sort(),
+    ).toEqual(["prompt", "summary"]);
+  });
+
+  test("agentSessionIds names the vendor sessions monad ran, not imported ones", () => {
+    const store = openStore();
+    const now = new Date().toISOString();
+    const ran: SessionRecord = {
+      id: Bun.randomUUIDv7(),
+      cwd: "/tmp",
+      backend: "claude-acp",
+      mode: "interactive",
+      status: "idle",
+      trust: "trusted",
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.create(ran);
+    store.setAgentSessionId(ran.id, "vendor-1");
+    store.appendImported({ sessionId: ID, create: importedRecord(), events: [], state: state(0) });
+    expect([...store.agentSessionIds()]).toEqual(["vendor-1"]);
+  });
+});
+

@@ -119,6 +119,71 @@ interface SearchRow {
   rank: number;
 }
 
+/**
+ * How far the importer has read one vendor log file (Link phase 4). offset is
+ * the byte just past the last whole line consumed and line the number of
+ * lines consumed; size, mtimeMs and ino are the file as last seen, so an
+ * unchanged file is skipped with one stat; head is a hash of the file's
+ * first line, so a file replaced in place (same inode, new content) is
+ * recognized and read again from the start.
+ */
+export interface ImportState {
+  sourcePath: string;
+  sessionId: SessionId;
+  vendor: "claude-code" | "codex";
+  offset: number;
+  size: number;
+  mtimeMs: number;
+  ino: number;
+  line: number;
+  head: string;
+}
+
+/** One event read from a vendor log, with the timestamp the log gave it. */
+export interface ImportedEventInput {
+  kind: EventKind;
+  payload: unknown;
+  ts: string;
+}
+
+/** One batch for SessionStore.appendImported. */
+export interface ImportBatch {
+  sessionId: SessionId;
+  /** Inserted first when no session with this id exists yet. */
+  create?: SessionRecord;
+  /** Names the session (title source import), unless a human named it. */
+  title?: string;
+  events: ImportedEventInput[];
+  /** The file's import state after this batch. */
+  state: ImportState;
+}
+
+interface ImportRow {
+  source_path: string;
+  session_id: string;
+  vendor: string;
+  byte_offset: number;
+  size: number;
+  mtime_ms: number;
+  ino: number;
+  line: number;
+  head: string;
+}
+
+function rowToImportState(row: ImportRow): ImportState {
+  return {
+    sourcePath: row.source_path,
+    sessionId: row.session_id,
+    vendor: row.vendor === "codex" ? "codex" : "claude-code",
+    offset: row.byte_offset,
+    size: row.size,
+    mtimeMs: row.mtime_ms,
+    ino: row.ino,
+    line: row.line,
+    head: row.head,
+  };
+}
+
 interface EventRow {
   seq: number;
   session_id: string;
@@ -235,7 +300,22 @@ export class SessionStore {
         payload TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, seq);
+      CREATE TABLE IF NOT EXISTS imports (
+        source_path TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        vendor TEXT NOT NULL,
+        byte_offset INTEGER NOT NULL,
+        size INTEGER NOT NULL,
+        mtime_ms REAL NOT NULL,
+        ino INTEGER NOT NULL,
+        line INTEGER NOT NULL,
+        head TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_imports_session ON imports(session_id);
     `);
+    // imports (Link phase 4) is NOT a derived table: it records how far each
+    // vendor log has been read into the event log, so it survives an index
+    // generation bump exactly as the events it accounts for do.
     // M1 databases predate the base/head/pr columns and M2 databases predate
     // trust and exec_allowlist; add them in place. SQLite has no ADD COLUMN IF
     // NOT EXISTS, so a duplicate-column error means the migration already ran.
@@ -368,32 +448,209 @@ export class SessionStore {
   append(sessionId: SessionId, kind: EventKind, payload: unknown): EventRecord {
     const ts = new Date().toISOString();
     const { event, cache } = this.db.transaction(() => {
-      const row = this.db
-        .query<{ seq: number }, { sessionId: string; ts: string; kind: string; payload: string }>(
-          `INSERT INTO events (session_id, ts, kind, payload)
-           VALUES ($sessionId, $ts, $kind, $payload)
-           RETURNING seq`,
-        )
-        .get({ sessionId, ts, kind, payload: JSON.stringify(payload ?? null) });
-      if (!row) {
-        throw new Error(`append failed for session ${sessionId}`);
-      }
-      // updated_at means "last activity", and Link lists sessions by it. An
-      // access event records that someone ELSE looked at this session, which
-      // is not this session doing anything (decision record 0012). A handoff
-      // or summary describes activity rather than being some: counting it
-      // would make every idle session look freshly active ten minutes after
-      // its last turn, and reorder `monad ls` by when monad wrote about it.
-      if (!PASSIVE_KINDS.has(kind)) {
-        this.touch(sessionId);
-      }
-      const appended: EventRecord = { seq: row.seq, sessionId, ts, kind, payload: payload ?? null };
+      const appended = this.insertEvent(sessionId, kind, payload, ts, false);
       return { event: appended, cache: this.indexOne(appended, this.loadIndexCache(sessionId)) };
     })();
     // Only a committed transaction updates the in-memory cache; a rolled-back
     // append leaves it exactly as the database is.
     this.setIndexCache(sessionId, cache);
     return event;
+  }
+
+  /**
+   * One event row, stamped `ts`. updated_at means "last activity", and Link
+   * lists sessions by it. An access event records that someone ELSE looked
+   * at this session, which is not this session doing anything (decision
+   * record 0012). A handoff or summary describes activity rather than being
+   * some: counting it would make every idle session look freshly active ten
+   * minutes after its last turn, and reorder `monad ls` by when monad wrote
+   * about it. An imported event (`historical`) carries the vendor log's own
+   * timestamp, and moves updated_at to it, never backwards, so an imported
+   * session sorts by when it last did something, not by when monad read it.
+   */
+  private insertEvent(
+    sessionId: SessionId,
+    kind: EventKind,
+    payload: unknown,
+    ts: string,
+    historical: boolean,
+  ): EventRecord {
+    const row = this.db
+      .query<{ seq: number }, { sessionId: string; ts: string; kind: string; payload: string }>(
+        `INSERT INTO events (session_id, ts, kind, payload)
+         VALUES ($sessionId, $ts, $kind, $payload)
+         RETURNING seq`,
+      )
+      .get({ sessionId, ts, kind, payload: JSON.stringify(payload ?? null) });
+    if (!row) {
+      throw new Error(`append failed for session ${sessionId}`);
+    }
+    if (!PASSIVE_KINDS.has(kind)) {
+      if (historical) {
+        this.db
+          .query("UPDATE sessions SET updated_at = MAX(updated_at, $ts) WHERE id = $id")
+          .run({ id: sessionId, ts });
+      } else {
+        this.touch(sessionId);
+      }
+    }
+    return { seq: row.seq, sessionId, ts, kind, payload: payload ?? null };
+  }
+
+  // ------------------------------------------------------------- imports
+
+  /** Where the importer left off in one vendor log file, or undefined if it never read it. */
+  importState(sourcePath: string): ImportState | undefined {
+    const row = this.db
+      .query<ImportRow, { sourcePath: string }>("SELECT * FROM imports WHERE source_path = $sourcePath")
+      .get({ sourcePath });
+    return row ? rowToImportState(row) : undefined;
+  }
+
+  /** The import state of the file a session was read from, if it is an imported session. */
+  importStateForSession(sessionId: SessionId): ImportState | undefined {
+    const row = this.db
+      .query<ImportRow, { sessionId: string }>("SELECT * FROM imports WHERE session_id = $sessionId")
+      .get({ sessionId });
+    return row ? rowToImportState(row) : undefined;
+  }
+
+  /**
+   * The vendor session ids of every session monad itself ran. The importer
+   * skips a Claude Code log with one of these ids: monad's own log of that
+   * session is the canonical one, and importing the vendor's copy would
+   * file the same work twice.
+   */
+  agentSessionIds(): Set<string> {
+    return new Set(
+      this.db
+        .query<{ agent_session_id: string }, []>(
+          "SELECT agent_session_id FROM sessions WHERE agent_session_id IS NOT NULL AND backend NOT LIKE 'import:%'",
+        )
+        .all()
+        .map((row) => row.agent_session_id),
+    );
+  }
+
+  /**
+   * Appends one batch of events read from a vendor log, in one transaction
+   * with the import state that says how far the file has been read: either
+   * both land or neither does, so a crash mid-import never leaves events the
+   * state does not account for (they would be appended twice) or a state
+   * past events that were never written (they would be lost). `create` is
+   * the session record, inserted first when the session does not exist yet.
+   * `title`, when given, names the session (source import) unless a human
+   * named it. Events keep the vendor log's timestamps and run through the
+   * same indexer as every live append, so search, repo tags and titles
+   * behave exactly as for a session monad ran. Returns the appended events.
+   */
+  appendImported(batch: ImportBatch): EventRecord[] {
+    const { sessionId } = batch;
+    const { events, cache } = this.db.transaction(() => {
+      if (batch.create && !this.get(sessionId)) {
+        this.create(batch.create);
+      }
+      if (batch.title !== undefined) {
+        // An imported title replaces one the indexer derived from a prompt
+        // that was not an ask (a task notification, a slash command), never
+        // one a human set.
+        this.db
+          .query(
+            `UPDATE sessions SET title = $title, title_source = 'import'
+             WHERE id = $id AND (title_source IS NULL OR title_source <> 'manual')`,
+          )
+          .run({ id: sessionId, title: batch.title });
+        const cached = this.indexCache.get(sessionId);
+        if (cached) {
+          cached.titled = true;
+        }
+      }
+      let current: IndexCache | undefined = batch.events.length > 0 ? this.loadIndexCache(sessionId) : undefined;
+      const appended: EventRecord[] = [];
+      for (const item of batch.events) {
+        const event = this.insertEvent(sessionId, item.kind, item.payload, item.ts, true);
+        current = this.indexOne(event, current ?? this.loadIndexCache(sessionId));
+        appended.push(event);
+      }
+      this.saveImportState(batch.state);
+      return { events: appended, cache: current };
+    })();
+    if (cache) {
+      this.setIndexCache(sessionId, cache);
+    }
+    return events;
+  }
+
+  /**
+   * Moves an import state to another source path (the importer adopting a
+   * copy of a log whose original is gone) in one step.
+   */
+  moveImportState(fromPath: string, state: ImportState): void {
+    this.db.transaction(() => {
+      this.db.query("DELETE FROM imports WHERE source_path = $fromPath").run({ fromPath });
+      this.saveImportState(state);
+    })();
+  }
+
+  /**
+   * Forgets everything an imported session was read from its vendor log, so
+   * the importer can read the file again from the start (it was truncated
+   * or replaced). The session record stays, and so do the events monad
+   * itself wrote ABOUT the session (access, handoff, summary): the access
+   * record is the audit trail of who read it, and a reset must not erase
+   * that. Its index rows and repo tags are dropped and rebuilt from what
+   * remains, through the same indexer, so nothing is left behind twice. A
+   * title a human set survives; an imported or derived one is re-derived.
+   */
+  resetImported(sessionId: SessionId): void {
+    this.db.transaction(() => {
+      this.db
+        .query(
+          `DELETE FROM events WHERE session_id = $sessionId
+             AND kind NOT IN ('access', 'handoff', 'summary')`,
+        )
+        .run({ sessionId });
+      this.db.query("DELETE FROM search_fts WHERE session_id = $sessionId").run({ sessionId });
+      this.db.query("DELETE FROM session_repos WHERE session_id = $sessionId").run({ sessionId });
+      this.db.query("DELETE FROM index_state WHERE session_id = $sessionId").run({ sessionId });
+      this.db.query("DELETE FROM imports WHERE session_id = $sessionId").run({ sessionId });
+      this.db
+        .query(
+          `UPDATE sessions SET title = NULL, title_source = NULL
+           WHERE id = $sessionId AND (title_source IS NULL OR title_source <> 'manual')`,
+        )
+        .run({ sessionId });
+    })();
+    this.indexCache.delete(sessionId);
+    this.indexSession(sessionId, 0);
+  }
+
+  private saveImportState(state: ImportState): void {
+    this.db
+      .query(
+        `INSERT INTO imports (source_path, session_id, vendor, byte_offset, size, mtime_ms, ino, line, head)
+         VALUES ($sourcePath, $sessionId, $vendor, $offset, $size, $mtimeMs, $ino, $line, $head)
+         ON CONFLICT (source_path) DO UPDATE SET
+           session_id = excluded.session_id,
+           vendor = excluded.vendor,
+           byte_offset = excluded.byte_offset,
+           size = excluded.size,
+           mtime_ms = excluded.mtime_ms,
+           ino = excluded.ino,
+           line = excluded.line,
+           head = excluded.head`,
+      )
+      .run({
+        sourcePath: state.sourcePath,
+        sessionId: state.sessionId,
+        vendor: state.vendor,
+        offset: state.offset,
+        size: state.size,
+        mtimeMs: state.mtimeMs,
+        ino: state.ino,
+        line: state.line,
+        head: state.head,
+      });
   }
 
   /**
@@ -416,29 +673,36 @@ export class SessionStore {
       .filter((row) => row.max_seq !== null && row.max_seq > row.done);
     let indexed = 0;
     for (const { id, done } of pending) {
-      let after = done;
-      for (;;) {
-        const rows = this.db
-          .query<EventRow, { sessionId: string; after: number; limit: number }>(
-            `SELECT seq, session_id, ts, kind, payload FROM events
-             WHERE session_id = $sessionId AND seq > $after
-             ORDER BY seq ASC LIMIT $limit`,
-          )
-          .all({ sessionId: id, after, limit: BACKFILL_BATCH });
-        if (rows.length === 0) {
-          break;
-        }
-        const cache = this.db.transaction(() => {
-          let current = this.loadIndexCache(id);
-          for (const row of rows) {
-            current = this.indexOne(rowToEvent(row), current);
-          }
-          return current;
-        })();
-        this.setIndexCache(id, cache);
-        indexed += rows.length;
-        after = rows[rows.length - 1]?.seq ?? after;
+      indexed += this.indexSession(id, done);
+    }
+    return indexed;
+  }
+
+  /** Feeds a session's events after seq `after` through the indexer, in batches. */
+  private indexSession(id: SessionId, after: number): number {
+    let indexed = 0;
+    let cursor = after;
+    for (;;) {
+      const rows = this.db
+        .query<EventRow, { sessionId: string; after: number; limit: number }>(
+          `SELECT seq, session_id, ts, kind, payload FROM events
+           WHERE session_id = $sessionId AND seq > $after
+           ORDER BY seq ASC LIMIT $limit`,
+        )
+        .all({ sessionId: id, after: cursor, limit: BACKFILL_BATCH });
+      if (rows.length === 0) {
+        break;
       }
+      const cache = this.db.transaction(() => {
+        let current = this.loadIndexCache(id);
+        for (const row of rows) {
+          current = this.indexOne(rowToEvent(row), current);
+        }
+        return current;
+      })();
+      this.setIndexCache(id, cache);
+      indexed += rows.length;
+      cursor = rows[rows.length - 1]?.seq ?? cursor;
     }
     return indexed;
   }
