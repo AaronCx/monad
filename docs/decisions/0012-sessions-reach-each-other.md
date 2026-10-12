@@ -1,7 +1,7 @@
 # 0012: Sessions reach each other (monad Link)
 
 Date: 2026-10-11
-Status: accepted (phases 2 and 3 of Link; phase 4 extends it)
+Status: accepted (phases 2, 3 and 4 of Link)
 
 ## Context
 
@@ -16,7 +16,8 @@ lets sessions use it: a per-session MCP server through which an agent lists, sea
 other sessions, messages them, spawns children and waits on them, plus the same reach for the
 human at the CLI. Phase 3, also recorded here, makes sessions leave something behind for whoever
 picks the work up: a deterministic handoff on idle and close, a model-written summary on demand,
-and repo notes.
+and repo notes. Phase 4, also recorded here, brings in the history monad did not run: Aaron's own
+Claude Code and Codex logs, imported read-only so they are searched and read like everything else.
 
 That turns every session into a reader of every other session. Prompt injection becomes an
 exfiltration path unless the daemon, not the prompt, enforces the boundary. Everything below is
@@ -356,12 +357,104 @@ from every session. A malformed file is the defaults plus a warning in the daemo
 crash; unknown keys are refused rather than ignored, because an ignored misspelling of `repos`
 would silently widen the scope. The file is read once at daemon start.
 
+## Imports: history monad did not run, read-only
+
+The session that motivated Link (`096c02c8`, the meshyy scrolling work) never ran under monad. Its
+history was a Claude Code log in `~/.claude/projects`, filed under the directory it was launched
+from (`~`), and Claude Code later purged it. Phase 4 reads such logs into monad so search, read and
+repo tags reach them: `monad import [--path P ...]` (`POST /v1/import`), and, when link.json says
+`import.watch: true`, a watcher in monadd.
+
+**What is read.** Aaron's own files on his own machine, read in place and never written: Claude
+Code's `~/.claude/projects/**/<sessionId>.jsonl` and each subagent's `agent-*.jsonl` under
+`<sessionId>/subagents/` (workflow agents one level deeper; workflow journals are not transcripts
+and are ignored), Codex's `~/.codex/sessions/**/rollout-*.jsonl`, plus link.json `import.roots`.
+`monad import --path P` imports only P (a file or a directory), so a copy kept elsewhere (the
+acceptance run imports `~/Developer/cc-sessions`) is one command. No vendor auth is touched and
+nothing leaves the machine. `import.enabled: false` turns all of it off (`POST /v1/import` is 409).
+
+**What it becomes.** One monad session per log, with the vendor's id (the Claude Code file stem,
+Codex's `session_meta.id`); a subagent is a child (`parentId` the main session, `spawnDepth` 1)
+with a deterministic RFC 9562 version 8 id hashed from the parent id and the file's path under
+`subagents/`, so every run and every daemon agree on it. Backend `import:claude-code` or
+`import:codex`, status `imported`, trust `trusted` (it only decides who may read it), the log's cwd
+and timestamps. Each line becomes the events a live session would have logged: the human's text a
+`prompt`, assistant text an `agent_message_chunk`, a tool use a `tool_call` (title from the tool
+and its target, ACP kind, the input with every string cut to 4 KiB, locations from its paths), a
+tool result a `tool_call_update` (completed or failed, output cut to 4 KiB), a turn end
+`turn_ended`, an API error `error`. Every payload carries `_meta["monad.sh/imported"] = { source,
+line, vendor }`. Skipped: thinking (as for live sessions), Claude Code's bookkeeping lines, meta
+lines, slash command output, and `isSidechain` lines in a main file (an older Claude Code's inline
+subagent traffic, another conversation). The title is the first real ask, read the way phase 1
+derives titles (redacted, then cut): not a tool result, a task notification, a compaction summary
+or a slash command, and a subagent is named by the description its parent gave it.
+
+**Same code path.** The events are appended through the store like any other, so the phase 1
+indexer, redaction, repo tagging and titles apply unchanged; there is no importer-specific index
+code. That is how `096c02c8`, started in `~`, is tagged with `meshyy` and `a-plus-terminal`: its
+Read and Edit paths and its Bash `cd`s reached them. A Bash call also carries the working directory
+Claude Code recorded on its line when it differs from the session's (Codex logs the same thing as
+`workdir`): the command ran there.
+
+**Incremental and idempotent.** The `imports` table keeps, per source file, the session id, the
+byte offset just past the last whole line read, the line count, size, mtime, inode and a hash of
+the first 4 KiB of the consumed prefix, written in the SAME transaction as the events read up to
+that offset: a crash mid-file neither repeats nor loses a line. A run stats each file and skips one
+whose size, mtime and inode are unchanged; otherwise it reads whole lines from the offset (bytes
+after the last newline are a line the vendor is still writing, left for the next run) in batches
+of a thousand events. A second run with nothing new appends nothing. A file that shrank below its
+offset, or whose consumed prefix no longer hashes the same, was truncated or replaced: the
+session's imported events, index rows and repo tags are dropped and the file is read again from
+the start. What monad itself wrote about the session (access events, handoffs, summaries) is kept
+and re-indexed, because the record of who read a session must not be erased by its source
+changing. Imported events keep the log's timestamps and move `updatedAt` only forward, so an
+imported session sorts by when it last did something, not by when monad read it. The
+`imports` table is not derived: it survives an index generation bump, as the events do.
+
+**Skips, and why.** A Claude Code log whose id is the `agentSessionId` of a session monad ran (and
+that log's subagents) is skipped: monad's own log of it is canonical, and importing the vendor's
+copy would file the same work twice. An id that belongs to a session monad ran is never touched.
+The same log in two places is imported once: a second path with an imported id is skipped while
+the first exists, and when the first is gone (Claude Code purged it) a copy whose prefix matches
+what was read takes over from the same offset. Each run returns a summary: files scanned and
+unchanged, sessions created, updated and re-read from the start, events appended, malformed lines,
+and every skipped file with the reason.
+
+**Watching** is opt-in (`import.watch: true`): `fs.watch` recursive on every root that exists, one
+run 2 s after `.jsonl` writes settle, a full rescan every 5 minutes whatever the watchers saw (a
+root created later, an event the OS coalesced), and one run at start. Runs are serialized; a
+`monad import` during a watcher run waits for it, then scans again. It is off by default because
+an import copies logs that may hold secrets into monad's database, and that should be something
+Aaron turned on.
+
+Measured on this Mac (2026-10-11): `~/Developer/cc-sessions` (146 MB, 181 logs including 162
+subagents) imports in 2.2 s into 24,928 events; the default roots (`~/.claude/projects`, 96 MB,
+plus `~/.codex/sessions`) in 1.0 s; a repeat run of either in well under 0.1 s.
+
 ## Why imported sessions are read-only
 
-Reserved; phase 4 completes this section with the importer. The short form: an imported Claude Code
-or Codex log is history monad did not run and has no backend for, so there is nothing a prompt,
-a peer message, a spawn or an attach could drive. Phase 2 already treats `imported` as terminal:
-the mounts 404 it and peer messages and spawns refuse it as a target.
+An imported log is history monad did not run and has no backend for. There is no vendor process
+to prompt, no permission policy that ever governed it, and no way to give the vendor its context
+back. Driving one would mean inventing a session out of a transcript, and the first thing it did
+(a cancel setting it idle, a close closing it) would make history look like a session monad can
+run. So it is terminal, like `closed`, and every door refuses it on its own:
+
+- **The SessionManager** refuses attach, prompt, mode switches, cancel, close, activation and
+  starting a backend for an `imported` record, with one error that says it can be read and
+  searched but never run (`importedSessionRefusal`). ACP `session/load` and `session/prompt` go
+  through it, so an editor gets that error; the control API's mode route answers 409.
+- **ACP `session/list`** omits imported sessions: an editor's picker never offers one. The control
+  API lists them (`monad ls --all`, `GET /v1/sessions?imported=1`); plain `monad ls` hides them.
+- **Link** treats them as targets only, for reading: list, search, read and summarize reach them
+  (with access events on their logs, as for any session), peer messages are refused, a wait on one
+  ends at once, and since an imported session never runs it has no mount, so it is never a caller
+  of anything (the mounts 404 it).
+- **The backend** refuses to start for an `import:*` backend id, a last check if all of the above
+  were bypassed.
+
+Their text is data like every other session's: redacted in the index and in every Link output, and
+fenced as quoted history. The log itself keeps the vendor's text as read (it is the record), the
+same as a live session's log keeps what its vendor streamed.
 
 ## The vendor still never holds the daemon token
 
@@ -394,9 +487,18 @@ lifetime), and reading it buys that one session's Link reach and nothing else: n
 - A session waiting on a permission is not idle, so it gets no idle handoff however long it
   waits; it gets one when it closes or when someone asks.
 - Repo notes are not in the full-text index; `notes_read` and `monad notes` are how they are read.
+- The importer reads private, undocumented vendor formats, measured on Claude Code 2.1.x and Codex
+  CLI 0.94 logs on this Mac. A format change shows up as lines that import as nothing, not as an
+  error. Codex's tool items (shell, apply_patch) follow its rollout format but no Codex log on this
+  Mac has one yet; Codex logs from before `session_meta` existed are not read.
+- An older Claude Code's inline sidechain lines (subagent traffic inside the main file) are
+  skipped, not rebuilt into child sessions.
+- Tool output is kept cut to 4 KiB per string; the original log is the place to read all of it.
+- Replacement is recognized by size and a hash of the first 4 KiB already read: a file rewritten
+  in place with the same first 4 KiB and at least the same length reads as appended to.
 
 ## Revisit when
 
-Phase 4 lands importers (the read-only section above is completed), notes need search or
-expiry, codex-acp is installed and measured, or a vendor starts
-passing MCP config some way other than argv.
+Notes need search or expiry, codex-acp is installed and measured, a vendor changes its log format
+or starts writing logs somewhere else, or a vendor starts passing MCP config some way other than
+argv.

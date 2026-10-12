@@ -93,6 +93,17 @@ close, and on request; the daemon catches up missed ones at start. A `summary` e
 a model, exists only when someone asks for one. Repo notes are JSONL files under
 `~/.monad/notes`, one per repository, never in a worktree. Decision record 0012 has the rules.
 
+Link phase 4 imports history monad did not run: Aaron's own Claude Code logs
+(`~/.claude/projects`, subagents as child sessions) and Codex logs (`~/.codex/sessions`), read in
+place, never written, into sessions with backend `import:claude-code` or `import:codex` and status
+`imported`. Their events are what a live session would have logged, keep the log's timestamps, and
+go through the same append path, so the index, repo tags and titles treat them like any other
+session. The `imports` table records how far each file has been read (byte offset, lines, size,
+mtime, inode, a hash of the read prefix) in the same transaction as the events, so re-import is
+incremental and idempotent, and a truncated or replaced file is read again from the start. An
+imported session is read-only: it is searched, read and listed, never attached, prompted, switched,
+cancelled, closed or messaged. Decision record 0012 has the details.
+
 ## Layout
 
 - `apps/daemon` (`@aaroncx/monadd`, binary `monadd`): owns sessions, the event log, the
@@ -108,7 +119,8 @@ a model, exists only when someone asks for one. Repo notes are JSONL files under
 - `packages/link` (`@aaroncx/link`): monad Link. LinkService (list, search, read, message, spawn,
   wait, summarize, repo notes, handoffs), the handoff builder and its idle/close scheduler, the
   notes store, the normalized transcript, quoting and redaction of results, the link.json loader,
-  and the monad-sessions MCP server (decision record 0012).
+  the monad-sessions MCP server, and the Claude Code and Codex log importers with their opt-in
+  watcher (decision record 0012).
 - `packages/checks` (`@aaroncx/checks`): placeholder in M1. The LastGate check engine port
   lands here in M2.
 - `packages/github` (`@aaroncx/github`): placeholder in M1. The LastGate GitHub App port lands
@@ -121,7 +133,8 @@ every request:
 
 - `/acp`: the ACP agent side over the SDK's Streamable HTTP transport. Methods served:
   `initialize` (advertises `loadSession` and `sessionCapabilities.list`), `session/new`,
-  `session/load`, `session/list`, `session/prompt`, `session/cancel`.
+  `session/load`, `session/list`, `session/prompt`, `session/cancel`. `session/list` omits
+  imported sessions, and `session/load` and `session/prompt` refuse one (Link phase 4).
 - `/v1/sessions`, `/v1/status`: the control API, plain JSON.
 - `PATCH /v1/sessions/<id>` (Link): `{ "title": "..." }` sets a manual title that prompt
   derivation never overwrites; `{ "title": null }` re-derives it from the first prompt.
@@ -152,6 +165,12 @@ every request:
   it; `{ "summarize": true }` also runs the model-written summary and waits for it.
 - `GET /v1/notes?repo=P`, `POST /v1/notes { "repo": P, "text": "..." }` (Link): a repository's
   notes, oldest first, or one more, written as the human.
+- `POST /v1/import { "paths"?: [P, ...] }` (Link phase 4): one import run over the configured
+  roots (`~/.claude/projects`, `~/.codex/sessions`, link.json `import.roots`), or over the given
+  files and directories only. Answers with the run's summary (files scanned and unchanged,
+  sessions created, updated and re-read from the start, events appended, malformed lines, and
+  each skipped file with the reason); 409 when link.json has `import.enabled: false`. The mode
+  route (`POST /v1/sessions/<id>/mode`) and peer messages answer 409 for an imported session.
 
   The Link routes run the same LinkService the MCP server does, with the human as the caller,
   and every read they make is an access event on the session read.
@@ -183,6 +202,8 @@ vendor agent command (integration tests run a fake ACP agent), `MONAD_CODEX_CMD`
 codex-acp command line for Link spawns that ask for it, `MONAD_DAEMON_BIN` tells the CLI what
 to spawn for `monad daemon start`, `MONAD_HANDOFF_IDLE_MS` replaces the ten-minute idle window
 before a session's handoff (tests). `~/.monad/link.json` scopes Link (enabled, a repo allowlist,
-limits); absent means every trusted session on this daemon.
+limits) and the importer (`import.enabled`, `import.watch` for the watcher in monadd, extra
+`import.roots`); absent means every trusted session on this daemon, imports on demand only. The
+importer's default roots are under the daemon's `HOME`.
 
 This document grows as code lands. Decision records live in `docs/decisions/`.
