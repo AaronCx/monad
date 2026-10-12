@@ -29,6 +29,8 @@ export interface SearchFlags {
   repo?: string;
   since?: string;
   limit?: number;
+  /** Search one session only (full id or a prefix the CLI resolves). */
+  session?: string;
 }
 
 export interface ShowFlags {
@@ -93,6 +95,9 @@ export function parseSearchFlags(argv: string[], now?: Date): SearchFlags {
         break;
       case "--limit":
         flags.limit = positiveInt(needValue(argv, ++i, arg, "a number"), arg);
+        break;
+      case "--session":
+        flags.session = needValue(argv, ++i, arg, "a session id");
         break;
       default:
         if (arg.startsWith("--")) {
@@ -274,7 +279,7 @@ export async function cmdSearch(handle: DaemonHandle, flags: SearchFlags): Promi
   const { hits } = SearchResponseSchema.parse(
     await getJson(
       handle,
-      `/v1/search${query({ q: flags.query, repo: flags.repo, since: flags.since, limit: flags.limit })}`,
+      `/v1/search${query({ q: flags.query, repo: flags.repo, since: flags.since, limit: flags.limit, session: flags.session })}`,
     ),
   );
   if (hits.length === 0) {

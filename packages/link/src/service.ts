@@ -152,6 +152,14 @@ export interface SearchOptions {
   repo?: string;
   since?: string;
   limit?: number;
+  /**
+   * Search inside one session only. The per-session cap does not apply, so
+   * a caller that found the right session can find every place in it that
+   * matches before choosing what to read (measured live, acceptance run 1:
+   * with three hits per session the model saw one region of a long session
+   * and read only that, missing the earlier reports).
+   */
+  sessionId?: string;
 }
 
 export interface ReadOptions {
@@ -406,7 +414,9 @@ export class LinkService {
       throw this.refuse(caller, "search", "invalid", "query must be a non-empty string");
     }
     const since = this.normalizeSince(caller, "search", options.since);
-    const sessionIds = this.scopedSessionIds(caller);
+    const within =
+      options.sessionId === undefined ? undefined : this.requireVisible(caller, "search", options.sessionId);
+    const sessionIds = within === undefined ? this.scopedSessionIds(caller) : [within.id];
     const hits = this.store.search(query, {
       repo: options.repo === undefined ? undefined : this.canonicalRepo(options.repo),
       since,
@@ -426,7 +436,7 @@ export class LinkService {
       // "meshyy scrolling" came from 8 sessions, ten of them one session's
       // edits to the same file, and the session that did the work was not
       // among them.
-      maxPerSession: SEARCH_HITS_PER_SESSION,
+      maxPerSession: within === undefined ? SEARCH_HITS_PER_SESSION : undefined,
     });
     const titles = new Map<string, string | undefined>();
     const results: LinkSearchHit[] = hits.map((hit) => {

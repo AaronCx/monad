@@ -60,6 +60,7 @@ function usage(): string {
     "  gc [--older-than 7d]             remove closed sessions' worktrees",
     "  ls [--repo P] [--all]            list sessions (--repo: those that touched P)",
     "  search <query> [--repo P]        full-text search across every session",
+    "         [--session id]            (or inside one session, uncapped)",
     "         [--since 7d|ISO] [--limit N]",
     "  show <id> [--from seq]           a session's transcript, access events included",
     "       [--limit N]",
@@ -325,9 +326,15 @@ try {
     case "ls":
       await cmdLs(await ensureDaemon(), parseLsFlags(rest));
       break;
-    case "search":
-      await cmdSearch(await ensureDaemon(), parseSearchFlags(rest));
+    case "search": {
+      const handle = await ensureDaemon();
+      const flags = parseSearchFlags(rest);
+      if (flags.session !== undefined) {
+        flags.session = (await resolveSession(handle, flags.session)).id;
+      }
+      await cmdSearch(handle, flags);
       break;
+    }
     case "show": {
       const flags = parseShowFlags(rest);
       const handle = await ensureDaemon();

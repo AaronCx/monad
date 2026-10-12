@@ -329,7 +329,7 @@ function handleListSessions(deps: ControlDeps, res: ServerResponse, params: URLS
   }
 }
 
-/** GET /v1/search?q=&repo=&since=&limit=: Link search, the human as caller. */
+/** GET /v1/search?q=&repo=&since=&limit=&session=: Link search, the human as caller. */
 function handleSearch(deps: ControlDeps, res: ServerResponse, params: URLSearchParams): void {
   const query = params.get("q");
   if (query === null || query.trim() === "") {
@@ -342,6 +342,7 @@ function handleSearch(deps: ControlDeps, res: ServerResponse, params: URLSearchP
         repo: params.get("repo") ?? undefined,
         since: params.get("since") ?? undefined,
         limit: intParam(params, "limit"),
+        sessionId: params.get("session") ?? undefined,
       }),
     };
     sendJson(res, 200, body);

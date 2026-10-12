@@ -825,6 +825,30 @@ describe("sessions_read and sessions_search", () => {
     expect(hits.map((hit) => hit.sessionId)).toContain(worker.id);
   });
 
+  test("session_id searches inside one session with no per-session cap, and stays in scope", async () => {
+    // Measured live (acceptance run 1): with three hits per session the model
+    // saw one region of a long session and read only that range.
+    const h = harness();
+    const reader = { kind: "session" as const, id: (await h.session()).id };
+    const busy = await h.session();
+    const other = await h.session();
+    h.history(
+      busy.id,
+      Array.from({ length: 10 }, (_, i) => ["prompt", userPrompt(busy.id, `quokka ${i}`)] as const),
+    );
+    h.history(other.id, [["prompt", userPrompt(other.id, "quokka elsewhere")]]);
+    const hits = h.link.search(reader, "quokka", { sessionId: busy.id, limit: 50 });
+    expect(hits).toHaveLength(10);
+    expect(new Set(hits.map((hit) => hit.sessionId))).toEqual(new Set([busy.id]));
+    // The read is on the record like any other search.
+    expect(accessEvents(h.store, busy.id).some((e) => e.op === "search" && e.role === "target")).toBe(true);
+    await expectLinkError(
+      () => h.link.search(reader, "quokka", { sessionId: "01a00000-0000-7000-8000-000000000000" }),
+      "not_found",
+      "no session",
+    );
+  });
+
   test("a session's search leaves out its own log; the human's search does not", async () => {
     // Measured live (acceptance run 1): the asking session's own prompt and
     // reply matched its query best and took hits two and five.

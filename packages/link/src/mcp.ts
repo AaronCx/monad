@@ -92,7 +92,9 @@ const TOOL_DEFINITIONS: Record<
       "Full-text search over every other session's history (prompts, agent replies, tool call titles and " +
       "paths, errors). Returns hits with the session id and the seq range to read with sessions_read, " +
       "at most three per session, so the hits name as many sessions as they can. Prompts and replies " +
-      "rank above tool call rows, best ranked first within each.",
+      "rank above tool call rows, best ranked first within each. Pass session_id to search inside one " +
+      "session with no per-session cap, to find every place in a long session that matches before you " +
+      "choose which seq ranges to read.",
     inputSchema: {
       type: OBJECT,
       properties: {
@@ -100,6 +102,7 @@ const TOOL_DEFINITIONS: Record<
         repo: { type: "string" },
         since: { type: "string" },
         limit: { type: "integer", minimum: 1, maximum: 200 },
+        session_id: { type: "string", description: "Search only this session's history." },
       },
       required: ["query"],
       additionalProperties: false,
@@ -318,6 +321,7 @@ async function callTool(binding: SessionsMcpBinding, name: string, args: Args): 
         repo: optionalString(args, "repo"),
         since: optionalString(args, "since"),
         limit: optionalNumber(args, "limit"),
+        sessionId: optionalString(args, "session_id"),
       });
       const lines = hits.map(
         (hit) =>
