@@ -384,7 +384,8 @@ and its target, redacted before it is cut so no token prefix survives the cut, A
 tool result a `tool_call_update` (completed or failed, output cut to 4 KiB), a turn end
 `turn_ended`, an API error `error`. Every payload carries `_meta["monad.sh/imported"] = { source,
 line, vendor }`. Skipped: thinking (as for live sessions), Claude Code's bookkeeping lines, meta
-lines, slash command output, and `isSidechain` lines in a main file (an older Claude Code's inline
+lines, slash command output, bash mode (`! cmd`) output (its command is kept as a prompt `! cmd`
+that is not an ask), and `isSidechain` lines in a main file (an older Claude Code's inline
 subagent traffic, another conversation). The title is the first real ask, read the way phase 1
 derives titles (redacted, then cut): not a tool result, a task notification, a compaction summary
 or a slash command, and a subagent is named by the description its parent gave it.

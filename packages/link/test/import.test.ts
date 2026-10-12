@@ -302,6 +302,39 @@ describe("Claude Code logs", () => {
     expect(promptTexts(env.h.store.replay(child?.id ?? ""))[0]).toStartWith("A different prompt now");
   });
 
+  test("bash mode: the command is a prompt that is not an ask, its output is dropped", async () => {
+    const env = setup();
+    const id = randomUUID();
+    const path = join(env.root, "bash", `${id}.jsonl`);
+    mkdirSync(dirname(path));
+    const line = (content: string, second: number) =>
+      `${JSON.stringify({
+        sessionId: id,
+        cwd: env.home,
+        isSidechain: false,
+        type: "user",
+        timestamp: `2026-07-29T19:00:0${second}.000Z`,
+        message: { role: "user", content },
+      })}\n`;
+    writeFileSync(
+      path,
+      line("<bash-input>cat .env</bash-input>", 1) +
+        line(
+          "<bash-stdout>STRIPE_WEBHOOK_PASSWORD=summer2026rocks</bash-stdout><bash-stderr>warning: none</bash-stderr>",
+          2,
+        ) +
+        line("<bash-stdout></bash-stdout><bash-stderr>cat: nothing: No such file</bash-stderr>", 3) +
+        line("Why is the webhook rejected?", 4),
+    );
+    await env.importer.run([path]);
+    expect(promptTexts(env.h.store.replay(id))).toEqual(["! cat .env", "Why is the webhook rejected?"]);
+    expect(JSON.stringify(env.h.store.replay(id))).not.toContain("summer2026rocks");
+    expect(env.h.store.search("summer2026rocks")).toEqual([]);
+    expect(env.h.link.read({ kind: "human" }, id).text).not.toContain("summer2026rocks");
+    // Titled after the first ask, not the command.
+    expect(env.h.store.get(id)?.title).toBe("Why is the webhook rejected?");
+  });
+
   test("tool output is cut to 4 KiB", async () => {
     const env = setup();
     appendFileSync(

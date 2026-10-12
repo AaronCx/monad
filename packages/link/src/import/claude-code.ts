@@ -28,7 +28,9 @@ import {
  *   array of tool_result blocks, NOT an ask), an `isMeta` line Claude Code
  *   injected (skill bodies, image captions, the local-command caveat), a
  *   slash command (`<command-name>` wrapper) or its output
- *   (`<local-command-stdout>`), a background task notification
+ *   (`<local-command-stdout>`), a bash mode command (`<bash-input>`, from
+ *   the installed binary, not yet seen in a log here) or its output
+ *   (`<bash-stdout>`, `<bash-stderr>`), a background task notification
  *   (`<task-notification>`, origin task-notification), or the summary that
  *   continues a compacted conversation (`isCompactSummary`).
  * - `assistant`: ONE content block per line (text, thinking, tool_use), with
@@ -178,8 +180,22 @@ function slashCommand(text: string): string | undefined {
   return args.length > 0 ? `${command} ${args}` : command;
 }
 
-/** Prefixes of user text Claude Code wrote, never the human: not prompts at all. */
-const CLIENT_OUTPUT = ["<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"];
+/**
+ * Prefixes of user text Claude Code wrote, never the human: not prompts at
+ * all. Bash mode's (`! cmd`) stdout and stderr are command output, which
+ * monad never returns to a reader (decision record 0012), so they are
+ * dropped like a slash command's output.
+ */
+const CLIENT_OUTPUT = [
+  "<local-command-stdout>",
+  "<local-command-stderr>",
+  "<local-command-caveat>",
+  "<bash-stdout>",
+  "<bash-stderr>",
+];
+
+/** Bash mode's command line, `<bash-input>cmd</bash-input>`, read as Claude Code shows it: `! cmd`. */
+const BASH_INPUT = /^<bash-input>([\s\S]*?)<\/bash-input>/;
 
 /**
  * The prompt a user text line stands for, and whether it is an ask (the
@@ -189,6 +205,11 @@ function userText(text: string, line: Record<string, unknown>): { text: string; 
   const trimmed = text.trimStart();
   if (trimmed.length === 0 || CLIENT_OUTPUT.some((prefix) => trimmed.startsWith(prefix))) {
     return undefined;
+  }
+  const bash = trimmed.match(BASH_INPUT);
+  if (bash) {
+    // The human typed it, but as a command to run, not an ask of the model.
+    return { text: `! ${bash[1]?.trim() ?? ""}`, ask: false };
   }
   if (trimmed.startsWith("<command-name>") || trimmed.startsWith("<command-message>")) {
     const command = slashCommand(trimmed);
