@@ -99,8 +99,9 @@ place, never written, into sessions with backend `import:claude-code` or `import
 `imported`. Their events are what a live session would have logged, keep the log's timestamps, and
 go through the same append path, so the index, repo tags and titles treat them like any other
 session. The `imports` table records how far each file has been read (byte offset, lines, size,
-mtime, inode, a hash of the read prefix) in the same transaction as the events, so re-import is
-incremental and idempotent, and a truncated or replaced file is read again from the start. An
+mtime, inode, a hash of both ends of the bytes read) in the same transaction as the events, so
+re-import is incremental and idempotent, and a truncated or replaced file is read again from the
+start. An
 imported session is read-only: it is searched, read and listed, never attached, prompted, switched,
 cancelled, closed or messaged. Decision record 0012 has the details.
 

@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -475,7 +476,64 @@ describe("incremental, idempotent re-import", () => {
     expect(env.h.store.get(MAIN_ID)?.title).toStartWith("Why does scrolling");
   });
 
-  test("a file replaced in place (same size or longer, different content) is re-imported too", async () => {
+  test("a file rewritten in place past its first 4 KiB (same inode, same size) is re-imported", async () => {
+    const env = setup();
+    await env.importer.run([env.mainLog]);
+    const ino = statSync(env.mainLog).ino;
+    const original = readFileSync(env.mainLog, "utf8");
+    const at = Buffer.byteLength(original.slice(0, original.indexOf("status-row clamp")));
+    expect(at).toBeGreaterThan(4096);
+    // Same length, same inode, the change well past the first 4 KiB.
+    writeFileSync(env.mainLog, original.replace("status-row clamp", "status-row brace"));
+    expect(statSync(env.mainLog).ino).toBe(ino);
+    expect(statSync(env.mainLog).size).toBe(Buffer.byteLength(original));
+    const summary = await env.importer.run([env.mainLog]);
+    expect(summary).toMatchObject({ sessionsReset: 1, linesMalformed: 0 });
+    expect(env.h.store.search("status-row brace").map((hit) => hit.sessionId)).toEqual([MAIN_ID]);
+    expect(env.h.store.search("status-row clamp")).toEqual([]);
+  });
+
+  test("a file replaced by a new one (new inode) is re-imported, even when both its ends match", async () => {
+    const env = setup();
+    // Long enough that the change below is in neither the first nor the
+    // last 4 KiB: only the new inode says the file is not the one read.
+    for (let i = 0; i < 40; i += 1) {
+      appendFileSync(
+        env.mainLog,
+        claudeLine(env, {
+          type: "assistant",
+          timestamp: "2026-07-29T16:30:00.000Z",
+          message: { id: `msg_f${i}`, role: "assistant", content: [{ type: "text", text: `filler reply ${i}` }] },
+        }),
+      );
+    }
+    await env.importer.run([env.mainLog]);
+    const ino = statSync(env.mainLog).ino;
+    const original = readFileSync(env.mainLog, "utf8");
+    const at = Buffer.byteLength(original.slice(0, original.indexOf("status-row clamp")));
+    expect(at).toBeGreaterThan(4096);
+    expect(at).toBeLessThan(Buffer.byteLength(original) - 4096);
+    // Written beside it and renamed over it, as an editor or a sync tool
+    // does: a new inode, the same length.
+    const temp = `${env.mainLog}.tmp`;
+    writeFileSync(temp, original.replace("status-row clamp", "status-row brace"));
+    renameSync(temp, env.mainLog);
+    expect(statSync(env.mainLog).ino).not.toBe(ino);
+    const summary = await env.importer.run([env.mainLog]);
+    expect(summary).toMatchObject({ sessionsReset: 1, linesMalformed: 0 });
+    expect(env.h.store.search("status-row brace").map((hit) => hit.sessionId)).toEqual([MAIN_ID]);
+    expect(env.h.store.search("status-row clamp")).toEqual([]);
+
+    // The same file imported into an empty store is the reference.
+    const fresh = setup();
+    writeFileSync(fresh.mainLog, readFileSync(env.mainLog, "utf8"));
+    await fresh.importer.run([fresh.mainLog]);
+    const kinds = (events: EventRecord[]) => events.map((e) => e.kind);
+    expect(kinds(env.h.store.replay(MAIN_ID))).toEqual(kinds(fresh.h.store.replay(MAIN_ID)));
+    expect(await env.importer.run([env.mainLog])).toMatchObject({ filesUnchanged: 1, eventsAppended: 0 });
+  });
+
+  test("a file replaced in place near its start (same size or longer, different content) is re-imported", async () => {
     const env = setup();
     await env.importer.run([env.codexLog]);
     const before = ftsRows(env, CODEX_ID).length;

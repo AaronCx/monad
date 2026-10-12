@@ -397,13 +397,16 @@ Claude Code recorded on its line when it differs from the session's (Codex logs 
 `workdir`): the command ran there.
 
 **Incremental and idempotent.** The `imports` table keeps, per source file, the session id, the
-byte offset just past the last whole line read, the line count, size, mtime, inode and a hash of
-the first 4 KiB of the consumed prefix, written in the SAME transaction as the events read up to
-that offset: a crash mid-file neither repeats nor loses a line. A run stats each file and skips one
+byte offset just past the last whole line read, the line count, size, mtime, inode and a
+fingerprint of the bytes read (a hash of their first 4 KiB and their last 4 KiB, which end with the
+last line read), written in the SAME transaction as the events read up to that offset: a crash
+mid-file neither repeats nor loses a line. A batch written before the end of the file records the
+bytes read so far as the size, so a run that stops partway is never mistaken for one that finished. A run stats each file and skips one
 whose size, mtime and inode are unchanged; otherwise it reads whole lines from the offset (bytes
 after the last newline are a line the vendor is still writing, left for the next run) in batches
 of a thousand events. A second run with nothing new appends nothing. A file that shrank below its
-offset, or whose consumed prefix no longer hashes the same, was truncated or replaced: the
+offset, has a new inode, or whose bytes read no longer match their fingerprint was truncated or
+replaced: the
 session's imported events, index rows and repo tags are dropped and the file is read again from
 the start. What monad itself wrote about the session (access events, handoffs, summaries) is kept
 and re-indexed, because the record of who read a session must not be erased by its source
@@ -495,8 +498,10 @@ lifetime), and reading it buys that one session's Link reach and nothing else: n
 - An older Claude Code's inline sidechain lines (subagent traffic inside the main file) are
   skipped, not rebuilt into child sessions.
 - Tool output is kept cut to 4 KiB per string; the original log is the place to read all of it.
-- Replacement is recognized by size and a hash of the first 4 KiB already read: a file rewritten
-  in place with the same first 4 KiB and at least the same length reads as appended to.
+- Replacement is recognized by size, inode, and a hash of the first and last 4 KiB already read:
+  a file rewritten in place (same inode) with at least the same length and both of those 4 KiB
+  unchanged, the change only between them, reads as appended to. Hashing everything read would
+  mean reading the whole file on every append; vendors only ever append.
 
 ## Revisit when
 

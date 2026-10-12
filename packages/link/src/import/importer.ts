@@ -16,15 +16,16 @@ import { asRecord, type ImportVendor, type LineContext, type ParsedLine, str, su
  * never attached, prompted or messaged.
  *
  * Incremental and idempotent. Each file's progress is a row in the store's
- * imports table (byte offset, line count, size, mtime, inode, and a hash of
- * the consumed prefix), written in the SAME transaction as the events read
- * up to that offset, so a crash mid-file loses or repeats nothing. A run
- * reads only what was appended since the last one, only whole lines (a
- * partial trailing line, a vendor mid-write, is left for next time), and a
- * second run with nothing new appends nothing. A file that shrank below its
- * offset, or whose already-read prefix changed, was truncated or replaced:
- * its session's imported events, index rows and repo tags are dropped and
- * it is read again from the start.
+ * imports table (byte offset, line count, size, mtime, inode, and a
+ * fingerprint of the consumed bytes), written in the SAME transaction as the
+ * events read up to that offset, so a crash mid-file loses or repeats
+ * nothing. A run reads only what was appended since the last one, only whole
+ * lines (a partial trailing line, a vendor mid-write, is left for next
+ * time), and a second run with nothing new appends nothing. A file that
+ * shrank below its offset, has a new inode, or whose consumed bytes no
+ * longer match their fingerprint was truncated or replaced: its session's
+ * imported events, index rows and repo tags are dropped and it is read
+ * again from the start.
  *
  * Nothing here indexes anything. Events go through SessionStore, so the
  * Phase 1 indexer, redaction, repo tagging and titles apply exactly as they
@@ -37,8 +38,8 @@ const IMPORT_BATCH = 1000;
 /** Bytes read from a file per read call. */
 const READ_CHUNK = 8 * 1024 * 1024;
 
-/** How much of a file's already-read prefix is hashed to recognize a replaced file. */
-const HEAD_BYTES = 4096;
+/** Bytes hashed at each end of a file's consumed part to recognize a rewritten file. */
+const EDGE_BYTES = 4096;
 
 /** Directories deeper than this under a root are not walked. */
 const MAX_DEPTH = 12;
@@ -166,10 +167,25 @@ interface RunTotals {
   skippedCount: number;
 }
 
-function hashPrefix(prefix: Buffer, length: number): string {
-  return createHash("sha256")
-    .update(prefix.subarray(0, Math.min(length, HEAD_BYTES)))
-    .digest("hex");
+/**
+ * A fingerprint of a file's first `offset` bytes (the part already read): a
+ * hash of its first and its last EDGE_BYTES. The last ones are the end of
+ * the last line read, so a file whose fingerprint still matches has a line
+ * boundary at `offset` and reading on from there starts a whole line; the
+ * first ones hold the session's start. Hashing everything read would mean
+ * reading the whole file again on every append, so a rewrite that keeps
+ * the inode, the length and both ends but changes only the middle goes
+ * unnoticed (decision record 0012 lists it); vendors only ever append.
+ */
+function fingerprint(fd: number, offset: number): string {
+  const hash = createHash("sha256");
+  const length = Math.min(EDGE_BYTES, offset);
+  const buffer = Buffer.alloc(length);
+  for (const start of [0, offset - length]) {
+    const read = length > 0 ? readSync(fd, buffer, 0, length, start) : 0;
+    hash.update(buffer.subarray(0, read));
+  }
+  return hash.digest("hex");
 }
 
 function yieldToEventLoop(): Promise<void> {
@@ -307,11 +323,6 @@ export class Importer {
       totals.filesUnchanged += 1;
       return;
     }
-    const prefix = Buffer.alloc(Math.min(HEAD_BYTES, size));
-    if (prefix.length > 0) {
-      readSync(fd, prefix, 0, prefix.length, 0);
-    }
-
     // Which session this file is.
     let sessionId: SessionId | undefined = state?.sessionId;
     if (sessionId === undefined) {
@@ -354,8 +365,8 @@ export class Importer {
           this.skip(totals, path, `already imported from ${owner.sourcePath}`);
           return;
         }
-        if (size >= owner.offset && hashPrefix(prefix, owner.offset) === owner.head) {
-          state = { ...owner, sourcePath: path };
+        if (size >= owner.offset && fingerprint(fd, owner.offset) === owner.head) {
+          state = { ...owner, sourcePath: path, ino: stat.ino };
           this.store.moveImportState(owner.sourcePath, state);
         } else {
           this.skip(
@@ -371,15 +382,16 @@ export class Importer {
         this.store.resetImported(sessionId);
         totals.reset.add(sessionId);
       }
-    } else if (size < state.offset || hashPrefix(prefix, state.offset) !== state.head) {
-      // Truncated, or replaced: what was read is no longer what the file says.
+    } else if (stat.ino !== state.ino || size < state.offset || fingerprint(fd, state.offset) !== state.head) {
+      // Replaced (a new file at this path), truncated, or rewritten: what was
+      // read is no longer what the file says.
       this.store.resetImported(sessionId);
       totals.reset.add(sessionId);
       state = undefined;
     }
 
     const file = { size, mtimeMs: stat.mtimeMs, ino: stat.ino };
-    await this.readFrom(fd, candidate, sessionId, state, file, prefix, totals);
+    await this.readFrom(fd, candidate, sessionId, state, file, totals);
   }
 
   /** Reads whole lines from the state's offset (or 0) to the end of the file, appending in batches. */
@@ -389,7 +401,6 @@ export class Importer {
     sessionId: SessionId,
     state: ImportState | undefined,
     file: { size: number; mtimeMs: number; ino: number },
-    prefix: Buffer,
     totals: RunTotals,
   ): Promise<void> {
     const parse = candidate.vendor === "codex" ? parseCodexLine : parseClaudeCodeLine;
@@ -436,7 +447,7 @@ export class Importer {
         mtimeMs: file.mtimeMs,
         ino: file.ino,
         line: lineCount,
-        head: hashPrefix(prefix, offset),
+        head: fingerprint(fd, offset),
       };
       let create: SessionRecord | undefined;
       if (!record && batch.length > 0) {

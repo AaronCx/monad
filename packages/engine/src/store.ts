@@ -122,10 +122,12 @@ interface SearchRow {
 /**
  * How far the importer has read one vendor log file (Link phase 4). offset is
  * the byte just past the last whole line consumed and line the number of
- * lines consumed; size, mtimeMs and ino are the file as last seen, so an
- * unchanged file is skipped with one stat; head is a hash of the file's
- * first line, so a file replaced in place (same inode, new content) is
- * recognized and read again from the start.
+ * lines consumed; size, mtimeMs and ino are the file as last seen (size is
+ * the offset itself while a file is only partly read), so an unchanged file
+ * is skipped with one stat; a new inode means the file was replaced. head
+ * is a fingerprint of the consumed bytes (a hash of their first and last 4
+ * KiB), so a file rewritten in place is recognized and read again from the
+ * start.
  */
 export interface ImportState {
   sourcePath: string;
