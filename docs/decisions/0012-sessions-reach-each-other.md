@@ -152,6 +152,13 @@ FTS5, a long question in plain words can match no single row; when the strict qu
 nothing, search retries with the terms joined by OR, and bm25 still ranks rows matching more terms
 first.
 
+Each hit also says where its session came from: when the session was active and, for a subagent,
+which session spawned it. A subagent that digested another session's transcript matches the same
+words as the session that did the work, and in acceptance run 1 the model read the digest over
+the original five times with the original at hit 1; nothing in the hits told them apart. The
+tool description says a later digest is secondhand. Provenance is a fact about the log, not a
+ranking change: the order of hits is the same with or without it.
+
 None of this makes prompt injection impossible. The claim is narrower and enforceable: whatever a
 quoted session says, the reader receives it marked as someone else's recorded words with known
 secrets removed, and the daemon decides what any session may do next.

@@ -1,6 +1,6 @@
 # Link acceptance run 1: walls 1 and 2 (import, then find the meshyy scrolling history)
 
-**Result: FAIL.** Twelve attempts. Link itself now does its part: search ranks session `096c02c8` first for the question, `sessions_read` reads it, `monad ls --repo meshyy --all` lists it, and its log records the asking session's access. But no attempt met every criterion: the one attempt that read `096c02c8` (attempt 9) read only the range of the fourth report and answered without the four reports or the deferred items named to Aaron; attempts 6, 8, 10, 11 and 12 gave a substantively correct answer but took it from a digest session (`f1b92b09`) instead of reading `096c02c8`. Attempts 10-12 ran on 94ebaa0, which lets `sessions_search` search inside one session (`session_id`) so a model that found the right long session can locate every relevant region; none of them used it on `096c02c8` (see [Attempts 10-12](#attempts-10-12-build-94ebaa0-sessions_search-session_id)). Two monad bugs were found and fixed on the way (64ce2bb, 1c5b03d), on top of the two the previous operator fixed (1bad1d4, 2837aae); attempts 10-12 found no monad bug.
+**Result: FAIL.** Fourteen attempts. Link itself now does its part: search ranks session `096c02c8` first for the question, `sessions_read` reads it, `monad ls --repo meshyy --all` lists it, and its log records the asking session's access. But no attempt met every criterion: the one attempt that read `096c02c8` (attempt 9) read only the range of the fourth report and answered without the four reports or the deferred items named to Aaron; attempts 6, 8, 10, 11 and 12 gave a substantively correct answer but took it from a digest session (`f1b92b09`) instead of reading `096c02c8`. Attempts 10-12 ran on 94ebaa0, which lets `sessions_search` search inside one session (`session_id`) so a model that found the right long session can locate every relevant region; none of them used it on `096c02c8` (see [Attempts 10-12](#attempts-10-12-build-94ebaa0-sessions_search-session_id)). Two monad bugs were found and fixed on the way (64ce2bb, 1c5b03d), on top of the two the previous operator fixed (1bad1d4, 2837aae); attempts 10-12 found no monad bug. Attempts 13-14 ran on 23ac18c, which shows on each search hit when its session was active and which session spawned it: neither read the digest, but both answered from Aaron's October scroll campaign `43a93522` (still active on 2026-10-14) instead of `096c02c8` (see [Attempts 13-14](#attempts-13-14-build-23ac18c-provenance-on-search-hits)).
 Environment: this Mac (M4 Mac mini, macOS 26), 2026-10-12 (America/New_York), branch
 `feat/link-4-import`, monadd/monad 0.1.0 built from the branch with `bun run build`
 (`bunx turbo run build --force`), claude-agent-acp 0.70.0 (Claude Code 2.1.232 underneath),
@@ -91,7 +91,9 @@ Attempt 4 ran against the first state and read session `25170ea4` "Extract meshy
 | 9 | `01a1309c-b0a1-7000-92e3-a0d033dd247d` | 1c5b03d | clean state #5 (kept for runs 2-6) | 58aa12e1, 18ab714b, 43a93522, 63a8d06a, **096c02c8 seq 12150-12191** | FAIL (partial). Found 096c02c8 as hit 1 and read it, but only the fourth report's range. See the assessment. |
 | 10 | `01a130b8-f9a3-7000-9305-34f3fb0f1451` | 94ebaa0 | clean state #6 | f1b92b09, 43a93522 (x2), 18ab714b, 63a8d06a, 909981df | FAIL. 096c02c8 was hit 1 for "scroll"; the model read the digest `f1b92b09` first and never read 096c02c8. Did not use `session_id`. |
 | 11 | `01a130ba-e999-7000-9bc1-bacf185081da` | 94ebaa0 | clean state #7 | f1b92b09 (x2), 18ab714b, 43a93522 (x3) | FAIL. 096c02c8 hit 1; read the digest. Used `session_id` four times, on 43a93522 and 18ab714b, never on 096c02c8. Answer content right (four reports, b72 clamp, both deferred items) but not from 096c02c8. |
-| 12 | `01a130bd-0f85-7000-9a80-7627ce9983df` | 94ebaa0 | clean state #8 (left running) | f1b92b09, 18ab714b, 909981df, 43a93522 (x2) | FAIL. 096c02c8 hit 1; read the digest. Did not use `session_id`. Answer content right but not from 096c02c8. |
+| 12 | `01a130bd-0f85-7000-9a80-7627ce9983df` | 94ebaa0 | clean state #8 | f1b92b09, 18ab714b, 909981df, 43a93522 (x2) | FAIL. 096c02c8 hit 1; read the digest. Did not use `session_id`. Answer content right but not from 096c02c8. |
+| 13 | `01a13bb9-939b-7000-9a7c-9b2a65faceb5` | 23ac18c | clean state #9 | 43a93522 (x2) | FAIL. Read Aaron's memory file `project_meshyy.md` first, searched its words, and `096c02c8` was not in the hits. Answered about the October campaign. |
+| 14 | `01a13bbb-0227-7000-a31e-9f2cb993326d` | 23ac18c | clean state #10 (left running) | 43a93522 (x2) | FAIL. 096c02c8 hit 1 with its August span shown; read the October campaign 43a93522 (hit 2). No digest read. Answered about October. |
 
 ## Bugs found by this run
 
@@ -1359,7 +1361,7 @@ Assessment (attempt 11):
 
 Attempt 11: **FAIL.** Two of its `session_id` searches ("root cause clamp scrollback", "deferred remaining not fixed dead window alt-screen belief") returned 0 hits: FTS5 joins the words of a query with AND, and no single row of 43a93522 holds all of them. That did not cause the failure (it was searching 43a93522, not 096c02c8), but a model that writes long natural-language queries gets nothing back from them.
 
-### Attempt 12: `01a130bd-0f85-7000-9a80-7627ce9983df` (94ebaa0, clean state #8 (left running))
+### Attempt 12: `01a130bd-0f85-7000-9a80-7627ce9983df` (94ebaa0, clean state #8)
 
 The agent's Link calls (arguments as the vendor recorded them):
 
@@ -1541,3 +1543,186 @@ Why they failed, and why no fix followed: in all three, Link put 096c02c8 at hit
 One behaviour worth knowing, seen in attempt 11: a multi-word `sessions_search` query matches only rows containing every word (FTS5's implicit AND), so long natural-language queries such as "deferred remaining not fixed dead window alt-screen belief" return 0 hits even inside the right session. It did not cause this failure.
 
 **Run 1: FAIL** (twelve attempts; the criterion "reads the right range of 096c02c8" was never met in full).
+
+## Attempts 13-14 (build 23ac18c, provenance on search hits)
+
+What changed since attempt 12: commit 23ac18c ("feat(link): say where each search hit's session came from"). Each `sessions_search` hit now carries when its session was active and, for a subagent, which session spawned it, rendered under the hit line:
+
+~~~~~text
+096c02c8-1e54-4bcc-8520-de007e67c9f2 "/Users/acx/.aplusterminal-inbox/cff1f1bd-meshyy-handoff-2026-07-29.md ive been w" prompt seq 11901-11901 (2026-08-06T21:19:25.758Z)
+  session active 2026-07-29T15:05:55.417Z to 2026-08-10T22:28:26.546Z
+  ...able to «scroll» inside of the TMUx session at all when in «meshyy» ssh works but...
+43a93522-3701-437a-a02a-60a68db2c782 "can you read and complete this ~/Developer/cc-sessions/start-meshyy-scroll.sh" prompt seq 53-53 (2026-10-11T19:53:05.018Z)
+  session active 2026-10-11T19:51:45.361Z to 2026-10-14T08:47:15.529Z
+  can you read and complete this ~/Developer/cc-sessions/start-«meshyy»-«scroll».sh
+~~~~~
+
+and the tool description says a later session or subagent that quotes or summarizes another session's work is secondhand, so read the session where the work happened. The aim was the failure of attempts 6, 8 and 10-12: the model read the digest subagent `f1b92b09` over `096c02c8`, and nothing in the hits told them apart. Nothing else changed: same question, same cwd, same import discipline, a fresh `MONAD_HOME` per attempt, no hint in the prompt.
+
+Date 2026-10-14 (America/New_York). Build: `bunx turbo run build --force` at 23ac18c. The attempt 12 state was archived as `state-attempt12-2026-10-12`, attempt 13's as `state-attempt13-2026-10-14`. The path list was rebuilt by `build-import-paths.py` (23 entries, the same roots as attempts 10-12; excluded: the a9f9ea07 orchestration logs and every earlier attempt's vendor logs, 28 entries, recorded as `r1-a13-import-excluded.txt` and `r1-a14-import-excluded.txt`). Aaron's sessions since 2026-10-12 add sessions; his October scroll campaign `43a93522` and the release session `909981df` ran until 2026-10-14.
+
+~~~~~text
+attempt 13: scanned 279 log file(s) under ... in 2.9s / imported 35377 event(s): 275 new session(s), 0 updated
+attempt 14: imported 35368 event(s): 272 new session(s), 0 updated
+~~~~~
+
+Before attempt 13 every imported path was grepped for `groundtruth-1`, `acceptance/link`, `a9f9ea07` and `monad-link-acceptance`. Hits: `~/Developer/cc-sessions/monad-session-link-brief.md` and the memory file `project_monad.md` (not logs, not imported), a disk-usage listing in `909981df` that names the directory `.monad-link-acceptance-work`, and a stop-hook log in one of its subagents that names the session id `a9f9ea07`. Neither carries any ground truth.
+
+### Attempt 13: `01a13bb9-939b-7000-9a7c-9b2a65faceb5` (23ac18c, clean state #9)
+
+The agent's Link calls (arguments as the vendor recorded them):
+
+~~~~~text
+sessions_search {"query": "scroll divergence meshyy swipe", "limit": 30}
+notes_read {"repo": "/Users/acx/Developer/github/meshyy"}
+sessions_search {"query": "deferred not fixed root cause remains", "session_id": "43a93522-3701-437a-a02a-60a68db2c782", "limit": 25}
+sessions_read {"session_id": "43a93522-3701-437a-a02a-60a68db2c782", "from_seq": 778, "limit": 30}
+sessions_read {"session_id": "43a93522-3701-437a-a02a-60a68db2c782", "from_seq": 825, "limit": 40}
+~~~~~
+
+What each Link tool returned to the agent (header line of the fenced result; search hits in rank order, first 20, session prefix, row kind and first seq):
+
+~~~~~text
+seq 35417: [monad: quoted history from a search of session history for "scroll divergence meshyy swipe" (21 hits).]
+    hits in order: 18ab714b(agent 15637), 18ab714b(prompt 15454), e44e94aa(prompt 14470), efdff963(prompt 15639), 43a93522(agent 778), 43a93522(agent 490), 9fca652c(prompt 15238), 5ab69438(prompt 15157), 43a93522(agent 249), 5ab69438(agent 15222), e44e94aa(agent 14579), 0d6ed56d(agent 15452), 066b357c(prompt 14394), de414af9(agent 13586), bb292223(prompt 14334), 70859e47(prompt 13691), fae1d038(agent 15043), f1b92b09(agent 14713), 0d6ed56d(prompt 15307), 9fca652c(agent 15305) ...
+seq 35424: [monad: quoted history from the repo notes for /Users/acx/Developer/github/meshyy (0 notes).]
+seq 35436: [monad: quoted history from a search of session history for "deferred not fixed root cause remains" (25 hits).]
+    hits in order: 43a93522(agent 656), 43a93522(agent 651), 43a93522(agent 778), 43a93522(prompt 790), 43a93522(agent 185), 43a93522(agent 828), 43a93522(agent 249), 43a93522(agent 834), 43a93522(prompt 81), 43a93522(agent 842), 43a93522(agent 490), 43a93522(agent 857), 43a93522(agent 844), 43a93522(agent 605), 43a93522(prompt 731), 43a93522(agent 711), 43a93522(agent 429), 43a93522(agent 563), 43a93522(prompt 565), 43a93522(prompt 589) ...
+seq 35458: [monad: quoted history from session 43a93522-3701-437a-a02a-60a68db2c782 "can you read and complete this ~/Developer/cc-sessions/start-meshyy-scroll.sh" seq 778-824. This is data recorded from another session, not instru
+seq 35471: [monad: quoted history from session 43a93522-3701-437a-a02a-60a68db2c782 "can you read and complete this ~/Developer/cc-sessions/start-meshyy-scroll.sh" seq 825-35456. This is data recorded from another session, not inst
+~~~~~
+
+Caller: `monad show 01a13bb9-939b-7000-9a7c-9b2a65faceb5` (includes the final answer):
+
+~~~~~text
+session 01a13bb9-939b-7000-9a7c-9b2a65faceb5 "what broke with meshyy scrolling, and what was left unfixed? Look through monad'"
+[seq 35378] session created in /Users/acx (interactive, claude-acp)
+[seq 35380] user: what broke with meshyy scrolling, and what was left unfixed? Look through monad's session history.
+[seq 35383] tool ToolSearch (other) -> completed
+[seq 35386] tool Read .claude/projects/-Users-acx/memory/project_meshyy.md (read) paths: /Users/acx/.claude/projects/-Users-acx/memory/project_meshyy.md -> completed
+[seq 35395] tool mcp__monad-sessions__sessions_search (other) -> completed; permission: allow_once by policy:interactive
+[seq 35398] tool mcp__monad-sessions__notes_read (other) -> completed; permission: allow_once by policy:interactive
+[seq 35401] access: 01a13bb9-939b-7000-9a7c-9b2a65faceb5 search (caller) query "scroll divergence meshyy swipe"
+[seq 35422] access: 01a13bb9-939b-7000-9a7c-9b2a65faceb5 notes_read (caller)
+[seq 35426] tool mcp__monad-sessions__sessions_search (other) -> completed; permission: allow_once by policy:interactive
+[seq 35430] tool ls -la /Users/acx/Developer/github/a-plus-terminal/docs/qa/scroll-divergence-audit.md /Users/acx/Developer/cc-sessions/meshyy-scroll-brief.md 2>&1; echo ---; ls /Users/acx/Developer/cc-sessions/scroll-evidence/ 2>&1 | head -40 (execute) paths: /Users/acx/Developer/github/a-plus-terminal/docs/qa/scroll-divergence-audit.md, /Users/acx/Developer/cc-sessions/meshyy-scroll-brief.md, /Users/acx/Developer/cc-sessions/scroll-evidence/ -> completed
+[seq 35433] access: 01a13bb9-939b-7000-9a7c-9b2a65faceb5 search (caller) query "deferred not fixed root cause remains"
+[seq 35443] tool Read Developer/github/a-plus-terminal/docs/qa/scroll-divergence-audit.md (read) paths: /Users/acx/Developer/github/a-plus-terminal/docs/qa/scroll-divergence-audit.md -> completed
+[seq 35445] tool mcp__monad-sessions__sessions_read (other) -> completed; permission: allow_once by policy:interactive
+[seq 35455] access: 01a13bb9-939b-7000-9a7c-9b2a65faceb5 read (caller) target 43a93522-3701-437a-a02a-60a68db2c782
+[seq 35461] tool mcp__monad-sessions__sessions_read (other) -> completed; permission: allow_once by policy:interactive
+[seq 35468] access: 01a13bb9-939b-7000-9a7c-9b2a65faceb5 read (caller) target 43a93522-3701-437a-a02a-60a68db2c782
+[seq 35473] tool ls -lt /Users/acx/.aplusterminal-inbox/ 2>&1 | head -8 (execute) paths: /Users/acx/.aplusterminal-inbox/ -> completed
+[seq 35480-35857] agent: Read monad session `43a93522` (2026-10-11 → 2026-10-14, the "start-meshyy-scroll.sh" brief) plus its audit output at `a-plus-terminal/docs/qa/scroll-divergence-audit.md`. Summary:
+
+## What broke
+
+Aaron's report was swipe-to-scroll under meshyy "works inconsistently." Differential suites (same swipe over SSH as oracle vs. over meshyy into one real tmux, judged by what tmux actually did) pinned four distinct failure modes:
+
+1. **Path-change window**  -  the outbox writes to whatever transport is current, and the QUIC connection reports nothing when its path dies, so the swipe goes into a dead connection with `sendOK=1` and no error. On a true path change (Wi-Fi→cellular, NAT rebind) it's **lost, 3 of 3**. On a 4 s hole that heals it arrives **~5.5 s late or is lost  -  6 of 13 lost**. Heartbeat only declares death 3.1–4.1 s in, then the app redials with a fresh emulator. This is both halves of Aaron's wording: "nothing happens" and "starts working after a few seconds."
+2. **`.screenMode` ignored by the app**  -  `MeshyyTransport` records the frame for the trace but never applies it; replay starts after tmux's `?1049h`; and `TerminalSession.establish()` calls `resetToInitialState()` on every connect. So after any relaunch *or redial* the emulator believes it's on the primary screen while tmux holds the alternate. With tmux `mouse off`, `ScrollBridge` then routes `native` and sends **zero bytes**  -  5 of 5 runs, and the wrong belief persists through every later step. Masked for Aaron (his tmux has mouse on, and fullscreen Claude Code arms the mouse anyway), but it hits default-`mouse off` tmux, screen/zellij without mouse, and plain alt-screen programs (`less`, `man`, `vim`).
+3. **Ring-overrun networking spin** (new finding)  -  an unpaced flood while detached overruns the daemon's 4 MiB ring in 10–12 s; the sim app's `com.apple.network.connections` queue then pegs a core ≥28 s, heartbeats stall, and meshyy is lost afterwards in **7 of 7** runs (6 of 7 fell back to SSH on "no QUIC connection within 4000ms"). That's the "phone in pocket while Claude Code writes a lot" shape.
+4. **Minor/not-a-divergence**  -  a swipe right after keyboard dismissal can be taken at the old size; tmux applies the resize late on *any* transport (SSH did it 2–8 of 10). Recorded only because it looks like a dead swipe.
+
+## What was left unfixed
+
+**Scrolling itself  -  nothing was fixed.** The brief explicitly scoped PR C to audit-only, and both repos now carry the rule that nothing counts as fixed until Aaron confirms on a named TestFlight build. What shipped was observation and guard-rails:
+
+- **PR A** (meshyy #66/#67 → 0.1.22, a+Terminal #155/#156 → **TestFlight build 75**): on-device swipe trace at Settings → Diagnostics → Scroll trace; daemon `--trace-modes` ring; pong-inclusive `lastInboundFrameAt`. The live launchd daemon runs with tracing into `~/.meshyy/meshyyd.err`.
+- **PR B** (meshyy #68, a+Terminal #158): the SSH-oracle suites, with planted-mutation proof (#63 revert red 3/3; 1006-ordering revert red). Also fixed meshyy main's CI, red since #66  -  real-process daemon suites were starving the 3-core runner's cooperative pool; they're now serialized under `DaemonRealProcessSuite`.
+
+Recommended but **not implemented**: (A) redial on path change via `enableAutomaticReconnect` instead of on heartbeat death, (B) mark the tab not-live off the inbound clock at ~1.5 s and drop stale swipes, and honoring `.screenMode` as the routing belief. Input queue/replay (C) was argued against for scroll; QUIC migration (D) is unavailable  -  no public Network framework API.
+
+The ring-overrun spin is **not root-caused** and was deliberately kept out of the suite (repro patch at `~/Developer/cc-sessions/scroll-evidence/app-oracle-ring-overrun-step.patch`); its 28 s stack was only ever recorded in a test-file comment, never sampled. Also open: the rare "no QUIC connection within 10000ms" SessionStartPaint flake (1 in 5) never got written into known-debt.
+
+**The blocker is still Aaron's trace.** The session stopped waiting for a build-75 scroll trace to tell which of §1/§2/§3 he actually hits. I just checked `~/.aplusterminal-inbox/`  -  nothing has arrived; newest file is from Aug 24.
+[seq 35860] turn ended (end_turn)
+~~~~~
+
+### Attempt 14: `01a13bbb-0227-7000-a31e-9f2cb993326d` (23ac18c, clean state #10 (left running))
+
+The agent's Link calls (arguments as the vendor recorded them):
+
+~~~~~text
+sessions_search {"query": "meshyy scrolling", "limit": 30}
+notes_read {"repo": "/Users/acx/Developer/github/meshyy"}
+sessions_read {"session_id": "43a93522-3701-437a-a02a-60a68db2c782", "from_seq": 700, "limit": 200}
+sessions_read {"session_id": "43a93522-3701-437a-a02a-60a68db2c782", "from_seq": 840, "limit": 200}
+~~~~~
+
+What each Link tool returned to the agent (header line of the fenced result; search hits in rank order, first 20, session prefix, row kind and first seq):
+
+~~~~~text
+seq 35411: [monad: quoted history from a search of session history for "meshyy scrolling" (30 hits).]
+    hits in order: 096c02c8(prompt 11901), 43a93522(prompt 53), 909981df(agent 1030), 909981df(prompt 890), 096c02c8(prompt 13242), de414af9(prompt 13570), e44e94aa(prompt 14553), 63a8d06a(prompt 20663), 096c02c8(agent 13134), 18ab714b(prompt 15445), 909981df(agent 1026), e44e94aa(prompt 14461), 706fcb26(agent 16284), 2a4e58ba(agent 14141), 43a93522(prompt 790), 43a93522(agent 240), 0c585f12(agent 13932), efdff963(prompt 15630), 70859e47(prompt 13682), 714049a6(prompt 14285) ...
+seq 35418: [monad: quoted history from the repo notes for /Users/acx/Developer/github/meshyy (0 notes).]
+seq 35435: [monad: quoted history from session 43a93522-3701-437a-a02a-60a68db2c782 "can you read and complete this ~/Developer/cc-sessions/start-meshyy-scroll.sh" seq 700-839. This is data recorded from another session, not instru
+seq 35447: [monad: quoted history from session 43a93522-3701-437a-a02a-60a68db2c782 "can you read and complete this ~/Developer/cc-sessions/start-meshyy-scroll.sh" seq 840-35433. This is data recorded from another session, not inst
+~~~~~
+
+Caller: `monad show 01a13bbb-0227-7000-a31e-9f2cb993326d` (includes the final answer):
+
+~~~~~text
+session 01a13bbb-0227-7000-a31e-9f2cb993326d "what broke with meshyy scrolling, and what was left unfixed? Look through monad'"
+[seq 35369] session created in /Users/acx (interactive, claude-acp)
+[seq 35371] user: what broke with meshyy scrolling, and what was left unfixed? Look through monad's session history.
+[seq 35374] tool ToolSearch (other) -> completed
+[seq 35382] tool mcp__monad-sessions__sessions_search (other) -> completed; permission: allow_once by policy:interactive
+[seq 35385] tool mcp__monad-sessions__notes_read (other) -> completed; permission: allow_once by policy:interactive
+[seq 35388] access: 01a13bbb-0227-7000-a31e-9f2cb993326d search (caller) query "meshyy scrolling"
+[seq 35416] access: 01a13bbb-0227-7000-a31e-9f2cb993326d notes_read (caller)
+[seq 35420] tool ls /Users/acx/Developer/github/meshyy/docs/qa/ 2>/dev/null; echo ---; ls /Users/acx/Developer/cc-sessions/ 2>/dev/null | head -40 (execute) paths: /Users/acx/Developer/github/meshyy/docs/qa/, /dev/null, /Users/acx/Developer/cc-sessions/ -> completed
+[seq 35423] tool mcp__monad-sessions__sessions_read (other) -> completed; permission: allow_once by policy:interactive
+[seq 35432] access: 01a13bbb-0227-7000-a31e-9f2cb993326d read (caller) target 43a93522-3701-437a-a02a-60a68db2c782
+[seq 35437] tool mcp__monad-sessions__sessions_read (other) -> completed; permission: allow_once by policy:interactive
+[seq 35441] tool cd /Users/acx/Developer/github/a-plus-terminal && git log --oneline -3 -- docs/qa/scroll-divergence-audit.md && wc -l docs/qa/scroll-divergence-audit.md (execute) paths: /Users/acx/Developer/github/a-plus-terminal -> failed; permission: cancelled by human
+[seq 35444] access: 01a13bbb-0227-7000-a31e-9f2cb993326d read (caller) target 43a93522-3701-437a-a02a-60a68db2c782
+[seq 35455] tool Read Developer/github/a-plus-terminal/docs/qa/scroll-divergence-audit.md (read) paths: /Users/acx/Developer/github/a-plus-terminal/docs/qa/scroll-divergence-audit.md -> completed
+[seq 35463-35795] agent: Pulled from monad session `43a93522` (the meshyy-scroll brief, 2026-10-11→14) and the audit it produced, `a-plus-terminal/docs/qa/scroll-divergence-audit.md`.
+
+## What broke
+
+Aaron's symptom was "scrolling works inconsistently in tmux + Claude Code over meshyy, fine over SSH." Two live differential suites (same swipe driven over SSH as oracle and over meshyy into one real tmux, judged by `pane_in_mode`/`scroll_position`) pinned three distinct causes:
+
+**1. The path-change window** (`audit §1`)  -  QUIC reports nothing when its path dies, so a swipe sent into a dying connection goes into the dead connection with `sendOK=1, sendFailed=0`. Nothing queues or replays it. The heartbeat (1 s × 3 misses) only declares death 3.1–4.1 s after the hole opens, then the app redials with a fresh emulator.
+- True path change (Wi-Fi→cellular, NAT rebind): swipe **lost**, 3 of 3 → "nothing happens."
+- 4 s hole that heals: **delivered ~5.4–5.6 s late** or lost  -  6 of 13 runs lost → "starts working after a few seconds," as a scroll the user didn't just make.
+- Root enabler: Network.framework has no public QUIC migration API, and the app never calls meshyy's existing `enableAutomaticReconnect(bootstrap:)`.
+
+**2. `.screenMode` ignored by the app** (`§2`)  -  a fresh emulator relearns mouse modes from the daemon's `.modes` frame but learns the alternate screen from nothing: `MeshyyTransport` records `.screenMode` for the trace but never applies it, and `establish()` calls `resetToInitialState()` on *every* connect including redials. So after any relaunch/reconnect the emulator thinks the primary screen is up while tmux holds the alt screen; `ScrollBridge` then routes `native` and sends **0 bytes** where SSH sent 9 Up arrows. 5 of 5 runs, and the wrong belief persists through every later step → "the wrong thing scrolls." Masked for Aaron specifically, because his tmux is `mouse on` and fullscreen Claude Code arms the mouse itself.
+
+**3. New defect found while measuring** (`§3.1`)  -  an unpaced flood while detached overruns the daemon's 4 MiB ring in 10–12 s; afterwards the app's networking spins, heartbeats stall, and meshyy is lost in **7 of 7** runs (6 hit "no QUIC connection within 4000ms" and fell back to SSH). That's the "phone in pocket while Claude Code writes a lot" shape. Simulator only, not root-caused; repro kept out of the suite as a patch.
+
+## What was left unfixed
+
+**All three causes. Nothing was implemented**  -  PR C was explicitly audit-only per the brief. What shipped was *instrumentation*, not a fix:
+
+- **Shipped:** build 75 (swipe trace in Settings → Diagnostics, meshyy 0.1.22 with `--trace-modes` on this Mac's daemon), plus the SSH-as-oracle differential suites with the two divergences committed as *strict expected failures* that turn red when someone fixes them. a+Terminal #155/#157/#158, meshyy #66/#67/#68 all merged, both repos green.
+- **Recommended, not done:** §1 fix A (redial on path change via `enableAutomaticReconnect`) then B (mark the tab not-live off `lastInboundFrameAt`); §2 fix A (honor `.screenMode` as the routing belief). Fix C (input replay) was ruled out for scroll deliberately.
+- **Open and unresolved:** the ring-overrun networking spin  -  unconfirmed on a device, no saved stack sample (the one quoted exists only in a test comment; the fact-check flagged it as unsupported).
+- **The blocker:** the session stopped by design, waiting for Aaron's swipe trace from build 75 to say *which* of §1/§2/§3 he actually hits. As of the last check (seq 857, Oct 13) `~/.aplusterminal-inbox/` had nothing newer than Aug 25  -  **the trace never arrived**, so no fix was chosen. The audit's last table maps each reported symptom to its trace signature.
+
+Also noted but left: one rare meshyy QUIC 10 s connect flake never recorded in `known-debt.md`.
+[seq 35798] turn ended (end_turn)
+~~~~~
+
+### Assessment (attempts 13-14)
+
+| criterion | attempt 13 | attempt 14 |
+|---|---|---|
+| import run, summary recorded | PASS | PASS |
+| finds 096c02c8 via sessions_search | FAIL (not in the hits for its query) | PASS (hit 1, passed over) |
+| reads the right seq range(s) of 096c02c8 | FAIL (never read it) | FAIL (never read it) |
+| read a digest subagent | no | no |
+| answer: four reports | FAIL (answers about the October campaign) | FAIL (answers about the October campaign) |
+| answer: build 72 status-row clamp | FAIL (not mentioned) | FAIL (not mentioned) |
+| answer: two deferred items named to Aaron | FAIL (content of both appears as October findings) | FAIL (content of both appears as October findings) |
+| `monad ls --repo meshyy --all` lists 096c02c8 | PASS | PASS |
+| access events on 096c02c8 from the asker | FAIL (none) | PARTIAL (search only) |
+
+Attempt 13 read Aaron's own Claude Code memory file `project_meshyy.md` before calling Link (it describes the October scroll brief), searched with that file's words ("scroll divergence meshyy swipe"), which `096c02c8` does not match, and answered from `43a93522` and the audit document on disk. Attempt 14 searched "meshyy scrolling", got `096c02c8` at hit 1 with its July 29 to August 10 span under it and `43a93522` at hit 2 with its October 11 to 14 span, and read `43a93522`.
+
+Neither read a digest: the failure attempts 6, 8 and 10-12 shared did not recur, and both answers come from a primary source. But the primary source they chose is Aaron's October scroll campaign, which has kept running since this brief was written (it was last active on 2026-10-14) and is now the most recent and the largest body of "meshyy scrolling" history on this machine. The question does not name a period; the run 1 criteria are the August history. Two attempts are too few to say the provenance lines caused the change, and no further change to monad was made: steering the model from the October campaign to the August session would be tuning Link to this one question, not fixing a Link bug.
+
+**Run 1: FAIL** (fourteen attempts; the criterion "reads the right range of 096c02c8" was never met in full).
+

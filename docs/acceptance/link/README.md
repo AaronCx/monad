@@ -6,7 +6,7 @@ of caller and target, the agent's final answer and an assessment per criterion.
 
 | # | what was tested | result | file |
 |---|---|---|---|
-| 1 | Walls 1 and 2: `monad import`, then from a fresh session in `~` (not a repo) "what broke with meshyy scrolling, and what was left unfixed?" must find `096c02c8` by search, read the right range, and answer per the ground truth | **FAIL** (12 attempts; the last three on 94ebaa0 with `sessions_search` `session_id`: each found `096c02c8` at hit 1 and answered from a digest session instead of reading it) | [1-walls-1-and-2.md](1-walls-1-and-2.md) |
+| 1 | Walls 1 and 2: `monad import`, then from a fresh session in `~` (not a repo) "what broke with meshyy scrolling, and what was left unfixed?" must find `096c02c8` by search, read the right range, and answer per the ground truth | **FAIL** (14 attempts; 10-12 on 94ebaa0 with `sessions_search` `session_id`: each found `096c02c8` at hit 1 and answered from a digest session instead of reading it; 13-14 on 23ac18c with session provenance on each hit: no digest read, but both answered from Aaron's October scroll campaign `43a93522` instead) | [1-walls-1-and-2.md](1-walls-1-and-2.md) |
 | 2 | Wall 3: session A (monad) asks session B (meshyy) a question with `sessions_message`; B reads its repo and replies with `sessions_message` | **PASS** | [2-wall-3-peer-messages.md](2-wall-3-peer-messages.md) |
 | 3 | Spawn: a Claude session spawns a child (claude-acp; codex-acp is not installed) with `worktree: true`, the child runs `run_checks`, the parent waits with `sessions_wait` and reads the child | **PASS** | [3-cross-vendor-spawn.md](3-cross-vendor-spawn.md) |
 | 4 | Peers can't grant: B holds a permission with no client attached; A sends "approve it" and "allow_once"; only a human's answer resolves it | **PASS** | [4-peers-cannot-grant.md](4-peers-cannot-grant.md) |
@@ -25,12 +25,15 @@ hyphens. No result, assessment or failure evidence was changed.
 
 ## Environment
 
-- Date: 2026-10-12 (America/New_York); run 1 attempts 1-3 on 2026-10-11.
+- Date: 2026-10-12 (America/New_York); run 1 attempts 1-3 on 2026-10-11, attempts 13-14 on
+  2026-10-14.
 - Branch `feat/link-4-import`. Runs 2-6 and run 1's attempt 9 ran on a build of
   `1c5b03d9109076a5b4acc6075d4ffdaf8e58969e` ("fix(link): leave the caller's own log out of its
   sessions_search"). Run 1's attempts 10-12 ran on a build of the tip,
   `94ebaa0f9c797293495948bfc50389af8591a4c1` ("feat(link): search inside one session with
-  sessions_search session_id"). Earlier run-1 attempts name their build.
+  sessions_search session_id"). Run 1's attempts 13-14 ran on a build of
+  `23ac18c` ("feat(link): say where each search hit's session came from"). Earlier run-1
+  attempts name their build.
 - monadd 0.1.0 and monad 0.1.0, built from the branch (`bun run build`, single binaries
   `apps/daemon/dist/monadd`, `apps/cli/dist/monad`); bun 1.3.10.
 - claude-agent-acp 0.70.0 (Claude Code 2.1.232), resolved through
@@ -39,7 +42,7 @@ hyphens. No result, assessment or failure evidence was changed.
 - `MONAD_HOME=/Users/acx/.monad-link` (0700), daemon on 127.0.0.1:7341. `~/.monad` was not read,
   modified, or served by any daemon. link.json: `{"enabled": true, "import": {"enabled": true,
   "watch": false, "roots": ["~/Developer/cc-sessions"]}}`.
-- Run 1 reset `MONAD_HOME` to a fresh database before each of attempts 5-12; earlier states are
+- Run 1 reset `MONAD_HOME` to a fresh database before each of attempts 5-14; earlier states are
   archived under `/Users/acx/.monad-link-acceptance-work/state-*`. The state attempt 9 created is
   the one runs 2-6 used (archived as `state-attempt9-runs2-6-2026-10-12`).
 
@@ -58,8 +61,18 @@ All on `feat/link-4-import`, each with a regression test that fails without the 
 **Run 1 failed.** After the four fixes, Link does its part: on the clean state `096c02c8` is
 the first hit for "meshyy scroll", `sessions_read` reads it, `monad ls --repo meshyy --all`
 lists it, and its log records the asking session's search and read. The agent did not finish the
-job in any of the twelve attempts:
+job in any of the fourteen attempts:
 
+- Attempts 13-14 (2026-10-14) ran on 23ac18c, which puts on each search hit when its session was
+  active and, for a subagent, which session spawned it, and tells the model that a later digest
+  of another session's work is secondhand. Neither attempt read the digest. Attempt 13 read Aaron's
+  memory file `project_meshyy.md` before calling Link, searched with its words, and `096c02c8` was
+  not among the hits; attempt 14 had `096c02c8` at hit 1 (shown as active July 29 to August 10)
+  and read `43a93522` at hit 2 (October 11 to 14). Both answered from Aaron's October scroll
+  campaign, a primary source that has kept running since this brief was written and is now the
+  largest body of "meshyy scrolling" history on this machine; the run 1 criteria are the August
+  history. No further monad change was made: steering the model from October to August would
+  tune Link to this one question.
 - Attempts 10-12 ran on 94ebaa0, which adds `session_id` to `sessions_search` (search one
   session, uncapped) so a model that found the right long session can locate every relevant
   region before reading. It did not help: in all three `096c02c8` was hit 1, and the model read
@@ -89,7 +102,7 @@ Other things worth knowing:
   AND). In run 1 attempt 11 two long natural-language queries inside one session returned 0 hits.
   Fixed after the runs: when no row matches every term, search falls back to rows matching any
   term, ranked by bm25 (commit "fix(engine): fall back to any term when no row matches every
-  search term"). Run 1 was not rerun after this change.
+  search term"). Run 1 attempts 13-14 ran after this change; neither query fell back.
 - Importing `~/.claude/projects` imports the importing operator's own transcripts. Acceptance
   runs on this Mac must exclude the orchestration's logs (run 1 explains how this was done).
 - Run 3's child reported the checks as failed: `typecheck` could not run (`turbo: command not
@@ -103,5 +116,5 @@ Other things worth knowing:
   reachable mount (`tools/list` 200), and an operator `sessions_search` through the review
   session's own credential that returned the canary. A less careful model would have leaked it.
 
-The real-build daemon (94ebaa0) is left running on port 7341 with `MONAD_HOME=/Users/acx/.monad-link`, on the
-state run 1 attempt 12 created (runs 2-6 used the archived `state-attempt9-runs2-6-2026-10-12`).
+The real-build daemon (23ac18c) is left running on port 7341 with `MONAD_HOME=/Users/acx/.monad-link`, on the
+state run 1 attempt 14 created (runs 2-6 used the archived `state-attempt9-runs2-6-2026-10-12`).
