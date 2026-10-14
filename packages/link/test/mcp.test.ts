@@ -199,6 +199,8 @@ describe("results reach the model: text content only, never structuredContent", 
       // Each hit's session id, seq range and snippet.
       expect(search.result.content[0].text).toMatch(new RegExp(`${target.id} ".*" \\w+ seq \\d+-\\d+`));
       expect(search.result.content[0].text).toContain("narwhal");
+      // And where the session came from, so a digest can be told from the work.
+      expect(search.result.content[0].text).toMatch(/\n {2}session active \S+ to \S+\n/);
       expect(list.result.content[0].text).toContain(target.id);
       expect(notes.result.content[0].text).toContain("narwhal note");
       expect(sent.result.content[0].text).toMatch(/^Message \S+ delivered: /);

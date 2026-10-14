@@ -865,6 +865,27 @@ describe("sessions_read and sessions_search", () => {
     );
   });
 
+  test("each hit says when its session was active and which session spawned it", async () => {
+    // Measured live (acceptance run 1): with the session that did the work at
+    // hit 1, models read a later subagent's digest of it, and nothing in the
+    // hits told the two apart.
+    const h = harness();
+    const reader = { kind: "session" as const, id: (await h.session()).id };
+    const worker = await h.session();
+    const digest = await h.session(undefined, { parentId: worker.id, spawnDepth: 1 });
+    h.history(worker.id, [["prompt", userPrompt(worker.id, "the platypus scroll broke")]]);
+    h.history(digest.id, [["prompt", userPrompt(digest.id, "summarize the platypus scroll work")]]);
+    const hits = h.link.search(reader, "platypus scroll");
+    const byId = new Map(hits.map((hit) => [hit.sessionId, hit]));
+    const workerRecord = h.store.get(worker.id);
+    expect(byId.get(worker.id)).toMatchObject({
+      startedAt: workerRecord?.createdAt,
+      lastActiveAt: workerRecord?.updatedAt,
+    });
+    expect(byId.get(worker.id)?.parentId).toBeUndefined();
+    expect(byId.get(digest.id)?.parentId).toBe(worker.id);
+  });
+
   test("a search query is redacted in the access record", async () => {
     const h = harness();
     const reader = await h.session();

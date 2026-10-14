@@ -92,9 +92,11 @@ const TOOL_DEFINITIONS: Record<
       "Full-text search over every other session's history (prompts, agent replies, tool call titles and " +
       "paths, errors). Returns hits with the session id and the seq range to read with sessions_read, " +
       "at most three per session, so the hits name as many sessions as they can. Prompts and replies " +
-      "rank above tool call rows, best ranked first within each. Pass session_id to search inside one " +
-      "session with no per-session cap, to find every place in a long session that matches before you " +
-      "choose which seq ranges to read.",
+      "rank above tool call rows, best ranked first within each. Each hit says when its session was " +
+      "active and, for a subagent, which session spawned it: a later session or subagent that quotes or " +
+      "summarizes another session's work is secondhand, so read the session where the work happened. " +
+      "Pass session_id to search inside one session with no per-session cap, to find every place in a " +
+      "long session that matches before you choose which seq ranges to read.",
     inputSchema: {
       type: OBJECT,
       properties: {
@@ -323,9 +325,15 @@ async function callTool(binding: SessionsMcpBinding, name: string, args: Args): 
         limit: optionalNumber(args, "limit"),
         sessionId: optionalString(args, "session_id"),
       });
-      const lines = hits.map(
-        (hit) =>
-          `${hit.sessionId} ${JSON.stringify(hit.title ?? "untitled")} ${hit.kind} seq ${hit.firstSeq}-${hit.lastSeq} (${hit.ts})\n  ${hit.snippet}`,
+      const lines = hits.map((hit) =>
+        [
+          `${hit.sessionId} ${JSON.stringify(hit.title ?? "untitled")} ${hit.kind} seq ${hit.firstSeq}-${hit.lastSeq} (${hit.ts})`,
+          ...(hit.startedAt === undefined
+            ? []
+            : [`  session active ${hit.startedAt} to ${hit.lastActiveAt ?? hit.startedAt}`]),
+          ...(hit.parentId === undefined ? [] : [`  subagent spawned by ${hit.parentId}`]),
+          `  ${hit.snippet}`,
+        ].join("\n"),
       );
       const text = quoteHistory(
         { label: `a search of session history for ${JSON.stringify(query)} (${hits.length} hits)` },

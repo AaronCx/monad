@@ -438,15 +438,23 @@ export class LinkService {
       // among them.
       maxPerSession: within === undefined ? SEARCH_HITS_PER_SESSION : undefined,
     });
-    const titles = new Map<string, string | undefined>();
+    // Each hit says where its session came from: a subagent that digested
+    // another session's work and the session that did the work can match
+    // the same words, and only the provenance tells them apart (measured
+    // live, acceptance run 1: with 096c02c8, active July to August, at hit
+    // 1, models read an October subagent's digest of it instead).
+    const sessions = new Map<string, SessionRecord | undefined>();
     const results: LinkSearchHit[] = hits.map((hit) => {
-      if (!titles.has(hit.sessionId)) {
-        titles.set(hit.sessionId, this.store.get(hit.sessionId)?.title);
+      if (!sessions.has(hit.sessionId)) {
+        sessions.set(hit.sessionId, this.store.get(hit.sessionId));
       }
-      const title = titles.get(hit.sessionId);
+      const session = sessions.get(hit.sessionId);
+      const title = session?.title;
       return {
         sessionId: hit.sessionId,
         ...(title === undefined ? {} : { title: redact(title) }),
+        ...(session?.parentId === undefined ? {} : { parentId: session.parentId }),
+        ...(session === undefined ? {} : { startedAt: session.createdAt, lastActiveAt: session.updatedAt }),
         kind: hit.kind,
         firstSeq: hit.firstSeq,
         lastSeq: hit.lastSeq,

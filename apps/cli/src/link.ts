@@ -290,6 +290,10 @@ export async function cmdSearch(handle: DaemonHandle, flags: SearchFlags): Promi
     console.log(
       `${hit.sessionId}  ${JSON.stringify(hit.title ?? "untitled")}  ${hit.kind}  seq ${hit.firstSeq}-${hit.lastSeq}  ${hit.ts}`,
     );
+    if (hit.startedAt !== undefined) {
+      const spawned = hit.parentId === undefined ? "" : `, spawned by ${hit.parentId}`;
+      console.log(`    session active ${hit.startedAt} to ${hit.lastActiveAt ?? hit.startedAt}${spawned}`);
+    }
     console.log(`    ${hit.snippet.replace(/\s+/g, " ")}`);
     console.log(`    monad show ${hit.sessionId.slice(0, 13)} --from ${hit.firstSeq}`);
   }

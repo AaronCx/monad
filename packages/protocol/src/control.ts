@@ -217,6 +217,10 @@ export const LinkSearchHitSchema = z.object({
   lastSeq: z.number().int().positive(),
   ts: TimestampSchema,
   snippet: z.string(),
+  /** Where the hit's session came from: the session that spawned it, and when it was active. */
+  parentId: SessionIdSchema.optional(),
+  startedAt: TimestampSchema.optional(),
+  lastActiveAt: TimestampSchema.optional(),
 });
 export type LinkSearchHit = z.infer<typeof LinkSearchHitSchema>;
 
