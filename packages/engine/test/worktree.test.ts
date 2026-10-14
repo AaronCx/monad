@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createSpawnWorktree,
   createWorktree,
   ensureFixBranch,
   fetchPullRequestHead,
@@ -131,6 +132,25 @@ describe("createWorktree", () => {
       createWorktree({ repoRoot: repoDir, sha: baseSha, sessionId, env }),
     ).rejects.toThrow(/already exists/);
     await removeWorktree({ repoRoot: repoDir, path });
+  });
+});
+
+describe("createSpawnWorktree (Link sessions_spawn)", () => {
+  test("checks out the cwd's repo at HEAD, detached, from a subdirectory too", async () => {
+    const sub = join(repoDir, "nested");
+    execFileSync("mkdir", ["-p", sub]);
+    const head = git(repoDir, "rev-parse", "HEAD");
+    const { path } = await createSpawnWorktree({ cwd: sub, sessionId: "sess-spawn", env });
+    expect(path).toBe(join(worktreesRoot(env), await repoKey(repoDir), "sess-spawn"));
+    expect(git(path, "rev-parse", "HEAD")).toBe(head);
+    expect(() => git(path, "symbolic-ref", "-q", "HEAD")).toThrow();
+    await removeWorktree({ repoRoot: repoDir, path });
+  });
+
+  test("refuses a directory outside any repository", async () => {
+    await expect(createSpawnWorktree({ cwd: scratch, sessionId: "sess-no-repo", env })).rejects.toThrow(
+      /rev-parse/,
+    );
   });
 });
 

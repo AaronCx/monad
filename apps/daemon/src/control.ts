@@ -1,23 +1,53 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { runReviewPlaybook, type SessionManager } from "@aaroncx/engine";
+import { ImportDisabledError, type Importer, LinkError, type LinkErrorCode, type LinkService } from "@aaroncx/link";
 import {
+  AppendNoteRequestSchema,
+  type AppendNoteResponse,
   type DaemonStatus,
+  HandoffRequestSchema,
+  type HandoffResponse,
+  ImportRequestSchema,
+  type ImportSummary,
   type ListSessionsResponse,
+  type NotesResponse,
   ReviewRequestSchema,
   type ReviewStreamLine,
+  type SearchResponse,
+  SendMessageRequestSchema,
+  type SendMessageResponse,
+  type SessionRecord,
+  SessionStatusSchema,
   SetModeRequestSchema,
   type SetModeResponse,
+  type TranscriptResponse,
+  UpdateSessionRequestSchema,
+  type UpdateSessionResponse,
 } from "@aaroncx/protocol";
 
 /**
  * The control API: plain JSON beside ACP for what the protocol does not
  * cover (cross-repo session listing, daemon introspection, the review
- * playbook, mode switches). Runs behind the same bearer check as /acp; the
- * transport wrapper calls this only for authenticated non-ACP paths.
+ * playbook, mode switches, session titles, and monad Link's search, read,
+ * send, handoffs and repo notes for the human at the CLI). Runs behind the same bearer check as /acp;
+ * the transport wrapper calls this only for authenticated non-ACP paths.
  */
 
 export interface ControlDeps {
   manager: SessionManager;
+  /**
+   * monad Link (decision record 0012). The routes below call it with the
+   * human as the caller, through the same service the monad-sessions MCP
+   * server uses, so the CLI (and later the phone) gets exactly an agent's
+   * reach plus the human's privileges, and nothing a separate code path
+   * could get wrong.
+   */
+  link: LinkService;
+  /**
+   * The vendor log importer (Link phase 4). Absent in tests that do not
+   * exercise it, and then POST /v1/import is 503.
+   */
+  importer?: Importer;
   version: string;
   startedAt: Date;
 }
@@ -149,8 +179,14 @@ async function handleSetMode(
     sendJson(res, 400, { error: `invalid mode request: ${parsed.error.message}` });
     return;
   }
-  if (!deps.manager.get(sessionId)) {
+  const existing = deps.manager.get(sessionId);
+  if (!existing) {
     sendJson(res, 404, { error: `no session ${sessionId}` });
+    return;
+  }
+  if (existing.status === "imported") {
+    // An imported log has no backend and no policy to switch (Link phase 4).
+    sendJson(res, 409, { error: `session ${sessionId} is an imported log and has no mode to switch` });
     return;
   }
   try {
@@ -162,12 +198,356 @@ async function handleSetMode(
   }
 }
 
+/**
+ * PATCH /v1/sessions/<id>: names a session by hand ({ title: "..." }) or
+ * drops the manual name and re-derives it from the first prompt
+ * ({ title: null }). A manual title is never overwritten by derivation
+ * (monad Link, decision record 0012). Titles are metadata, not activity, so
+ * updatedAt does not move.
+ */
+async function handleUpdateSession(
+  deps: ControlDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessionId: string,
+): Promise<void> {
+  let body: unknown;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch (error) {
+    sendJson(res, 400, { error: `unreadable body: ${errorMessage(error)}` });
+    return;
+  }
+  const parsed = UpdateSessionRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: `invalid session update: ${parsed.error.message}` });
+    return;
+  }
+  if (!deps.manager.get(sessionId)) {
+    sendJson(res, 404, { error: `no session ${sessionId}` });
+    return;
+  }
+  try {
+    // Whitespace runs (newlines included) collapse to one space: a title is
+    // one line wherever it is shown.
+    const title = parsed.data.title === null ? null : parsed.data.title.replace(/\s+/g, " ");
+    const response: UpdateSessionResponse = {
+      session: deps.manager.setTitle(sessionId, title),
+    };
+    sendJson(res, 200, response);
+  } catch (error) {
+    sendJson(res, 500, { error: errorMessage(error) });
+  }
+}
+
+const LINK_ERROR_STATUS: Record<LinkErrorCode, number> = {
+  not_found: 404,
+  forbidden: 403,
+  invalid: 400,
+  refused: 409,
+  rate_limited: 429,
+  unavailable: 503,
+};
+
+/** A Link refusal as its HTTP status; anything else is a 500. */
+function sendLinkError(res: ServerResponse, error: unknown): void {
+  if (error instanceof LinkError) {
+    sendJson(res, LINK_ERROR_STATUS[error.code], { error: errorMessage(error), code: error.code });
+    return;
+  }
+  sendJson(res, 500, { error: errorMessage(error) });
+}
+
+/** An optional integer query parameter; absent or blank is undefined. */
+function intParam(params: URLSearchParams, name: string): number | undefined {
+  const raw = params.get(name);
+  if (raw === null || raw.trim() === "") {
+    return undefined;
+  }
+  return Number(raw);
+}
+
+const LIST_FILTERS = ["repo", "status", "since", "limit", "imported"];
+
+/**
+ * GET /v1/sessions. With no Link filter, every record oldest first (the M1
+ * contract `monad attach` and `monad gc` rely on), plus each one's last
+ * handoff line. With any of repo, status,
+ * since, limit or imported, the Link list: filtered, most recently active
+ * first, with each session's repos. imported=0 hides imported logs (the
+ * default `monad ls`); anything else includes them.
+ */
+function handleListSessions(deps: ControlDeps, res: ServerResponse, params: URLSearchParams): void {
+  if (!LIST_FILTERS.some((name) => params.has(name))) {
+    const sessions = deps.manager.list();
+    // Each session's last handoff line rides along (an optional field the M1
+    // clients ignore), so plain `monad ls` shows where every session stands.
+    const handoffs: Record<string, string> = {};
+    for (const session of sessions) {
+      const line = deps.link.lastHandoffLine(session.id);
+      if (line !== undefined) {
+        handoffs[session.id] = line;
+      }
+    }
+    const body: ListSessionsResponse = {
+      sessions,
+      ...(Object.keys(handoffs).length === 0 ? {} : { handoffs }),
+    };
+    sendJson(res, 200, body);
+    return;
+  }
+  const status = params.get("status") ?? undefined;
+  if (status !== undefined && !SessionStatusSchema.safeParse(status).success) {
+    sendJson(res, 400, { error: `unknown status ${status}` });
+    return;
+  }
+  try {
+    const summaries = deps.link.list(
+      { kind: "human" },
+      {
+        repo: params.get("repo") ?? undefined,
+        status: status as SessionRecord["status"] | undefined,
+        since: params.get("since") ?? undefined,
+        limit: intParam(params, "limit"),
+        includeImported: params.get("imported") !== "0",
+      },
+    );
+    const sessions = summaries
+      .map((summary) => deps.manager.get(summary.id))
+      .filter((record): record is SessionRecord => record !== undefined);
+    const handoffs = summaries.filter((summary) => summary.lastHandoff !== undefined);
+    const body: ListSessionsResponse = {
+      sessions,
+      repos: Object.fromEntries(summaries.map((summary) => [summary.id, summary.repos])),
+      ...(handoffs.length === 0
+        ? {}
+        : { handoffs: Object.fromEntries(handoffs.map((summary) => [summary.id, summary.lastHandoff as string])) }),
+    };
+    sendJson(res, 200, body);
+  } catch (error) {
+    sendLinkError(res, error);
+  }
+}
+
+/** GET /v1/search?q=&repo=&since=&limit=&session=: Link search, the human as caller. */
+function handleSearch(deps: ControlDeps, res: ServerResponse, params: URLSearchParams): void {
+  const query = params.get("q");
+  if (query === null || query.trim() === "") {
+    sendJson(res, 400, { error: "q is required" });
+    return;
+  }
+  try {
+    const body: SearchResponse = {
+      hits: deps.link.search({ kind: "human" }, query, {
+        repo: params.get("repo") ?? undefined,
+        since: params.get("since") ?? undefined,
+        limit: intParam(params, "limit"),
+        sessionId: params.get("session") ?? undefined,
+      }),
+    };
+    sendJson(res, 200, body);
+  } catch (error) {
+    sendLinkError(res, error);
+  }
+}
+
+/** GET /v1/sessions/<id>/transcript?from=&limit=: one redacted page. */
+function handleTranscript(
+  deps: ControlDeps,
+  res: ServerResponse,
+  sessionId: string,
+  params: URLSearchParams,
+): void {
+  try {
+    const page = deps.link.read({ kind: "human" }, sessionId, {
+      fromSeq: intParam(params, "from"),
+      limit: intParam(params, "limit"),
+    });
+    const body: TranscriptResponse = {
+      sessionId: page.sessionId,
+      ...(page.title === undefined ? {} : { title: page.title }),
+      text: page.text,
+      entries: page.entries.length,
+      fromSeq: page.fromSeq,
+      toSeq: page.toSeq,
+      nextFromSeq: page.nextFromSeq,
+    };
+    sendJson(res, 200, body);
+  } catch (error) {
+    sendLinkError(res, error);
+  }
+}
+
+/** POST /v1/sessions/<id>/messages: the human sends a peer message. */
+async function handleSendMessage(
+  deps: ControlDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessionId: string,
+): Promise<void> {
+  let body: unknown;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch (error) {
+    sendJson(res, 400, { error: `unreadable body: ${errorMessage(error)}` });
+    return;
+  }
+  const parsed = SendMessageRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: `invalid message: ${parsed.error.message}` });
+    return;
+  }
+  try {
+    const response: SendMessageResponse = deps.link.message({ kind: "human" }, sessionId, parsed.data.text);
+    sendJson(res, 200, response);
+  } catch (error) {
+    sendLinkError(res, error);
+  }
+}
+
+/**
+ * POST /v1/sessions/<id>/handoff: writes a fresh deterministic handoff
+ * (reason manual) and returns it; with { summarize: true } also runs the
+ * model-written summary, which spends vendor tokens and so only ever runs
+ * on a request like this (or the sessions_summarize tool). The response
+ * waits for the summary.
+ */
+async function handleHandoff(
+  deps: ControlDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessionId: string,
+): Promise<void> {
+  let body: unknown;
+  try {
+    const raw = await readBody(req);
+    body = raw.trim() === "" ? {} : JSON.parse(raw);
+  } catch (error) {
+    sendJson(res, 400, { error: `unreadable body: ${errorMessage(error)}` });
+    return;
+  }
+  const parsed = HandoffRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: `invalid handoff request: ${parsed.error.message}` });
+    return;
+  }
+  try {
+    const result = await deps.link.handoff({ kind: "human" }, sessionId, { summarize: parsed.data.summarize });
+    const payload = result.handoff.payload as { reason: HandoffResponse["handoff"]["reason"]; text: string };
+    const response: HandoffResponse = {
+      sessionId: result.sessionId,
+      handoff: { seq: result.handoff.seq, ts: result.handoff.ts, reason: payload.reason, text: payload.text },
+      ...(result.summary
+        ? {
+            summary: {
+              seq: result.summary.seq,
+              ts: result.summary.ts,
+              text: result.summary.text,
+              summarizerSessionId: result.summary.summarizerSessionId,
+            },
+          }
+        : {}),
+    };
+    sendJson(res, 200, response);
+  } catch (error) {
+    sendLinkError(res, error);
+  }
+}
+
+/**
+ * POST /v1/import { paths? }: one import run over the configured roots, or
+ * over the given paths only (Link phase 4). Answers with the run's summary.
+ * Runs are serialized, so a request that arrives during a watcher run waits
+ * for it and then scans again.
+ */
+async function handleImport(deps: ControlDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: unknown;
+  try {
+    const raw = await readBody(req);
+    body = raw.trim() === "" ? {} : JSON.parse(raw);
+  } catch (error) {
+    sendJson(res, 400, { error: `unreadable body: ${errorMessage(error)}` });
+    return;
+  }
+  const parsed = ImportRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: `invalid import request: ${parsed.error.message}` });
+    return;
+  }
+  if (!deps.importer) {
+    sendJson(res, 503, { error: "this daemon has no importer" });
+    return;
+  }
+  try {
+    const summary: ImportSummary = await deps.importer.run(parsed.data.paths);
+    sendJson(res, 200, summary);
+  } catch (error) {
+    sendJson(res, error instanceof ImportDisabledError ? 409 : 500, { error: errorMessage(error) });
+  }
+}
+
+/** GET /v1/notes?repo=P: a repository's notes, the human as reader. */
+function handleReadNotes(deps: ControlDeps, res: ServerResponse, params: URLSearchParams): void {
+  const repo = params.get("repo");
+  if (repo === null || repo.trim() === "") {
+    sendJson(res, 400, { error: "repo is required" });
+    return;
+  }
+  try {
+    const body: NotesResponse = deps.link.notesRead({ kind: "human" }, repo);
+    sendJson(res, 200, body);
+  } catch (error) {
+    sendLinkError(res, error);
+  }
+}
+
+/** POST /v1/notes { repo, text }: the human writes a note. */
+async function handleAppendNote(deps: ControlDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: unknown;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch (error) {
+    sendJson(res, 400, { error: `unreadable body: ${errorMessage(error)}` });
+    return;
+  }
+  const parsed = AppendNoteRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, { error: `invalid note: ${parsed.error.message}` });
+    return;
+  }
+  try {
+    const response: AppendNoteResponse = deps.link.notesAppend({ kind: "human" }, parsed.data.repo, parsed.data.text);
+    sendJson(res, 200, response);
+  } catch (error) {
+    sendLinkError(res, error);
+  }
+}
+
 export function createControlHandler(deps: ControlDeps) {
   return (req: IncomingMessage, res: ServerResponse): void => {
-    const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const pathname = url.pathname;
     if (req.method === "POST") {
       if (pathname === "/v1/review") {
         void handleReview(deps, req, res);
+        return;
+      }
+      if (pathname === "/v1/notes") {
+        void handleAppendNote(deps, req, res);
+        return;
+      }
+      if (pathname === "/v1/import") {
+        void handleImport(deps, req, res);
+        return;
+      }
+      const handoffMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/handoff$/);
+      if (handoffMatch) {
+        void handleHandoff(deps, req, res, handoffMatch[1] ?? "");
+        return;
+      }
+      const messageMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/messages$/);
+      if (messageMatch) {
+        void handleSendMessage(deps, req, res, messageMatch[1] ?? "");
         return;
       }
       const modeMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/mode$/);
@@ -178,13 +558,34 @@ export function createControlHandler(deps: ControlDeps) {
       sendJson(res, 404, { error: "not found" });
       return;
     }
+    if (req.method === "PATCH") {
+      const sessionMatch = pathname.match(/^\/v1\/sessions\/([^/]+)$/);
+      if (sessionMatch) {
+        void handleUpdateSession(deps, req, res, sessionMatch[1] ?? "");
+        return;
+      }
+      sendJson(res, 404, { error: "not found" });
+      return;
+    }
     if (req.method !== "GET") {
       sendJson(res, 405, { error: "method not allowed" });
       return;
     }
     if (pathname === "/v1/sessions") {
-      const body: ListSessionsResponse = { sessions: deps.manager.list() };
-      sendJson(res, 200, body);
+      handleListSessions(deps, res, url.searchParams);
+      return;
+    }
+    if (pathname === "/v1/search") {
+      handleSearch(deps, res, url.searchParams);
+      return;
+    }
+    if (pathname === "/v1/notes") {
+      handleReadNotes(deps, res, url.searchParams);
+      return;
+    }
+    const transcriptMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/transcript$/);
+    if (transcriptMatch) {
+      handleTranscript(deps, res, transcriptMatch[1] ?? "", url.searchParams);
       return;
     }
     if (pathname === "/v1/status") {

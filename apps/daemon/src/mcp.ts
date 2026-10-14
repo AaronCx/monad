@@ -68,7 +68,7 @@ export function createMcpRoute(deps: McpRouteDeps) {
       return true;
     }
     const record = deps.manager.get(sessionId);
-    if (!record || record.status === "closed") {
+    if (!record || record.status === "closed" || record.status === "imported") {
       sendJson(res, 404, { error: `no open session ${sessionId}` });
       return true;
     }

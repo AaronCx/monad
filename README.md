@@ -12,7 +12,8 @@ acp-stdio), Claude via `claude-agent-acp`, sessions persisted in SQLite. M2: the
 check engine in `packages/checks`, served to every session as the `monad-checks` MCP server;
 git worktrees; `monad review <pr>` and `monad checks`. Interfaces and storage are still
 unstable, there are no packaged releases yet (build from source with `bun run build`), and
-everything past M2 on the roadmap does not exist. See `docs/architecture.md`.
+everything past M2 on the roadmap does not exist. Link (sessions that reach each other) is in
+review as PRs #27 to #30. See `docs/architecture.md`.
 
 ## How it works
 
@@ -136,8 +137,19 @@ session (interactive ones too), so "run the checks" is a tool call rather than a
    patterns, build, test), worktrees, `monad review <pr>` and `monad checks` run locally, opt-in
    `--post` COMMENT reviews
 3. M3: GitHub App trigger, Check Runs and review comments
-4. M4: Codex and Gemini backends, native loop for API-key and self-hosted models
-5. Later: desktop (Tauri sidecar), web, phone attach
+4. Link (in review): every session searchable, readable and repo-tagged by what it touched; the
+   `monad-sessions` MCP server (search, read, peer messages, spawn, wait) for trusted sessions;
+   deterministic handoffs and repo notes; read-only import of local Claude Code and Codex logs.
+   Decision record 0012.
+5. After Link, toward the Claude app's feature set, each its own brief:
+   1. Phone attach: an iOS ACP client over the control API, with pairing and permission
+      approvals. Link's control API is the API it uses.
+   2. Push for permission prompts: a Pushover adapter first, an APNs relay later.
+   3. `monad schedule`: cron-triggered sessions whose output is their handoff.
+   4. M4 native loop: API-key and local models (Ollama, MLX) with full Link access; Codex and
+      Gemini backends.
+   5. Artifacts: files and localhost previews a session produced, attached to its log.
+6. Later: desktop (Tauri sidecar), web
 
 ## Lineage
 

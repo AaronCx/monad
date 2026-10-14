@@ -21,6 +21,24 @@ import {
   stopDaemon,
 } from "./daemon.ts";
 import { cmdGc } from "./gc.ts";
+import {
+  cmdHandoff,
+  cmdImport,
+  cmdLs,
+  cmdNotes,
+  cmdSearch,
+  cmdSend,
+  cmdShow,
+  cmdTitle,
+  parseHandoffFlags,
+  parseImportFlags,
+  parseLsFlags,
+  parseNotesFlags,
+  parseSearchFlags,
+  parseSendArgs,
+  parseShowFlags,
+  parseTitleArgs,
+} from "./link.ts";
 import { Renderer } from "./render.ts";
 import { cmdReview, enterFixLoop } from "./review.ts";
 
@@ -40,7 +58,20 @@ function usage(): string {
     "  checks [--staged | --base <ref>] run the checks here, no session",
     "         [--only a,b] [--full] [--json] [--untrusted]",
     "  gc [--older-than 7d]             remove closed sessions' worktrees",
-    "  ls                               list sessions",
+    "  ls [--repo P] [--all]            list sessions (--repo: those that touched P)",
+    "  search <query> [--repo P]        full-text search across every session",
+    "         [--session id]            (or inside one session, uncapped)",
+    "         [--since 7d|ISO] [--limit N]",
+    "  show <id> [--from seq]           a session's transcript, access events included",
+    "       [--limit N]",
+    "  send <id> <text>                 message a session (its next turn, or queued)",
+    "  title <id> <text>                name a session",
+    "  handoff <id> [--summarize]       write a session's handoff now (--summarize:",
+    "                                   also a model-written summary; spends tokens)",
+    "  notes <repo> [--append text]     a repo's notes, or add one",
+    "  import [--path P ...]            read Claude Code and Codex logs into read-only",
+    "                                   sessions (default: ~/.claude/projects,",
+    "                                   ~/.codex/sessions and link.json import.roots)",
     "  daemon start|stop|status         manage monadd",
     "  acp-stdio                        stdio<->daemon ACP bridge for editors",
     "  --version                        print the version and exit",
@@ -189,20 +220,6 @@ async function cmdAttach(argv: string[]): Promise<void> {
   process.exit(0);
 }
 
-async function cmdLs(): Promise<void> {
-  const handle = await ensureDaemon();
-  const sessions = await fetchSessions(handle);
-  if (sessions.length === 0) {
-    console.log("no sessions");
-    return;
-  }
-  for (const s of sessions) {
-    const pr = s.pr ? `#${s.pr.number}` : "-";
-    console.log(
-      `${s.id}  ${s.status.padEnd(22)}  ${s.mode.padEnd(11)}  ${pr.padEnd(6)}  ${s.cwd}  ${s.updatedAt}`,
-    );
-  }
-}
 
 async function cmdDaemon(argv: string[]): Promise<void> {
   const sub = argv[0];
@@ -307,7 +324,46 @@ try {
       await cmdGc(rest);
       break;
     case "ls":
-      await cmdLs();
+      await cmdLs(await ensureDaemon(), parseLsFlags(rest));
+      break;
+    case "search": {
+      const handle = await ensureDaemon();
+      const flags = parseSearchFlags(rest);
+      if (flags.session !== undefined) {
+        flags.session = (await resolveSession(handle, flags.session)).id;
+      }
+      await cmdSearch(handle, flags);
+      break;
+    }
+    case "show": {
+      const flags = parseShowFlags(rest);
+      const handle = await ensureDaemon();
+      await cmdShow(handle, (await resolveSession(handle, flags.id)).id, flags);
+      break;
+    }
+    case "send": {
+      const { id, text } = parseSendArgs(rest);
+      const handle = await ensureDaemon();
+      await cmdSend(handle, (await resolveSession(handle, id)).id, text);
+      break;
+    }
+    case "title": {
+      const { id, title } = parseTitleArgs(rest);
+      const handle = await ensureDaemon();
+      await cmdTitle(handle, (await resolveSession(handle, id)).id, title);
+      break;
+    }
+    case "handoff": {
+      const flags = parseHandoffFlags(rest);
+      const handle = await ensureDaemon();
+      await cmdHandoff(handle, (await resolveSession(handle, flags.id)).id, flags);
+      break;
+    }
+    case "notes":
+      await cmdNotes(await ensureDaemon(), parseNotesFlags(rest));
+      break;
+    case "import":
+      await cmdImport(await ensureDaemon(), parseImportFlags(rest));
       break;
     case "daemon":
       await cmdDaemon(rest);

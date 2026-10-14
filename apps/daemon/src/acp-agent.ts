@@ -12,9 +12,11 @@ import {
 import type { SessionClient, SessionManager } from "@aaroncx/engine";
 import type { AcpAgentFactory } from "@aaroncx/engine/transport";
 import {
+  ACCESS_NOTIFICATION_METHOD,
   ERROR_NOTIFICATION_METHOD,
   type ErrorPayload,
   type EventRecord,
+  PEER_MESSAGE_NOTIFICATION_METHOD,
   REPLAY_COUNT_META_KEY,
   SESSION_STATUS_META_KEY,
 } from "@aaroncx/protocol";
@@ -89,6 +91,19 @@ class ConnectionSessionClient implements SessionClient {
   }
 
   /**
+   * Forwards a Link event (peer_message or access) on its extension
+   * notification, so a human watching a session sees every message it
+   * receives and every session that reads it (decision record 0012). The
+   * payload goes out as logged, with the session id and seq beside it.
+   */
+  sendLinkEvent(event: EventRecord): void {
+    const method =
+      event.kind === "peer_message" ? PEER_MESSAGE_NOTIFICATION_METHOD : ACCESS_NOTIFICATION_METHOD;
+    const payload = (event.payload ?? {}) as Record<string, unknown>;
+    this.enqueue(() => this.cx.notify(method, { ...payload, sessionId: this.sessionId, seq: event.seq }));
+  }
+
+  /**
    * Resolves once every notification enqueued so far has been written.
    * The prompt handler awaits this before returning so the prompt response
    * (same session SSE stream) never overtakes the turn's trailing updates.
@@ -113,6 +128,10 @@ class ConnectionSessionClient implements SessionClient {
       }
       case "error":
         this.sendError(event.payload as ErrorPayload);
+        return;
+      case "peer_message":
+      case "access":
+        this.sendLinkEvent(event);
         return;
       default:
         // session_created, permission_*, turn_ended, closed have no live ACP
@@ -241,17 +260,27 @@ export function createDaemonAgentFactory(deps: DaemonAgentDeps): AcpAgentFactory
             // Extension notifications do not count toward the replay
             // divider; clients count session/update notifications only.
             client.sendError(event.payload as ErrorPayload);
+          } else if (event.kind === "peer_message" || event.kind === "access") {
+            client.sendLinkEvent(event);
           }
         }
         return { _meta: { [REPLAY_COUNT_META_KEY]: replayCount } };
       })
       .onRequest(methods.agent.session.list, () => ({
-        sessions: deps.manager.list().map((record) => ({
-          sessionId: record.id,
-          cwd: record.cwd,
-          updatedAt: record.updatedAt,
-          _meta: { [SESSION_STATUS_META_KEY]: record.status },
-        })),
+        // Imported vendor logs (Link phase 4) are history, not sessions an
+        // ACP client can load or prompt, so an editor's session picker never
+        // offers one. They are listed by the control API (`monad ls --all`).
+        sessions: deps.manager
+          .list()
+          .filter((record) => record.status !== "imported")
+          .map((record) => ({
+            sessionId: record.id,
+            cwd: record.cwd,
+            // ACP SessionInfo.title: the derived or manual monad Link title.
+            title: record.title ?? null,
+            updatedAt: record.updatedAt,
+            _meta: { [SESSION_STATUS_META_KEY]: record.status },
+          })),
       }))
       .onRequest(methods.agent.session.prompt, async (ctx) => {
         const sessionId = ctx.params.sessionId;

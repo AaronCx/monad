@@ -212,3 +212,48 @@ describe("SessionManager fan-out", () => {
     expect(seen).toHaveLength(0);
   });
 });
+
+describe("SessionManager before-close hook (Link handoffs)", () => {
+  test("runs before teardown, so what it appends lands before closed", async () => {
+    const { store, manager, backends } = makeManager();
+    const record = await manager.create({ cwd: "/tmp" });
+    const seen: Array<{ status?: string; backendClosed?: boolean }> = [];
+    manager.setBeforeClose(async (id) => {
+      seen.push({ status: store.get(id)?.status, backendClosed: backends[0]?.closed });
+      manager.appendEvent(id, "handoff", { reason: "closed", text: "closed: done" });
+    });
+    await manager.close(record.id);
+    expect(seen).toEqual([{ status: "idle", backendClosed: false }]);
+    expect(store.replay(record.id).map((e) => e.kind)).toEqual(["session_created", "handoff", "closed"]);
+  });
+
+  test("a hook that throws never keeps a session open, and a closed session is not handed off twice", async () => {
+    const { store, manager } = makeManager();
+    const record = await manager.create({ cwd: "/tmp" });
+    let calls = 0;
+    manager.setBeforeClose(async () => {
+      calls += 1;
+      throw new Error("git timed out");
+    });
+    await manager.close(record.id);
+    expect(store.get(record.id)?.status).toBe("closed");
+    await manager.close(record.id);
+    expect(calls).toBe(1);
+  });
+
+  test("pendingPermissions lists what the session is holding, oldest first", async () => {
+    const { manager, backends } = makeManager();
+    const record = await manager.create({ cwd: "/tmp" });
+    const backend = backends[0] as FakeBackend;
+    const held = backend.hooks.requestPermission({
+      sessionId: record.id,
+      toolCall: { toolCallId: "call_a", title: "Edit a", kind: "edit", status: "pending" },
+      options: [{ kind: "allow_once", name: "Allow", optionId: "allow" }],
+    });
+    await Bun.sleep(0);
+    expect(manager.pendingPermissions(record.id).map((p) => p.toolCall?.toolCallId)).toEqual(["call_a"]);
+    await manager.cancel(record.id);
+    expect(await held).toEqual({ outcome: { outcome: "cancelled" } });
+    expect(manager.pendingPermissions(record.id)).toEqual([]);
+  });
+});

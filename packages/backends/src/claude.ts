@@ -1,8 +1,15 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { McpServer } from "@agentclientprotocol/sdk";
 import type { BackendFactory, BackendHooks } from "@aaroncx/engine";
 import { monadStateDir } from "@aaroncx/engine";
-import { AcpClientBackend } from "./acp-client.ts";
+import {
+  type BackendId,
+  SESSIONS_MCP_SERVER_NAME,
+  type SessionMode,
+  type SessionRecord,
+} from "@aaroncx/protocol";
+import { AcpClientBackend, CODEX_VENDOR_MODE_FOR, VENDOR_MODE_FOR } from "./acp-client.ts";
 
 /**
  * claude-agent-acp backend wiring: command-line resolution, fresh-session
@@ -23,6 +30,13 @@ export const DEFAULT_NODE_DIR = "/opt/homebrew/bin";
  * `command` option instead.
  */
 export const BACKEND_CMD_ENV = "MONAD_BACKEND_CMD";
+
+/**
+ * Environment variable naming the codex-acp command line (split on
+ * whitespace), for Link's cross-vendor spawn. Checked before PATH and the
+ * provisioned vendor tree.
+ */
+export const CODEX_CMD_ENV = "MONAD_CODEX_CMD";
 
 export interface ClaudeBackendOptions {
   /** Full argv override. Wins over MONAD_BACKEND_CMD and bin resolution. */
@@ -45,6 +59,16 @@ export interface ClaudeBackendOptions {
    * returns is handed to the vendor agent.
    */
   checksMcp?: (sessionId: string) => { port: number; mountToken: string } | undefined;
+  /**
+   * Late-bound endpoint for the session's monad-sessions mount (monad Link,
+   * decision record 0012), or undefined when this session must not get one.
+   * The caller decides with the whole record in hand (trust level, link.json
+   * scope) and derives the sessions-mount token; this package never sees
+   * the daemon token. The backend independently refuses to inject it for
+   * anything but a trusted record, so a caller bug cannot hand an untrusted
+   * session the mount.
+   */
+  sessionsMcp?: (record: SessionRecord) => { port: number; mountToken: string } | undefined;
 }
 
 /**
@@ -69,6 +93,144 @@ export function checksMcpServerEntry(input: {
     headers: [{ name: "Authorization", value: `Bearer ${input.mountToken}` }],
   };
 }
+
+/**
+ * The monad-sessions mcpServers entry (monad Link). Same shape as the checks
+ * entry; its own path and its own credential, the session's sessions-mount
+ * token, which opens /mcp-sessions/<sessionId> and nothing else.
+ */
+export function sessionsMcpServerEntry(input: {
+  port: number;
+  mountToken: string;
+  sessionId: string;
+}): McpServer {
+  return {
+    type: "http",
+    name: SESSIONS_MCP_SERVER_NAME,
+    url: `http://127.0.0.1:${input.port}/mcp-sessions/${input.sessionId}`,
+    headers: [{ name: "Authorization", value: `Bearer ${input.mountToken}` }],
+  };
+}
+
+/**
+ * The one builder of the mcpServers array a vendor session is handed, shared
+ * by the fresh-session and restore paths so both pass the identical array
+ * (it is part of the vendor's session fingerprint, record 0006 fact 3).
+ *
+ * monad-checks: every session, when the vendor speaks HTTP MCP.
+ * monad-sessions: only a TRUSTED session, and only when the caller's
+ * sessionsMcp hook says so (Link enabled, in scope). For an untrusted
+ * session the entry is absent, not present-and-refused: a tool the vendor
+ * was never told about cannot be talked into a call (decision record 0012).
+ */
+export function vendorMcpServers(
+  record: SessionRecord,
+  options: Pick<ClaudeBackendOptions, "checksMcp" | "sessionsMcp">,
+  mcpCapabilities: { http?: boolean } | undefined,
+): { mcpServers: McpServer[]; skipped?: string } {
+  const checks = options.checksMcp?.(record.id);
+  const sessions = record.trust === "trusted" ? options.sessionsMcp?.(record) : undefined;
+  if (!checks && !sessions) {
+    return { mcpServers: [] };
+  }
+  if (mcpCapabilities?.http !== true) {
+    return {
+      mcpServers: [],
+      skipped: `vendor did not advertise mcpCapabilities.http; monad MCP tools are not injected for session ${record.id}`,
+    };
+  }
+  const mcpServers: McpServer[] = [];
+  if (checks) {
+    mcpServers.push(checksMcpServerEntry({ ...checks, sessionId: record.id }));
+  }
+  if (sessions) {
+    mcpServers.push(sessionsMcpServerEntry({ ...sessions, sessionId: record.id }));
+  }
+  return { mcpServers };
+}
+
+/**
+ * Resolves the codex-acp command line, for Link's cross-vendor spawn:
+ * MONAD_CODEX_CMD, then `codex-acp` on PATH (the daemon's, plus the node
+ * directory), then the provisioned vendor tree's
+ * node_modules/.bin/codex-acp. Throws a message naming everything it tried
+ * and what IS installed, so a spawn refusal says how to fix it.
+ */
+export function resolveCodexCommand(
+  env: Record<string, string | undefined> = process.env,
+  nodeDir: string = DEFAULT_NODE_DIR,
+): string[] {
+  const override = env[CODEX_CMD_ENV]?.trim();
+  if (override) {
+    return override.split(/\s+/);
+  }
+  const path = `${nodeDir}:${env.PATH ?? "/usr/bin:/bin"}`;
+  const onPath = Bun.which("codex-acp", { PATH: path });
+  if (onPath) {
+    return [onPath];
+  }
+  const vendorBin = join(monadStateDir(env), "vendor", "node_modules", ".bin", "codex-acp");
+  if (existsSync(vendorBin)) {
+    return [vendorBin];
+  }
+  let claude = "claude-acp";
+  try {
+    resolveBackendCommand(env, nodeDir);
+  } catch {
+    claude = "none";
+  }
+  throw new Error(
+    `codex-acp is not installed: ${CODEX_CMD_ENV} is unset, codex-acp is not on PATH, and ${vendorBin} does not exist. ` +
+      `Installed backends: ${claude}. Provision it with: cd ${join(monadStateDir(env), "vendor")} && bun add @zed-industries/codex-acp ` +
+      `(or set ${CODEX_CMD_ENV} to a full command line)`,
+  );
+}
+
+/**
+ * Why a backend cannot start on this daemon, or undefined when it can. Link
+ * asks this before a spawn creates a record, so a missing adapter is a clear
+ * refusal rather than a session that dies at its first turn.
+ */
+export function backendUnavailable(
+  backend: BackendId,
+  env: Record<string, string | undefined> = process.env,
+  nodeDir: string = DEFAULT_NODE_DIR,
+): string | undefined {
+  try {
+    if (backend === "claude-acp") {
+      resolveBackendCommand(env, nodeDir);
+      return undefined;
+    }
+    if (backend === "codex-acp") {
+      resolveCodexCommand(env, nodeDir);
+      return undefined;
+    }
+    return `${backend} sessions are imported logs and never run`;
+  } catch (error) {
+    return errorMessage(error);
+  }
+}
+
+/** The command line for a record's backend. */
+function commandFor(record: SessionRecord, options: ClaudeBackendOptions): string[] {
+  if (options.command) {
+    return options.command;
+  }
+  const nodeDir = options.nodeDir ?? DEFAULT_NODE_DIR;
+  switch (record.backend) {
+    case "claude-acp":
+      return resolveBackendCommand(process.env, nodeDir);
+    case "codex-acp":
+      return resolveCodexCommand(process.env, nodeDir);
+    default:
+      throw new Error(`session ${record.id} is an imported ${record.backend} log and cannot run`);
+  }
+}
+
+const VENDOR_MODES: Record<"claude-acp" | "codex-acp", Record<SessionMode, string>> = {
+  "claude-acp": VENDOR_MODE_FOR,
+  "codex-acp": CODEX_VENDOR_MODE_FOR,
+};
 
 /**
  * Absolute path of the pinned local claude-agent-acp entry (the file the
@@ -151,8 +313,9 @@ function errorMessage(error: unknown): string {
 
 /**
  * BackendFactory for SessionManager. Per session it spawns the vendor agent
- * and either creates a fresh vendor session (session/new with
- * { cwd, mcpServers: [] }) or, when the record carries an agentSessionId
+ * the record names (claude-agent-acp, or codex-acp for a Link spawn that
+ * asked for it) and either creates a fresh vendor session (session/new with
+ * the shared mcpServers array) or, when the record carries an agentSessionId
  * from before a daemon restart, restores it via vendor session/load.
  *
  * A failed or unsupported restore is never silent: an error event is
@@ -161,8 +324,8 @@ function errorMessage(error: unknown): string {
  */
 export function createClaudeBackend(options: ClaudeBackendOptions = {}): BackendFactory {
   return async (record, hooks: BackendHooks) => {
-    const command =
-      options.command ?? resolveBackendCommand(process.env, options.nodeDir ?? DEFAULT_NODE_DIR);
+    const command = commandFor(record, options);
+    const codex = record.backend === "codex-acp";
     const backend = await AcpClientBackend.start({
       command,
       cwd: record.cwd,
@@ -170,28 +333,38 @@ export function createClaudeBackend(options: ClaudeBackendOptions = {}): Backend
       monadSessionId: record.id,
       hooks,
       stderr: options.stderr,
+      vendorModes: VENDOR_MODES[codex ? "codex-acp" : "claude-acp"],
     });
     try {
-      // monad-checks injection is gated on the vendor advertising HTTP MCP
-      // support in its initialize response (decision record 0006 fact 7).
-      let mcpServers: McpServer[] = [];
-      const endpoint = options.checksMcp?.(record.id);
-      if (endpoint) {
-        const mcpCapabilities = backend.initializeResponse.agentCapabilities?.mcpCapabilities;
-        if (mcpCapabilities?.http === true) {
-          mcpServers = [checksMcpServerEntry({ ...endpoint, sessionId: record.id })];
-        } else {
-          console.log(
-            `monadd: vendor did not advertise mcpCapabilities.http; monad-checks tools are not injected for session ${record.id}`,
-          );
-        }
+      // Injection is gated on the vendor advertising HTTP MCP support in its
+      // initialize response (decision record 0006 fact 7), and the sessions
+      // mount on the record's trust level (decision record 0012).
+      const { mcpServers, skipped } = vendorMcpServers(
+        record,
+        options,
+        backend.initializeResponse.agentCapabilities?.mcpCapabilities,
+      );
+      if (skipped) {
+        console.log(`monadd: ${skipped}`);
       }
       // Review sessions layer vendor plan mode over monad's policy; fix and
       // interactive run the vendor default. Applied right after session/new
-      // or session/load per decision 0007.
+      // or session/load per decision 0007. codex-acp's mode ids are not
+      // measured on this machine, so a refusal there is logged, not fatal.
       const applyVendorMode = async () => {
-        if (record.mode !== "interactive") {
+        if (record.mode === "interactive") {
+          return;
+        }
+        if (!codex) {
           await backend.setSessionMode(record.mode);
+          return;
+        }
+        try {
+          await backend.setSessionMode(record.mode);
+        } catch (error) {
+          hooks.onError({
+            message: `codex-acp did not accept its ${record.mode} vendor mode; monad's ${record.mode} policy still applies: ${errorMessage(error)}`,
+          });
         }
       };
       if (record.agentSessionId) {
@@ -200,7 +373,7 @@ export function createClaudeBackend(options: ClaudeBackendOptions = {}): Backend
             // The mcpServers array (URL and mount token included) is part of the
             // vendor's session fingerprint (decision record 0006 fact 3), so
             // the restore MUST pass the same entry the original session/new
-            // did. Sharing checksMcpServerEntry with the fresh path keeps
+            // did. Sharing vendorMcpServers with the fresh path keeps
             // them identical while the daemon's port and token are stable.
             // Honest limitation: if the daemon restarts on a DIFFERENT port
             // (or with a rotated daemon token, which changes every derived
