@@ -128,16 +128,30 @@ struct ParseBaseURLTests {
         ("http://127.0.0.1:7331", "http://127.0.0.1:7331"),
         (" https://mac.example.ts.net/ ", "https://mac.example.ts.net"),
         ("HTTPS://mac.example.ts.net/monad//", "https://mac.example.ts.net/monad"),
+        ("http://localhost:7331", "http://localhost:7331"),
+        ("http://[::1]:7331", "http://[::1]:7331"),
     ])
     func accepts(input: String, expected: String) throws {
         #expect(try DaemonClient.parseBaseURL(input).absoluteString == expected)
     }
 
-    @Test("refuses anything that is not an http(s) address with a host", arguments: [
+    @Test("refuses anything that is not an http(s) address with a host, and plain http off this device", arguments: [
         "", "127.0.0.1:7331", "ftp://host", "http://", "https://host/?q=1", "monad",
+        "http://mac.local:7331", "http://192.168.1.20:7331", "http://100.64.0.1:7331", "http://mac.example.ts.net",
     ])
     func refuses(input: String) {
         #expect(throws: DaemonError.self) { try DaemonClient.parseBaseURL(input) }
+    }
+}
+
+@Suite("Transport")
+struct TransportTests {
+    @Test("real requests go through a session that writes nothing to disk")
+    func ephemeralSession() {
+        let configuration = DaemonClient.session.configuration
+        #expect(configuration.urlCache == nil)
+        #expect(configuration.requestCachePolicy == .reloadIgnoringLocalCacheData)
+        #expect(configuration.httpCookieStorage == nil)
     }
 }
 

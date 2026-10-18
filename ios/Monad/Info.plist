@@ -26,9 +26,10 @@
 	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<!-- Plain http only to loopback and .local (a daemon on the same Mac,
-		     reached from the Simulator). Anything else must be https, for
-		     example the daemon published on the tailnet with tailscale serve. -->
+		<!-- ATS also permits .local and LAN addresses here; the app itself
+		     (DaemonClient.parseBaseURL) narrows plain http to loopback, the
+		     daemon on the same Mac reached from the Simulator. Anything else
+		     must be https, for example tailscale serve on the tailnet. -->
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>

@@ -12,7 +12,7 @@ enum DaemonError: Error, Equatable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidURL(let text):
-            "\"\(text)\" is not a daemon address. Use http://127.0.0.1:7331 in the Simulator, or the https address the daemon is published on."
+            "\"\(text)\" is not a daemon address. Use http://127.0.0.1:7331 in the Simulator, or the https address the daemon is published on. Plain http is allowed only to this device."
         case .unauthorized:
             "The daemon refused the token. Copy it again from the token file in the daemon's state directory (~/.monad/token)."
         case .notFound(let message):
@@ -36,19 +36,36 @@ struct DaemonClient: Sendable {
     private let token: String
     private let send: Send
 
-    init(baseURL: URL, token: String, send: @escaping Send = { try await URLSession.shared.data(for: $0) }) {
+    init(baseURL: URL, token: String, send: @escaping Send = { try await DaemonClient.session.data(for: $0) }) {
         self.baseURL = baseURL
         self.token = token
         self.send = send
     }
 
-    /// Parses what a person typed as the daemon address: a scheme is required
-    /// and only http and https are accepted; a trailing slash is dropped.
+    /// The session every real request goes through. Ephemeral, so nothing is
+    /// written to disk: URLSession.shared caches each request with its
+    /// headers, which put the bearer token (and transcripts) in the app's
+    /// Cache.db.
+    static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.httpCookieStorage = nil
+        return URLSession(configuration: configuration)
+    }()
+
+    /// Hosts plain http may go to: the token travels in every request, so
+    /// anything off this device must be https.
+    static let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "::1"]
+
+    /// Parses what a person typed as the daemon address: a scheme is required,
+    /// https anywhere and http only to loopback; a trailing slash is dropped.
     static func parseBaseURL(_ text: String) throws(DaemonError) -> URL {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let components = URLComponents(string: trimmed),
               let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
-              let host = components.host, !host.isEmpty,
+              let host = components.host?.lowercased(), !host.isEmpty,
+              scheme == "https" || loopbackHosts.contains(host.trimmingCharacters(in: ["[", "]"])),
               components.query == nil, components.fragment == nil
         else { throw .invalidURL(trimmed) }
         var clean = components
