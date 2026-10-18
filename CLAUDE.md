@@ -14,4 +14,7 @@ Rules:
 - Local-first: SQLite under ~/.monad, loopback only, no telemetry, no cloud dependency.
 - Never store or log vendor auth tokens. Vendor agents authenticate inside their own binaries.
 - Out of scope until its milestone: checks, review mode, GitHub App, native loop, desktop,
-  web, phone. Do not scaffold them early.
+  web. Do not scaffold them early.
+- The phone app is `ios/` (read-only v0, decision record 0013). It is an XcodeGen project:
+  edit `ios/project.yml`, never a generated `.xcodeproj`; `make -C ios test` must pass before
+  committing iOS changes. It never widens the daemon's bind.

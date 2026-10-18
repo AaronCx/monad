@@ -137,7 +137,8 @@ session (interactive ones too), so "run the checks" is a tool call rather than a
    `--post` COMMENT reviews
 3. M3: GitHub App trigger, Check Runs and review comments
 4. M4: Codex and Gemini backends, native loop for API-key and self-hosted models
-5. Later: desktop (Tauri sidecar), web, phone attach
+5. Later: desktop (Tauri sidecar), web, phone attach (a read-only iPhone client is in `ios/`,
+   decision record 0013)
 
 ## Lineage
 
