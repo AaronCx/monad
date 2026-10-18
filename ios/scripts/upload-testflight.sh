@@ -6,15 +6,19 @@
 # /Applications/Xcode.app, the "Apple Distribution" identity in
 # relay-ci.keychain with its password in ~/.appstoreconnect/relay-ci-keychain-pass,
 # the "monad App Store" provisioning profile installed, the App Store Connect
-# API key under ~/.appstoreconnect/private_keys, and PyJWT for python3.
+# API key under ~/.appstoreconnect/private_keys with its key and issuer IDs in
+# ~/.appstoreconnect/asc.env (ASC_KEY_ID=..., ASC_ISSUER_ID=...; not in this
+# repo), and PyJWT for python3.
 # The build number is CURRENT_PROJECT_VERSION in project.yml: bump it first.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 APP_ID=6824323496
 TEAM=P6VJJ7XQN9
-KEY_ID=B8TL82C268
-ISSUER=12c7020e-9bb7-4f89-aa7d-0b9818f9bc61
+ASC_ENV="$HOME/.appstoreconnect/asc.env"
+[[ -r "$ASC_ENV" ]] && source "$ASC_ENV"
+KEY_ID="${ASC_KEY_ID:?set ASC_KEY_ID in $ASC_ENV or the environment}"
+ISSUER="${ASC_ISSUER_ID:?set ASC_ISSUER_ID in $ASC_ENV or the environment}"
 KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_$KEY_ID.p8"
 BUILD=$(awk '/CURRENT_PROJECT_VERSION:/ {print $2; exit}' project.yml)
 VERSION=$(awk '/MARKETING_VERSION:/ {gsub(/"/, "", $2); print $2; exit}' project.yml)
@@ -23,7 +27,10 @@ ARCHIVE="$ARCHIVE_DIR/Monad-$VERSION-$BUILD.xcarchive"
 mkdir -p "$ARCHIVE_DIR"
 [[ -z "$(git status --porcelain -- .)" ]] || { echo "ios/ has uncommitted changes; commit first" >&2; exit 1; }
 
-security unlock-keychain -p "$(cat "$HOME/.appstoreconnect/relay-ci-keychain-pass")" relay-ci.keychain
+# The password goes to security over stdin (printf is a builtin), never on
+# argv where ps or an xtrace run would show it.
+{ set +x; } 2>/dev/null
+printf 'unlock-keychain -p "%s" relay-ci.keychain\n' "$(cat "$HOME/.appstoreconnect/relay-ci-keychain-pass")" | security -i >/dev/null
 xcodegen generate --spec project.yml
 xcodebuild -project Monad.xcodeproj -scheme Monad -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" archive \
