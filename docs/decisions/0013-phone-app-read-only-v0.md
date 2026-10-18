@@ -27,8 +27,11 @@ listens on 127.0.0.1 only.
 - **The token** is stored in the iOS Keychain (`WhenUnlockedThisDeviceOnly`), never in
   UserDefaults. A Debug-only launch environment (`MONAD_DAEMON_URL`, `MONAD_DAEMON_TOKEN`)
   connects without typing, for driving the app in the Simulator; Release does not compile it.
-- **Transport:** the app allows plain http only to loopback and `.local`
-  (`NSAllowsLocalNetworking`). Anything else must be https.
+- **Transport:** plain http only to loopback (the daemon on the same Mac, from the Simulator);
+  anything else must be https, since the bearer token is in every request. Requests use an
+  ephemeral URLSession: nothing is cached on disk (the default session's cache stored each
+  request with its Authorization header). ATS (`NSAllowsLocalNetworking`) is broader than
+  this; the app's own check is the narrower one.
 
 ## Not decided here: how a phone reaches the daemon
 

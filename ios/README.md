@@ -13,6 +13,10 @@ make test-live                # drive the app against a running monadd on 127.0.
 make test-live DAEMON_URL=http://127.0.0.1:7341 DAEMON_TOKEN_FILE=~/.monad-link/token
 ```
 
+`make test-live` hands the daemon token to the test runner, and the Simulator's system log keeps
+the launch environment, so run it against a throwaway daemon (its own `MONAD_HOME`) or rotate
+that daemon's token afterwards.
+
 ## Connecting
 
 - **Simulator on the daemon's Mac:** `http://127.0.0.1:7331` and the contents of
